@@ -1,4 +1,5 @@
-/** @type {import('tailwindcss').Config} */
+import type { Config } from "tailwindcss";
+
 export default {
   content: {
     relative: true,
@@ -42,4 +43,4 @@ export default {
       },
     },
   },
-};
+} satisfies Config;
