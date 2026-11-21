@@ -134,21 +134,32 @@ impl Collector {
             Ok(result) => Outcome::collected(result),
             Err(error) => Outcome::failed(error),
         };
-        if let (Some(plan), Some(result)) = (&claim.export_plan, &outcome.result)
-            && result.has_fields()
-        {
-            outcome.output = Some(
-                crate::output::prepare(
-                    &self.client,
-                    emby.as_deref(),
-                    plan,
-                    claim.batch,
-                    claim.id,
-                    result,
-                    &claim.source_files,
-                )
-                .await,
-            );
+        if let Some(result) = outcome.result.as_ref().filter(|result| result.has_fields()) {
+            let plan = claim.export_plan.as_ref();
+            if let Some(data) = crate::output::emby_source(&result.record) {
+                let media_paths = plan.and_then(|plan| plan.media_paths.clone()).or_else(|| {
+                    self.output_settings()
+                        .map(|settings| settings.media_paths())
+                });
+                if let (Some(emby), Some(paths)) = (emby.as_deref(), media_paths) {
+                    outcome.output = Some(
+                        crate::output::prepare_emby(&self.client, emby, &paths, data, result).await,
+                    );
+                }
+            } else if let Some(plan) = plan.filter(|plan| plan.directory.is_some()) {
+                outcome.output = Some(
+                    crate::output::prepare(
+                        &self.client,
+                        emby.as_deref(),
+                        plan,
+                        claim.batch,
+                        claim.id,
+                        result,
+                        &claim.source_files,
+                    )
+                    .await,
+                );
+            }
         }
         Some(outcome)
     }

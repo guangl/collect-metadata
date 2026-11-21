@@ -10,12 +10,7 @@ use serde_json::Value;
 
 use super::{OutputFile, media, settings::OutputOptions};
 
-pub(super) fn documents(
-    record: &Value,
-    options: &OutputOptions,
-    source_files: &[String],
-    files: &[OutputFile],
-) -> BTreeMap<String, String> {
+pub(super) fn work_xml(record: &Value, options: &OutputOptions, files: &[OutputFile]) -> String {
     let fields = &record["fields"];
     let episode = record["scope"] == "episode";
     let series = record["media_type"] == "series" && !episode;
@@ -209,22 +204,33 @@ pub(super) fn documents(
                 .find_map(|source| media::web_url(&source["url"]))
         }),
     );
-    let work = xml(root, &body);
+    xml(root, &body)
+}
+
+pub(super) fn documents(
+    record: &Value,
+    options: &OutputOptions,
+    source_files: &[String],
+    files: &[OutputFile],
+) -> BTreeMap<String, String> {
+    let work = work_xml(record, options, files);
+    let fields = &record["fields"];
+    let episode = record["scope"] == "episode";
+    let series = record["media_type"] == "series" && !episode;
     let mut result = BTreeMap::new();
     if series {
         result.insert("tvshow.nfo".to_owned(), work);
         if options.episodes {
             for path in source_files {
                 if let Some((name, season, number)) = episode_path(path)
-                    && let Some(episode) =
-                        fields["episodes"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .find(|episode| {
-                                episode["season"].as_u64() == Some(season)
-                                    && episode["number"].as_u64() == Some(number)
-                            })
+                    && let Some(episode) = fields["episodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|episode| {
+                            episode["season"].as_u64() == Some(season)
+                                && episode["number"].as_u64() == Some(number)
+                        })
                 {
                     result.insert(
                         format!("{name}.nfo"),

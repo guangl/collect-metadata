@@ -481,15 +481,11 @@ impl Emby {
         } else {
             (Vec::new(), true)
         };
-        let mut details = fields(&item, &children);
-        if item_type == "Episode" {
-            details.extend(field_map([
-                ("series", item["SeriesName"].clone()),
-                ("season_number", item["ParentIndexNumber"].clone()),
-                ("episode_number", item["IndexNumber"].clone()),
-                ("episode_last_number", item["IndexNumberEnd"].clone()),
-            ]));
-        }
+        let details = if item_type == "Episode" {
+            episode_fields(&item)
+        } else {
+            fields(&item, &children)
+        };
         let source_url = self.endpoint(&format!("web/index.html#!/item?id={id}"));
         let mut source = Source::found(
             "Emby",
@@ -846,6 +842,17 @@ pub(crate) fn credit_role(item: &Value, person: &Value) -> &'static str {
         "producer" => "producer",
         _ => "crew",
     }
+}
+
+pub(crate) fn episode_fields(item: &Value) -> crate::collect::Fields {
+    let mut details = fields(item, &[]);
+    details.extend(field_map([
+        ("series", item["SeriesName"].clone()),
+        ("season_number", item["ParentIndexNumber"].clone()),
+        ("episode_number", item["IndexNumber"].clone()),
+        ("episode_last_number", item["IndexNumberEnd"].clone()),
+    ]));
+    details
 }
 
 fn fields(item: &Value, children: &[Value]) -> crate::collect::Fields {

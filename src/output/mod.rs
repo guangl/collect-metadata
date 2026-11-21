@@ -1,4 +1,5 @@
 mod assets;
+mod emby;
 mod media;
 mod naming;
 mod nfo;
@@ -51,15 +52,39 @@ struct OutputFile {
     person: Option<String>,
 }
 
-pub(crate) struct PreparedExport {
+pub(crate) enum PreparedExport {
+    Batch(BatchExport),
+    Emby(emby::MediaExport),
+}
+
+impl PreparedExport {
+    pub(crate) fn publish(self) -> OutputReport {
+        match self {
+            Self::Batch(batch) => batch.publish(),
+            Self::Emby(media) => media.publish(),
+        }
+    }
+}
+
+pub(crate) fn emby_source(record: &Value) -> Option<&Value> {
+    record["sources"]
+        .as_array()?
+        .iter()
+        .find(|source| source["provider"] == "Emby")
+        .map(|source| &source["data"])
+}
+
+pub(crate) use emby::prepare as prepare_emby;
+
+pub(crate) struct BatchExport {
     temporary: tempfile::TempDir,
     destination: PathBuf,
     owner: String,
     report: OutputReport,
 }
 
-impl PreparedExport {
-    pub(crate) fn publish(self) -> OutputReport {
+impl BatchExport {
+    fn publish(self) -> OutputReport {
         let Some(parent) = self.destination.parent() else {
             return OutputReport::error("输出目录无效。");
         };
@@ -100,8 +125,12 @@ pub(crate) async fn prepare(
     result: &LookupResponse,
     source_files: &[String],
 ) -> Result<PreparedExport, OutputReport> {
-    let parent = plan.directory.join(format!("batch-{batch}"));
-    if plan.directory.canonicalize().ok().as_deref() != Some(&plan.directory) {
+    let root = plan
+        .directory
+        .as_deref()
+        .ok_or_else(|| OutputReport::error("未配置批次输出目录。"))?;
+    let parent = root.join(format!("batch-{batch}"));
+    if root.canonicalize().ok().as_deref() != Some(root) {
         return Err(OutputReport::error("输出目录已移动或不可用。"));
     }
     settings::make_child_dir(&parent).map_err(|_| OutputReport::error("无法创建批次输出目录。"))?;
@@ -215,12 +244,12 @@ pub(crate) async fn prepare(
             "provider": source["provider"], "url": source["url"],
         })).collect::<Vec<_>>()
     })).map_err(|_| OutputReport::error("无法写入输出清单。"))?;
-    Ok(PreparedExport {
+    Ok(PreparedExport::Batch(BatchExport {
         temporary,
         destination,
         owner: plan.owner.clone(),
         report,
-    })
+    }))
 }
 
 fn metadata(record: &Value, options: &settings::OutputOptions, source_files: &[String]) -> Value {
@@ -307,8 +336,9 @@ mod tests {
         .unwrap();
         let plan = ExportPlan {
             owner: "test-worker".into(),
-            directory: root.clone(),
+            directory: Some(root.clone()),
             options,
+            media_paths: None,
         };
         let result = LookupResponse {
             record: json!({

@@ -457,8 +457,9 @@ mod tests {
             storage_error: None,
         };
         let plan = ExportPlan {
-            directory: directory.path().canonicalize().unwrap(),
+            directory: Some(directory.path().canonicalize().unwrap()),
             owner: "test".into(),
+            media_paths: None,
             options: serde_json::from_value(json!({
                 "metadata":false,"poster":false,"emby_nfo":true,
                 "trailers":true,"theme_videos":true,"theme_music":true,"extras":true
@@ -468,11 +469,11 @@ mod tests {
         let prepared = prepare(&client, Some(&emby), &plan, 1, 2, &lookup, &[])
             .await
             .unwrap_or_else(|_| panic!("prepare"));
-        assert!(!plan.directory.join("batch-1/work-2").exists());
+        let work = plan.directory.as_ref().unwrap().join("batch-1/work-2");
+        assert!(!work.exists());
         let report = prepared.publish();
         assert_eq!(report.written, 5);
         assert_eq!(report.failed, 1);
-        let work = plan.directory.join("batch-1/work-2");
         assert_eq!(fs::read(work.join("trailers/trailer-01.mp4")).unwrap(), MP4);
         assert_eq!(
             fs::read(work.join("backdrops/theme_video-01.mp4")).unwrap(),

@@ -75,7 +75,7 @@ export function OutputSettings() {
     setBusy("save");
     try {
       setSettings(await saveOutputSettings(settings.options));
-      setMessage({ text: "已保存，设置应用于新建的文件夹批次。" });
+      setMessage({ text: "已保存，设置应用于新的刮削任务。" });
     } catch (error) {
       setMessage({ text: errorText(error), error: true });
     } finally {
@@ -84,13 +84,42 @@ export function OutputSettings() {
   }
 
   const options = settings?.options;
+  const mappings = options?.emby_paths ?? [];
   return (
     <section className="space-y-3" aria-labelledby="output-title">
       <div className="section-heading"><h2 id="output-title">刮削输出</h2></div>
       {settings && options ? (
         <form className="panel batch-form" onSubmit={save}>
+          <fieldset className="output-naming" disabled={busy !== null}>
+            <legend>Emby 媒体写回</legend>
+            <p className="muted">NFO 和图片写到对应的媒体目录，写回时会更新同名文件。</p>
+            {settings.root && (settings.emby_root
+              ? <p className="muted">本地目录填写 <code>{settings.emby_root}</code> 下的相对路径，留空使用挂载根目录。</p>
+              : <p className="muted">请先给 Web 服务配置可写媒体挂载 <code>EMBY_WRITEBACK_ROOT</code>。</p>)}
+            {mappings.map((mapping, index) => (
+              <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end" key={index}>
+                <label className="batch-input">
+                  Emby 端目录
+                  <input className="field w-full" value={mapping.server} placeholder="/media/Movies"
+                    onChange={(event) => change("emby_paths", mappings.map((row, i) =>
+                      i === index ? { ...row, server: event.target.value } : row))} />
+                </label>
+                <label className="batch-input">
+                  本地目录
+                  <input className="field w-full" value={mapping.local} placeholder={settings.root ? "Movies" : "/Volumes/Media/Movies"}
+                    onChange={(event) => change("emby_paths", mappings.map((row, i) =>
+                      i === index ? { ...row, local: event.target.value } : row))} />
+                </label>
+                <button className="secondary" type="button" onClick={() => change("emby_paths", mappings.filter((_, i) => i !== index))}>移除</button>
+              </div>
+            ))}
+            {(!settings.root || settings.emby_root) && <button className="secondary" type="button"
+              disabled={mappings.length >= 32} onClick={() => change("emby_paths", [...mappings, { server: "", local: "" }])}>
+              添加路径映射
+            </button>}
+          </fieldset>
           <label className="check-option"><input type="checkbox" checked={options.enabled}
-            disabled={busy !== null} onChange={(event) => change("enabled", event.target.checked)} />写出刮削文件</label>
+            disabled={busy !== null} onChange={(event) => change("enabled", event.target.checked)} />将其他来源的刮削文件另存到输出目录</label>
           <label className="batch-input" htmlFor="output-directory">输出路径</label>
           <div className="grid w-full gap-2 sm:flex sm:[&>button]:shrink-0">
             <input className="field w-full" id="output-directory" value={options.directory} readOnly={settings.root === null}

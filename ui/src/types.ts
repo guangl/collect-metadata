@@ -19,6 +19,7 @@ export type PortraitRole = "actor" | "voice" | "director" | "writer" | "crew";
 export interface OutputOptions {
   enabled: boolean;
   directory: string;
+  emby_paths: { server: string; local: string }[];
   directory_template: string;
   filename_prefix: string;
   metadata: boolean;
@@ -104,6 +105,7 @@ export interface EmbyEpisodePreview {
 
 export interface OutputSettingsView {
   root: string | null;
+  emby_root: string | null;
   options: OutputOptions;
 }
 

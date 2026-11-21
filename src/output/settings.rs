@@ -7,6 +7,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use super::emby::{MediaPaths, PathMapping};
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PortraitRole {
@@ -34,6 +36,7 @@ impl PortraitRole {
 pub struct OutputOptions {
     enabled: bool,
     directory: String,
+    emby_paths: Vec<PathMapping>,
     pub(super) directory_template: String,
     pub(super) filename_prefix: String,
     pub(super) metadata: bool,
@@ -58,6 +61,7 @@ impl Default for OutputOptions {
         Self {
             enabled: false,
             directory: String::new(),
+            emby_paths: Vec::new(),
             directory_template: super::naming::DEFAULT_WORK_NAME.to_owned(),
             filename_prefix: String::new(),
             metadata: true,
@@ -82,8 +86,10 @@ impl Default for OutputOptions {
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ExportPlan {
     pub(crate) owner: String,
-    pub(super) directory: PathBuf,
+    pub(crate) directory: Option<PathBuf>,
     pub(super) options: OutputOptions,
+    #[serde(default)]
+    pub(crate) media_paths: Option<MediaPaths>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -96,11 +102,13 @@ struct SavedSettings {
 pub struct OutputSettingsView {
     options: OutputOptions,
     root: Option<String>,
+    emby_root: Option<String>,
 }
 
 pub struct OutputSettings {
     file: PathBuf,
     root: Option<PathBuf>,
+    emby_root: Option<PathBuf>,
     state: Mutex<SavedSettings>,
 }
 
@@ -117,8 +125,14 @@ impl OutputSettings {
         Ok(Self {
             file,
             root,
+            emby_root: None,
             state: Mutex::new(state),
         })
+    }
+
+    pub fn with_emby_root(mut self, root: Option<PathBuf>) -> Self {
+        self.emby_root = root.filter(|root| root.is_absolute());
+        self
     }
 
     pub fn view(&self) -> OutputSettingsView {
@@ -133,6 +147,10 @@ impl OutputSettings {
                 .root
                 .as_ref()
                 .map(|root| root.to_string_lossy().into_owned()),
+            emby_root: self
+                .emby_root
+                .as_ref()
+                .map(|root| root.to_string_lossy().into_owned()),
         }
     }
 
@@ -140,6 +158,11 @@ impl OutputSettings {
         options.directory = options.directory.trim().to_owned();
         options.directory_template = options.directory_template.trim().to_owned();
         options.filename_prefix = options.filename_prefix.trim().to_owned();
+        PathMapping::validate(
+            &mut options.emby_paths,
+            self.root.is_some(),
+            self.emby_root.as_deref(),
+        )?;
         if !super::naming::validate(&options.directory_template)
             || !super::naming::validate(&options.filename_prefix)
         {
@@ -199,16 +222,44 @@ impl OutputSettings {
         Ok(state.owner.clone())
     }
 
-    pub(crate) fn plan(&self) -> Result<Option<ExportPlan>, String> {
+    pub(crate) fn emby_plan(&self) -> ExportPlan {
         let state = self.state.lock().expect("output settings lock");
-        if !state.options.enabled {
-            return Ok(None);
-        }
-        Ok(Some(ExportPlan {
+        ExportPlan {
             owner: state.owner.clone(),
-            directory: self.resolve(&state.options.directory)?,
+            directory: None,
             options: state.options.clone(),
-        }))
+            media_paths: Some(self.media_paths_for(&state)),
+        }
+    }
+
+    pub(crate) fn folder_plan(&self, read_emby: bool) -> Result<Option<ExportPlan>, String> {
+        let state = self.state.lock().expect("output settings lock");
+        let directory = state
+            .options
+            .enabled
+            .then(|| self.resolve(&state.options.directory))
+            .transpose()?;
+        let media_paths = read_emby.then(|| self.media_paths_for(&state));
+        Ok(
+            (directory.is_some() || media_paths.is_some()).then(|| ExportPlan {
+                owner: state.owner.clone(),
+                directory,
+                options: state.options.clone(),
+                media_paths,
+            }),
+        )
+    }
+
+    pub(crate) fn media_paths(&self) -> MediaPaths {
+        self.media_paths_for(&self.state.lock().expect("output settings lock"))
+    }
+
+    fn media_paths_for(&self, state: &SavedSettings) -> MediaPaths {
+        MediaPaths::new(
+            state.options.emby_paths.clone(),
+            self.root.is_some(),
+            self.emby_root.clone(),
+        )
     }
 
     fn resolve(&self, value: &str) -> Result<PathBuf, String> {
@@ -283,11 +334,11 @@ mod tests {
         )
         .unwrap();
         let settings = OutputSettings::load(config.clone(), Some(root.clone())).unwrap();
-        let initial = settings.plan().unwrap().unwrap();
+        let initial = settings.folder_plan(false).unwrap().unwrap();
         assert_eq!(initial.owner, "legacy");
         assert_eq!(initial.options.directory_template, "work-{row}");
         assert!(initial.options.filename_prefix.is_empty());
-        assert!(initial.directory.ends_with("export/old"));
+        assert!(initial.directory.unwrap().ends_with("export/old"));
 
         let options = |value| serde_json::from_value(value).unwrap();
         for bad in [
@@ -297,7 +348,15 @@ mod tests {
         ] {
             assert!(settings.save(options(bad)).is_err());
         }
-        assert_eq!(settings.plan().unwrap().unwrap().options.directory, "old");
+        assert_eq!(
+            settings
+                .folder_plan(false)
+                .unwrap()
+                .unwrap()
+                .options
+                .directory,
+            "old"
+        );
         let saved = settings
             .save(options(json!({"enabled":true,"directory":" new/film ",
             "directory_template":" {title} ","portraits":["writer","writer","crew"]})))
@@ -307,9 +366,9 @@ mod tests {
             json!(["writer", "crew"])
         );
         let reloaded = OutputSettings::load(config, Some(root)).unwrap();
-        let new_plan = reloaded.plan().unwrap().unwrap();
+        let new_plan = reloaded.folder_plan(false).unwrap().unwrap();
         assert_eq!(new_plan.owner, initial.owner);
         assert_eq!(new_plan.options.directory_template, "{title}");
-        assert!(new_plan.directory.ends_with("new/film"));
+        assert!(new_plan.directory.unwrap().ends_with("new/film"));
     }
 }

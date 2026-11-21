@@ -131,12 +131,12 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
     });
     let show = json!({
         "Id":"31","Type":"Series","Name":"资料剧集","OriginalTitle":"Poster Series","ProductionYear":2017,
-        "Overview":"这是简介","ProviderIds":{"Tmdb":"70523"},"ImageTags":{"Primary":"3"}
+        "Overview":"这是简介","Path":"/media/资料剧集","ProviderIds":{"Tmdb":"70523"},"ImageTags":{"Primary":"3"}
     });
     let extra = json!({"Id":"35","Type":"Series","Name":"本地剧集"});
     let episode = json!({
         "Id":"34","Type":"Episode","Name":"第一集","SeriesName":"资料剧集","Overview":"已有中文译文",
-        "IndexNumber":1,"ParentIndexNumber":1,"Path":"/media/资料剧集/S01E01.mkv",
+        "IndexNumber":1,"ParentIndexNumber":1,"Path":"/media/资料剧集/Season 1/S01E01.mkv",
         "ImageTags":{"Primary":"3"},"PremiereDate":"2022-02-02T00:00:00Z"
     });
     let video = json!({
@@ -158,7 +158,8 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
             json!({"Id":"32","Type":"Season","Name":"第一季","IndexNumber":1}),
             json!({"Id":"38","Type":"Season","Name":"特别篇","IndexNumber":0}),
             episode,
-            json!({"Id":"37","Type":"Episode","Name":"回归","IndexNumber":1,"SeasonId":"33"}),
+            json!({"Id":"37","Type":"Episode","Name":"回归","IndexNumber":1,"SeasonId":"33",
+                "Path":"/media/资料剧集/Season 2/S01E01.mkv"}),
         ],
         (_, Some("7")) => {
             let first = args.get("StartIndex").is_some_and(|index| index == "0");
@@ -357,6 +358,21 @@ async fn web_routes_persist_and_export_an_emby_batch() {
 async fn verify_web_routes(test_url: Url) {
     let workspace = tempfile::tempdir().unwrap();
     let config = workspace.path();
+    let media = config.join("media");
+    let series = media.join("资料剧集");
+    let season_one = series.join("Season 1");
+    let season_two = series.join("Season 2");
+    fs::create_dir_all(&season_one).unwrap();
+    fs::create_dir_all(&season_two).unwrap();
+    for video in [
+        media.join("海报电影.mkv"),
+        media.join("2024旅行.mov"),
+        season_one.join("S01E01.mkv"),
+        season_two.join("S01E01.mkv"),
+    ] {
+        fs::write(video, "video fixture").unwrap();
+    }
+    fs::write(season_one.join("S01E01.nfo"), "previous NFO").unwrap();
     let collector = Arc::new(
         Collector::from_database_url(test_url.as_str())
             .unwrap()
@@ -365,7 +381,8 @@ async fn verify_web_routes(test_url: Url) {
             ))
             .with_output_settings(Arc::new(
                 OutputSettings::load(config.join("output.json"), Some(config.join("outputs")))
-                    .unwrap(),
+                    .unwrap()
+                    .with_emby_root(Some(media.clone())),
             ))
             .with_emby_settings(Arc::new(
                 EmbySettings::load(config.join("emby.json")).unwrap(),
@@ -465,7 +482,8 @@ async fn verify_web_routes(test_url: Url) {
             .status(),
         400
     );
-    let preferences = json!({"enabled":true,"directory":"series","directory_template":"{title} ({year})","filename_prefix":"{id}",
+    let preferences = json!({"enabled":false,"directory":"series","directory_template":"{title} ({year})","filename_prefix":"{id}",
+        "emby_paths":[{"server":"/media","local":""}],
         "poster":true,"backdrop":true,"stills":true,"raw":true,"emby_nfo":true,"portraits":["director"]});
     assert_eq!(
         api.success("/api/settings/output", Some(preferences)).await["options"]["directory"],
@@ -546,19 +564,16 @@ async fn verify_web_routes(test_url: Url) {
     let rows = api.success(&format!("/api/batches/{imported}"), None).await;
     let rows = rows.as_array().unwrap();
     let film = rows.iter().find(|row| row["query"] == "emby:30").unwrap();
-    let path = film["output"]["directory"].as_str().unwrap();
-    assert!(path.contains("海报电影 (2019)"));
-    let files = fs::read_dir(path)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect::<Vec<_>>();
-    assert!(files.iter().any(|file| file == "Emby-30-metadata.json"));
-    assert!(files.iter().any(|file| file == "海报电影.nfo"));
-    assert!(
-        files
-            .iter()
-            .any(|file| file.to_string_lossy().starts_with("Emby-30-director-"))
-    );
+    assert_eq!(film["stage"], "success");
+    assert_eq!(Path::new(film["output"]["directory"].as_str().unwrap()), media);
+    assert!(media.join("海报电影.nfo").is_file());
+    assert!(media.join("海报电影-poster.jpg").is_file());
+    assert!(media.join("海报电影-thumb.jpg").is_file());
+    assert_eq!(fs::read_to_string(media.join("海报电影.mkv")).unwrap(), "video fixture");
+    let unlinked = rows.iter().find(|row| row["query"] == "emby:35").unwrap();
+    assert_eq!(unlinked["stage"], "partial");
+    assert!(unlinked["has_result"].as_bool().unwrap());
+    assert!(unlinked["output"]["message"].as_str().unwrap().contains("路径"));
     let video = rows.iter().find(|row| row["query"] == "emby:40").unwrap();
     assert_eq!(video["stage"], "success");
     let video_exports = std::path::Path::new(video["output"]["directory"].as_str().unwrap());
@@ -619,18 +634,22 @@ async fn verify_web_routes(test_url: Url) {
             assert_eq!(record["fields"]["episode_number"], 1);
             assert_eq!(record["fields"]["description"], "已有中文译文");
             assert!(record["sources"][0]["data"]["children"].as_array().unwrap().is_empty());
+            assert_eq!(directory, season_one);
             assert!(fs::read_to_string(directory.join("S01E01.nfo")).unwrap().contains("<episodedetails>"));
+            assert!(directory.join("S01E01-thumb.jpg").is_file());
             assert!(!directory.join("tvshow.nfo").exists());
-            let metadata: Value = serde_json::from_str(
-                &fs::read_to_string(directory.join("Emby-34-metadata.json")).unwrap(),
-            ).unwrap();
-            assert_eq!(metadata["scope"], "episode");
             assert_eq!(api.success("/api/history?kind=series", None).await[0]["scope"], "episode");
         } else {
             assert_eq!(record["fields"]["episodes"].as_array().unwrap().len(), 2);
+            assert_eq!(directory, series);
             assert!(directory.join("tvshow.nfo").exists());
+            assert!(directory.join("poster.jpg").exists());
+            assert!(fs::read_to_string(season_one.join("S01E01.nfo")).unwrap().contains("第一集"));
+            assert!(fs::read_to_string(season_two.join("S01E01.nfo")).unwrap().contains("回归"));
+            assert!(!directory.join("S01E01.nfo").exists());
         }
     }
+    assert!(!config.join("outputs").exists());
 
     api.success("/api/settings/emby", Some(emby_options)).await;
     let video_batch = api

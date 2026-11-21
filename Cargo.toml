@@ -7,9 +7,9 @@ default-run = "collect-metadata"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:cap-std", "dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener"]
 custom-protocol = ["desktop", "tauri/custom-protocol"]
-web = ["dep:axum", "dep:cap-std", "tokio/net", "tokio/rt-multi-thread"]
+web = ["dep:axum", "tokio/net", "tokio/rt-multi-thread"]
 
 [[bin]]
 name = "collect-metadata"
@@ -23,7 +23,7 @@ required-features = ["web"]
 
 [dependencies]
 axum = { version = "0.8", optional = true }
-cap-std = { version = "4", optional = true }
+cap-std = "4"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "query", "rustls", "stream", "system-proxy"] }
 regex = "1"

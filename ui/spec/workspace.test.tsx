@@ -280,7 +280,7 @@ describe("设置", () => {
     fireEvent.click(screen.getByLabelText("简介与宣传语", { exact: true }));
     expect(screen.getByText("寄生虫 (2019)-7/TMDB-movie-496243-metadata.json")).toBeTruthy();
     click("保存输出设置");
-    await screen.findByText("已保存，设置应用于新建的文件夹批次。");
+    await screen.findByText("已保存，设置应用于新的刮削任务。");
     const sent = calls.mock.calls.find(([route, options]) => route === "/api/settings/output" && options?.method === "POST");
     expect(JSON.parse(String(sent?.[1]?.body))).toMatchObject({
       directory: "media", directory_template: "{title} ({year})", filename_prefix: "{id}", portraits: ["actor"], backdrop: true, synopsis: false, trailers: true, theme_videos: true,

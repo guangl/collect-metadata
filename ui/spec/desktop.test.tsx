@@ -10,6 +10,7 @@ afterEach(() => {
 it("chooses and saves a native output directory and can reconnect PostgreSQL", async () => {
   const initial: OutputOptions = {
     enabled: false, directory: "", directory_template: "work-{row}", filename_prefix: "",
+    emby_paths: [],
     metadata: true, synopsis: true, credits: true, ratings: true, episodes: true,
     raw: false, emby_nfo: false, poster: true, backdrop: false, stills: false, trailers: false, theme_videos: false, theme_music: false, extras: false, portraits: [],
   };
@@ -52,13 +53,17 @@ it("chooses and saves a native output directory and can reconnect PostgreSQL", a
   expect(path.value).toBe("");
   fireEvent.click(button);
   await waitFor(() => expect(path.value).toBe("/Volumes/Export"));
-  fireEvent.click(screen.getByLabelText("写出刮削文件"));
+  fireEvent.click(screen.getByLabelText("将其他来源的刮削文件另存到输出目录"));
+  fireEvent.click(screen.getByRole("button", { name: "添加路径映射" }));
+  fireEvent.change(screen.getByLabelText("Emby 端目录"), { target: { value: "/media" } });
+  fireEvent.change(screen.getByLabelText("本地目录"), { target: { value: "/Volumes/Library" } });
   fireEvent.change(screen.getByLabelText("作品目录名"), { target: { value: "{title}" } });
   fireEvent.click(screen.getByLabelText("海报或封面"));
   fireEvent.click(screen.getByRole("button", { name: "保存输出设置" }));
-  expect(await screen.findByText("已保存，设置应用于新建的文件夹批次。")).toBeTruthy();
+  expect(await screen.findByText("已保存，设置应用于新的刮削任务。")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("save_output_settings", {
-    options: { ...initial, enabled: true, directory: "/Volumes/Export", directory_template: "{title}", poster: false },
+    options: { ...initial, enabled: true, directory: "/Volumes/Export", directory_template: "{title}", poster: false,
+      emby_paths: [{ server: "/media", local: "/Volumes/Library" }] },
   });
 
   const url = screen.getByLabelText("PostgreSQL 连接地址") as HTMLInputElement;

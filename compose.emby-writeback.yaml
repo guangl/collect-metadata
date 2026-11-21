@@ -1,0 +1,10 @@
+services:
+  app:
+    environment:
+      EMBY_WRITEBACK_ROOT: /emby-media
+    volumes:
+      - type: bind
+        source: ${EMBY_WRITEBACK_MOUNT:?请指定可写媒体目录 EMBY_WRITEBACK_MOUNT}
+        target: /emby-media
+        bind:
+          create_host_path: false

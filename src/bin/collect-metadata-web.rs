@@ -83,7 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = OutputSettings::load(
         config.with_file_name("output-settings.json"),
         Some(output_root),
-    )?;
+    )?
+    .with_emby_root(env::var_os("EMBY_WRITEBACK_ROOT").map(PathBuf::from));
     let emby = Arc::new(EmbySettings::load(
         config.with_file_name("emby-settings.json"),
     )?);

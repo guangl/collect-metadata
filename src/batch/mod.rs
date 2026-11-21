@@ -310,9 +310,9 @@ impl Collector {
         }
         let settings = self.output_settings().ok_or("后台输出配置不可用。")?;
         let owner = settings.durable_owner()?;
-        let export = settings.plan()?;
+        let export = settings.emby_plan();
         store
-            .create_batch(items, false, Some(name), export.as_ref(), Some(&owner))
+            .create_batch(items, false, Some(name), Some(&export), Some(&owner))
             .await
             .map_err(|_| "无法保存 Emby 导入批次。".into())
     }
@@ -327,19 +327,19 @@ impl Collector {
                 .await
                 .map_err(|_| "无法识别目录中的视频文件。")??;
         if !items.is_empty() {
+            let read_emby = self
+                .emby_settings()
+                .and_then(|settings| settings.active())
+                .is_some();
             let export = self
                 .output_settings()
-                .map(|settings| settings.plan())
+                .map(|settings| settings.folder_plan(read_emby))
                 .transpose()?
                 .flatten();
             let folder_name = items[0].source_files[0]
                 .split_once('/')
                 .map(|(name, _)| name.to_owned());
-            let owner = if self
-                .emby_settings()
-                .and_then(|settings| settings.active())
-                .is_some()
-            {
+            let owner = if read_emby {
                 self.output_settings()
                     .map(|settings| settings.durable_owner())
                     .transpose()?
