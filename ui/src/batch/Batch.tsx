@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
-import { chooseBatchCandidate, chooseMediaFolder, controlBatch, createBatch, createFolderBatch, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, isDesktop, listBatches, previewMountedFolder, retryBatchRow } from "../api";
+import { chooseBatchCandidate, chooseMediaFolder, controlBatch, createBatch, createFolderBatch, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, importEmbyLibrary, isDesktop, listBatches, previewMountedFolder, retryBatchRow } from "../api";
 import { languageText, PosterArt } from "../Catalog";
 import { DetailDialog } from "../DetailDialog";
 import { formatDate } from "../Movie";
 import { errorText, mediaLabels, providerLabels } from "../types";
-import type { Candidate, EmbyLibraryPreview, EmbyScrapeScope, LookupResponse, MediaType, StorageStatus } from "../types";
+import type { Candidate, EmbyLibraryPreview, EmbyScrapeTarget, LookupResponse, MediaType, StorageStatus } from "../types";
 import { EmbyCatalog } from "./EmbyCatalog";
 import { MountedFolderPicker } from "./MountedFolderPicker";
 import { AV_PREFIXES, MAX_FOLDER_FILES, MAX_ITEMS, parseBatch, terminal } from "./engine";
@@ -348,9 +348,11 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     }
   }
 
-  const submitEmbyItem = useCallback((id: string, scope: EmbyScrapeScope) => {
-    const label = scope === "episode" ? "分集" : "剧集";
-    return queueEmby(() => importEmbyItem(id, scope), `已将所选${label}提交到后台任务。`);
+  const submitEmbyTarget = useCallback((target: EmbyScrapeTarget, name: string) => {
+    const request = target.type === "library"
+      ? () => importEmbyLibrary(target.id)
+      : () => importEmbyItem(target.id, target.scope);
+    return queueEmby(request, `已将「${name}」提交到后台任务。`);
   }, [queueEmby]);
 
   async function open(row: BatchRow, opener: HTMLButtonElement) {
@@ -422,7 +424,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
                 setEmbyRefresh((value) => value + 1);
               }}>刷新媒体库</button>}
             {embyCount > 0 && <button className="primary" type="button" disabled={sourceBusy || storage !== "ready"}
-              onClick={submitEmby}>{submitting ? "正在提交…" : "开始刮削元数据"}</button>}
+              onClick={submitEmby}>{submitting ? "正在提交…" : "刮削全部媒体库"}</button>}
           </div>}
         </div>
         {!embyResult && <p className="catalog-empty" role="status">正在读取 Emby 媒体库…</p>}
@@ -430,7 +432,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
         {embyImportError && <p className="batch-error" role="alert">{embyImportError}</p>}
         {embyResult && !libraries && !embyError && <p className="catalog-empty">连接 Emby 后会自动显示全部媒体库。</p>}
         {libraries && (libraries.length > 0
-          ? <EmbyCatalog libraries={libraries} canScrape={!sourceBusy && storage === "ready"} onScrape={submitEmbyItem} />
+          ? <EmbyCatalog libraries={libraries} canScrape={!sourceBusy && storage === "ready"} onScrape={submitEmbyTarget} />
           : <p className="catalog-empty">Emby 尚无媒体库。</p>)}
       </section>}
       {preview && <section className="mt-5 min-w-0" aria-labelledby="folder-preview-heading">

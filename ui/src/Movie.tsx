@@ -41,6 +41,11 @@ const factLabels: Record<string, string> = {
   episode_count: "集数",
   imdb_id: "IMDb ID",
   tmdb_id: "TMDB ID",
+  bangumi_id: "Bangumi ID",
+  imdb_rating: "IMDb 评分",
+  critic_rating: "影评人评分",
+  official_rating: "分级",
+  tags: "标签",
   tagline: "宣传语",
   official_url: "官方网站",
   watch_providers_source: "播放平台数据来源",
@@ -70,10 +75,11 @@ const factLabels: Record<string, string> = {
 };
 const keyFacts = [
   "original_languages", "content_id", "release_date", "end_date", "runtime_minutes", "rating",
-  "countries", "studio", "label", "series", "network", "status", "season_number", "episode_number", "episode_last_number", "season_count", "episode_count", "imdb_id", "tmdb_id",
+  "imdb_rating", "critic_rating", "official_rating",
+  "countries", "studio", "label", "series", "network", "status", "season_number", "episode_number", "episode_last_number", "season_count", "episode_count", "imdb_id", "tmdb_id", "bangumi_id",
 ];
 const additionalFacts = [
-  "title_ja", "title_original", "title_en", "title_site", "genres", "tagline",
+  "title_ja", "title_original", "title_en", "title_site", "genres", "tagline", "tags",
   "cover_url", "poster_url", "backdrop_url", "trailer_url", "official_url",
 ];
 
@@ -114,10 +120,11 @@ function FactValue({ name, value, onError }: { name: string; value: unknown; onE
   if (name.endsWith("_url") && typeof value === "string") {
     return <ExternalLink value={value} onError={onError}>打开链接 ↗</ExternalLink>;
   }
-  if (name === "rating" && value && typeof value === "object" && "value" in value && "scale" in value) {
+  if ((name === "rating" || name === "imdb_rating") && value && typeof value === "object" && "value" in value && "scale" in value) {
     const count = "count" in value && typeof value.count === "number" ? " · " + value.count + " 人评价" : "";
     return <>{String(value.value)} / {String(value.scale)}{count}</>;
   }
+  if (name === "critic_rating") return <>{String(value)} / 100</>;
   if (name === "runtime_minutes") return <>{String(value)} 分钟</>;
   if (Array.isArray(value)) return name === "original_languages" ? languageText(value) : value.join(" · ");
   return String(value);

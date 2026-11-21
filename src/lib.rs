@@ -17,8 +17,8 @@ pub use storage::HistoryItem;
 
 pub use batch::{
     BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice,
-    EmbyScrapeScope, FolderBatchResult, FolderPreview, FolderSelection, FolderWorkPreview, MAX_FOLDER_FILES,
-    preview_folder,
+    EmbyOverwriteInput, EmbyScrapeScope, FolderBatchResult, FolderPreview, FolderSelection,
+    FolderWorkPreview, MAX_FOLDER_FILES, preview_folder,
 };
 #[cfg(feature = "web")]
 pub use batch::{browse_mounted_folders, scan_mounted_folder};

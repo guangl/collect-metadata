@@ -15,11 +15,11 @@ use std::{
 use collect_metadata::scan_folder_paths;
 use collect_metadata::{
     BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice, Collector,
-    EmbyInput, EmbyLibrary, EmbyLibraryPreview, EmbyPreviewImage, EmbyScrapeScope, EmbySeriesPreview, EmbySettings,
-    EmbySettingsView, EmbyWorkPreview, FolderBatchResult, FolderSelection, HistoryItem,
-    LanguageSettings, LanguageSettingsView, LookupResponse, MediaKind, MediaProvider,
-    OutputOptions, OutputSettings, OutputSettingsView, SearchResult, TmdbSettings, TmdbStatus,
-    scan_native_folder,
+    EmbyInput, EmbyLibrary, EmbyLibraryPreview, EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope,
+    EmbySeriesPreview, EmbySettings, EmbySettingsView, EmbyWorkPreview, FolderBatchResult,
+    FolderSelection, HistoryItem, LanguageSettings, LanguageSettingsView, LookupResponse, MediaKind,
+    MediaProvider, OutputOptions, OutputSettings, OutputSettingsView, SearchResult, TmdbSettings,
+    TmdbStatus, scan_native_folder,
 };
 use serde_json::Value;
 use tauri::{
@@ -152,6 +152,14 @@ async fn import_emby_item(
     scope: EmbyScrapeScope,
 ) -> Result<i64, String> {
     state.collector().import_emby_item(&id, scope).await
+}
+
+#[tauri::command]
+async fn overwrite_emby(
+    state: State<'_, DesktopState>,
+    input: EmbyOverwriteInput,
+) -> Result<(), String> {
+    state.collector().overwrite_emby(input).await
 }
 
 #[tauri::command]
@@ -534,6 +542,7 @@ fn main() {
             emby_catalog,
             import_emby_catalog,
             import_emby_item,
+            overwrite_emby,
             emby_preview_image,
             emby_series_preview,
             emby_credits,

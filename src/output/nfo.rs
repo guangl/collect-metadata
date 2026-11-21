@@ -70,6 +70,7 @@ pub(super) fn work_xml(record: &Value, options: &OutputOptions, files: &[OutputF
         ("tmdb", "tmdb_id"),
         ("imdb", "imdb_id"),
         ("tvdb", "tvdb_id"),
+        ("bangumi", "bangumi_id"),
     ] {
         if let Some(id) = present(&fields[key]) {
             let _ = writeln!(
@@ -372,6 +373,14 @@ fn rating_tags(body: &mut String, fields: &Value) {
     }
     number_tag(body, "votes", rating["count"].as_u64());
     number_tag(body, "criticrating", fields["critic_rating"].as_f64());
+    let imdb = &fields["imdb_rating"];
+    if let (Some(value), Some(count)) = (imdb["value"].as_f64(), imdb["count"].as_u64())
+        && (1.0..=10.0).contains(&value) && count > 0
+    {
+        let _ = writeln!(body,
+            "  <ratings><rating name=\"imdb\" max=\"10\" default=\"false\"><value>{value}</value><votes>{count}</votes></rating></ratings>"
+        );
+    }
 }
 
 fn tag(body: &mut String, name: &str, value: Option<&str>) {

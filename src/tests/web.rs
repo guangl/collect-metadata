@@ -124,7 +124,9 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
     let film = json!({
         "Id":"30","Type":"Movie","Name":"海报电影","OriginalTitle":"Poster Movie","ProductionYear":2019,
         "Path":"/media/海报电影.mkv","PremiereDate":"2019-05-30T00:00:00Z","RunTimeTicks":7_200_000_000_i64,
-        "Overview":"这是简介","Genres":["悬疑"],"CommunityRating":8.5,"ProviderIds":{"Tmdb":"496243"},
+        "Overview":"这是简介","Genres":["悬疑"],"CommunityRating":8.5,"CriticRating":96,"OfficialRating":"R",
+        "ProviderIds":{"Tmdb":"496243","Imdb":"tt6751668","Bangumi":"303162"},
+        "TagItems":[{"Id":19,"Name":"剧情"}],
         "ImageTags":{"Primary":"3"},"BackdropImageTags":["4"],"People":[{"Id":"99","Name":"导演","Type":"Director","PrimaryImageTag":"3"},
             {"Id":"98","Name":"声优","Type":"Actor","Role":"角色 (voice)","PrimaryImageTag":"2"},
             {"Id":"bad/path","Name":"无照片编剧","Type":"Writer","PrimaryImageTag":"hidden"}]
@@ -204,6 +206,14 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
     if let Some(types) = args.get("IncludeItemTypes") {
         data.retain(|item| types.split(',').any(|kind| item["Type"] == kind));
     }
+    for item in &mut data {
+        let requested = args.get("Fields").map_or("", String::as_str);
+        for field in ["ProductionYear", "CommunityRating", "CriticRating", "OfficialRating", "TagItems"] {
+            if !requested.split(',').any(|name| name == field) {
+                item.as_object_mut().unwrap().remove(field);
+            }
+        }
+    }
     Json(json!({"TotalRecordCount":data.len(),"Items":data})).into_response()
 }
 
@@ -213,6 +223,7 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
     let workspace = tempfile::tempdir().unwrap();
     let path = workspace.path().join("emby.json");
     fs::write(&path, br#"{"enabled":false,"server":"","api_key":""}"#).unwrap();
+    fs::write(path.with_file_name("imdb-ratings.json"), br#"{"tt6751668":{"value":8.6,"count":12345}}"#).unwrap();
     let collector = Collector::from_environment(None)
         .unwrap()
         .with_emby_settings(Arc::new(EmbySettings::load(path).unwrap()));
@@ -242,6 +253,12 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
     assert_eq!(film["backdrop"], "4");
     assert_eq!(film["overview"], "这是简介");
     assert_eq!(film["year"], 2019);
+    assert_eq!(film["rating"], 8.5);
+    assert_eq!(film["critic_rating"], 96.0);
+    assert_eq!(film["official_rating"], "R");
+    assert_eq!(film["tags"], json!(["剧情"]));
+    assert_eq!(film["bangumi_id"], "303162");
+    assert_eq!(film["imdb_rating"], json!({"value":8.6,"count":12345}));
     assert_eq!(film["runtime_minutes"], 12);
     for image in ["poster", "backdrop"] {
         let response = api
@@ -294,6 +311,73 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
 struct Api {
     address: String,
     client: Client,
+}
+
+#[tokio::test]
+async fn emby_overwrite_validates_target_and_requests_native_refresh() {
+    let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (mock, emby) = listen(
+        Router::new()
+            .route("/emby/Items/{id}/Refresh", post(move |axum::extract::Path(id): axum::extract::Path<String>,
+                headers: HeaderMap, Query(params): Query<HashMap<String, String>>| {
+                let requests = requests.clone();
+                async move {
+                    assert_eq!(headers["x-emby-token"], "test-secret");
+                    requests.send((id.clone(), params)).unwrap();
+                    if id == "34" { StatusCode::FORBIDDEN } else { StatusCode::NO_CONTENT }
+                }
+            }))
+            .fallback(get(emby_fixture)),
+    ).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("emby.json");
+    fs::write(&path, json!({"enabled":false,"server":mock,"api_key":"test-secret"}).to_string()).unwrap();
+    let collector = Collector::from_environment(None)
+        .unwrap()
+        .with_emby_settings(Arc::new(EmbySettings::load(path).unwrap()));
+    let (address, server) = listen(router(Arc::new(collector))).await;
+    let api = Api { address, client: Client::builder().no_proxy().build().unwrap() };
+    let route = "/api/emby/overwrite";
+
+    for target in [
+        json!({"type":"library","id":"40"}),
+        json!({"type":"item","id":"7","scope":"movie"}),
+        json!({"type":"item","id":"30","scope":"episode"}),
+        json!({"type":"item","id":"bad/id","scope":"movie"}),
+    ] {
+        assert_eq!(api.send(route, Some(json!({"target":target}))).await.status(), 400);
+    }
+    assert!(received.try_recv().is_err());
+
+    for (target, id, recursive, replace_images) in [
+        (json!({"type":"library","id":"8"}), "8", true, false),
+        (json!({"type":"item","id":"30","scope":"movie"}), "30", false, false),
+        (json!({"type":"item","id":"40","scope":"movie"}), "40", false, true),
+        (json!({"type":"item","id":"31","scope":"series"}), "31", true, false),
+        (json!({"type":"item","id":"34","scope":"episode"}), "34", false, true),
+    ] {
+        let input = if replace_images {
+            json!({"target":target,"replace_images":true})
+        } else {
+            json!({"target":target})
+        };
+        let reply = api.send(route, Some(input)).await;
+        if id == "34" {
+            assert_eq!(reply.status(), StatusCode::BAD_REQUEST);
+            assert!(reply.text().await.unwrap().contains("HTTP 403"));
+        } else {
+            assert_eq!(reply.status(), StatusCode::NO_CONTENT);
+        }
+        let (requested, params) = received.try_recv().unwrap();
+        assert_eq!(requested, id);
+        assert_eq!(params["Recursive"], recursive.to_string());
+        assert_eq!(params["MetadataRefreshMode"], "FullRefresh");
+        assert_eq!(params["ReplaceAllMetadata"], "true");
+        assert_eq!(params["ReplaceAllImages"], replace_images.to_string());
+        assert_eq!(params["ImageRefreshMode"], if replace_images { "FullRefresh" } else { "Default" });
+    }
+    emby.abort();
+    server.abort();
 }
 
 impl Api {
@@ -387,6 +471,7 @@ async fn verify_web_routes(test_url: Url) {
         fs::write(video, "video fixture").unwrap();
     }
     fs::write(season_one.join("S01E01.nfo"), "previous NFO").unwrap();
+    fs::write(config.join("imdb-ratings.json"), br#"{"tt6751668":{"value":8.6,"count":12345}}"#).unwrap();
     let collector = Arc::new(
         Collector::from_database_url(test_url.as_str())
             .unwrap()
@@ -568,6 +653,25 @@ async fn verify_web_routes(test_url: Url) {
     assert_eq!(private_preview.as_array().unwrap().len(), 3);
     assert_eq!(private_preview[2]["title"], "家庭旅行");
     assert_eq!(api.success("/api/batches", None).await, before_preview);
+    for (library, expected) in [
+        ("7", vec![("emby:30", "success"), ("emby:31", "success")]),
+        ("8", vec![("emby:35", "partial"), ("emby:30", "success"), ("emby:40", "success")]),
+    ] {
+        let batch = api
+            .success("/api/emby/import", Some(json!(library)))
+            .await
+            .as_i64()
+            .unwrap();
+        let finished = api.finish(batch).await;
+        let rows = finished["rows"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row["query"].as_str().unwrap(), row["stage"].as_str().unwrap()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(rows.iter().all(|row| row["has_result"] == true));
+    }
     let imported = api
         .success("/api/emby/import-all", Some(Value::Null))
         .await
@@ -626,7 +730,7 @@ async fn verify_web_routes(test_url: Url) {
     );
     assert_eq!(api.success("/api/batches", None).await, before);
 
-    for (item, scope) in [("31", "series"), ("34", "episode")] {
+    for (item, scope) in [("30", "movie"), ("40", "movie"), ("31", "series"), ("34", "episode")] {
         let batch = api
             .success(&format!("/api/emby/items/{item}/scrape"), Some(json!(scope)))
             .await
@@ -661,7 +765,7 @@ async fn verify_web_routes(test_url: Url) {
             assert!(directory.join("S01E01-thumb.jpg").is_file());
             assert!(!directory.join("tvshow.nfo").exists());
             assert_eq!(api.success("/api/history?kind=series", None).await[0]["scope"], "episode");
-        } else {
+        } else if scope == "series" {
             assert_eq!(record["fields"]["episodes"].as_array().unwrap().len(), 2);
             assert_eq!(directory, series);
             assert!(directory.join("tvshow.nfo").exists());
@@ -669,6 +773,23 @@ async fn verify_web_routes(test_url: Url) {
             assert!(fs::read_to_string(season_one.join("S01E01.nfo")).unwrap().contains("第一集"));
             assert!(fs::read_to_string(season_two.join("S01E01.nfo")).unwrap().contains("回归"));
             assert!(!directory.join("S01E01.nfo").exists());
+        } else {
+            assert_eq!(rows[0]["kind"], "movie");
+            let (title, basename) = if item == "40" {
+                ("家庭旅行", "2024旅行.nfo")
+            } else {
+                ("海报电影", "海报电影.nfo")
+            };
+            assert_eq!(record["fields"]["title"], title);
+            assert!(directory.join(basename).exists());
+            if item == "30" {
+                assert_eq!(record["fields"]["rating"], json!({"value":8.5,"scale":10}));
+                assert_eq!(record["fields"]["imdb_rating"], json!({"value":8.6,"scale":10,"count":12345}));
+                assert_eq!(record["fields"]["tags"], json!(["剧情"]));
+                let nfo = fs::read_to_string(directory.join(basename)).unwrap();
+                assert!(nfo.contains("<uniqueid type=\"bangumi\">303162</uniqueid>"));
+                assert!(nfo.contains("<value>8.6</value><votes>12345</votes>"));
+            }
         }
     }
     assert!(!config.join("outputs").exists());

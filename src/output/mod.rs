@@ -258,7 +258,7 @@ fn metadata(record: &Value, options: &settings::OutputOptions, source_files: &[S
         "cast" | "directors" | "actresses" | "actors" | "other_cast" | "writers" | "producers" => {
             options.credits
         }
-        "rating" | "critic_rating" => options.ratings,
+        "rating" | "critic_rating" | "imdb_rating" => options.ratings,
         "episodes" | "episode_count" | "season_count" => options.episodes,
         "poster_url" | "cover_url" => options.poster,
         "backdrop_url" => options.backdrop,

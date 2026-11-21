@@ -1,11 +1,11 @@
 import { memo, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent, PointerEvent, ReactNode } from "react";
-import { getEmbyCredits, getEmbySeries, isDesktop, loadEmbyImage } from "../api";
+import { getEmbyCredits, getEmbySeries, isDesktop, loadEmbyImage, overwriteEmby } from "../api";
 import { LocalDate } from "../Catalog";
 import { Tabs } from "../Tabs";
 import type { EmbyImage } from "../api";
 import { errorText, mediaLabels } from "../types";
-import type { EmbyCredit, EmbyEpisodePreview, EmbyLibraryPreview, EmbyScrapeScope, EmbySeasonPreview, EmbySeriesPreview, EmbyWorkPreview } from "../types";
+import type { EmbyCredit, EmbyEpisodePreview, EmbyLibraryPreview, EmbyScrapeTarget, EmbySeasonPreview, EmbySeriesPreview, EmbyWorkPreview } from "../types";
 
 const artworkClasses: Record<EmbyImage, string> = {
   poster: "poster-art",
@@ -177,24 +177,40 @@ export function EmbyCredits({ id, fallback }: { id: string; fallback?: ReactNode
 
 type ScrapeControls = {
   canScrape: boolean;
-  onScrape: (id: string, scope: EmbyScrapeScope) => Promise<number>;
+  onScrape: (target: EmbyScrapeTarget, name: string) => Promise<number>;
 };
 
-function ScrapeItem({ id, scope, canScrape, onScrape }: ScrapeControls & {
-  id: string;
-  scope: EmbyScrapeScope;
+const scrapeLabels = {
+  library: "刮削此媒体库",
+  movie: "刮削此影片",
+  series: "刮削此剧集",
+  episode: "刮削此分集",
+};
+
+function ScrapeActions({ target, name, canScrape, onScrape }: ScrapeControls & {
+  target: EmbyScrapeTarget;
+  name: string;
 }) {
   const [pending, setPending] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [replaceImages, setReplaceImages] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; error?: boolean }>();
-  const label = scope === "episode" ? "刮削此分集" : "刮削此剧集";
+  const scope = target.type === "library" ? "library" : target.scope;
 
-  async function scrape() {
-    if (pending || !canScrape) return;
+  async function submit(mode: "scrape" | "overwrite") {
+    if (pending || (mode === "scrape" && !canScrape)) return;
     setPending(true);
     setFeedback(undefined);
     try {
-      const batch = await onScrape(id, scope);
-      setFeedback({ message: `已提交后台任务 #${batch}。` });
+      if (mode === "overwrite") {
+        await overwriteEmby(target, replaceImages);
+        setConfirming(false);
+        setReplaceImages(false);
+        setFeedback({ message: "已将覆盖刮削请求提交给 Emby。" });
+      } else {
+        const batch = await onScrape(target, name);
+        setFeedback({ message: `已提交后台任务 #${batch}。` });
+      }
     } catch (error) {
       setFeedback({ message: errorText(error), error: true });
     } finally {
@@ -202,10 +218,33 @@ function ScrapeItem({ id, scope, canScrape, onScrape }: ScrapeControls & {
     }
   }
 
-  return <div className="mt-3 space-y-2">
-    <button className="primary" type="button" onClick={scrape} disabled={pending || !canScrape}>
-      {pending ? "正在提交…" : label}
-    </button>
+  return <div className="space-y-2">
+    {confirming ? <div className="space-y-2 rounded-lg border border-line bg-canvas p-3 text-sm">
+      <p className="[overflow-wrap:anywhere]">Emby 将按媒体库设置重新刮削「{name}」并替换已有元数据。
+        {scope === "library" && "此操作包含库内子项目。"}
+        {scope === "series" && "此操作包含季和分集。"}</p>
+      <label className="check-option">
+        <input type="checkbox" checked={replaceImages} disabled={pending}
+          onChange={(event) => setReplaceImages(event.target.checked)} />同时替换已有图片
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button className="secondary batch-cancel" type="button" disabled={pending}
+          onClick={() => void submit("overwrite")}>{pending ? "正在提交…" : "确认覆盖刮削"}</button>
+        <button className="secondary" type="button" disabled={pending} onClick={() => {
+          setConfirming(false);
+          setReplaceImages(false);
+          setFeedback(undefined);
+        }}>取消</button>
+      </div>
+    </div> : <div className="flex flex-wrap gap-2">
+      <button className="primary" type="button" onClick={() => void submit("scrape")} disabled={pending || !canScrape}>
+        {pending ? "正在提交…" : scrapeLabels[scope]}
+      </button>
+      <button className="secondary" type="button" disabled={pending} onClick={() => {
+        setFeedback(undefined);
+        setConfirming(true);
+      }}>覆盖刮削</button>
+    </div>}
     {feedback && <p className={feedback.error ? "batch-error" : "muted"} role={feedback.error ? "alert" : "status"}>
       {feedback.message}
     </p>}
@@ -284,11 +323,22 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
             {work.rating != null && <span className="work-rating" aria-label={`评分 ${work.rating}，满分 10`}>★ {work.rating.toFixed(1)}</span>}
           </div>
           {!!work.genres.length && <p className="work-genres">{work.genres.join(" / ")}</p>}
-          {work.kind === "series" && <ScrapeItem id={work.id} scope="series" canScrape={canScrape} onScrape={onScrape} />}
+          <div className="mt-3"><ScrapeActions target={{ type: "item", id: work.id, scope: work.kind }}
+            name={work.title} canScrape={canScrape} onScrape={onScrape} /></div>
         </div>
       </div>
       <Tabs label="作品资料" className="work-tabs" tabs={[
-        { id: "overview", label: "简介", content: <div className="work-panel"><p className="movie-description">{work.overview || "Emby 暂无剧情简介。"}</p></div> },
+        { id: "overview", label: "简介", content: <div className="work-panel">
+          <p className="movie-description">{work.overview || "Emby 暂无剧情简介。"}</p>
+          {(work.official_rating || work.critic_rating != null || work.imdb_rating || work.bangumi_id || !!work.tags?.length) &&
+            <dl className="episode-facts mt-4">
+              {work.official_rating && <div><dt>分级</dt><dd>{work.official_rating}</dd></div>}
+              {work.critic_rating != null && <div><dt>影评人评分</dt><dd>{work.critic_rating} / 100</dd></div>}
+              {work.imdb_rating && <div><dt>IMDb 评分</dt><dd>{work.imdb_rating.value.toFixed(1)} / 10 · {work.imdb_rating.count.toLocaleString("zh-CN")} 人评价</dd></div>}
+              {work.bangumi_id && <div><dt>Bangumi ID</dt><dd>{work.bangumi_id}</dd></div>}
+              {!!work.tags?.length && <div><dt>标签</dt><dd>{work.tags.join(" / ")}</dd></div>}
+            </dl>}
+        </div> },
         ...(work.kind === "series" ? [{ id: "episodes", label: "季与分集", retain: true, content: <SeriesEpisodes id={work.id} onOpen={(episode, season, button) => {
           origin.current = { button, scroll: dialog.current?.scrollTop ?? 0 };
           setSelected({ episode, season });
@@ -302,7 +352,10 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
       <h2 id={episodeTitle}>{selected.episode.title}</h2>
       {selected.episode.original_title && selected.episode.original_title !== selected.episode.title &&
         <p className="work-original">{selected.episode.original_title}</p>}
-      <ScrapeItem key={selected.episode.id} id={selected.episode.id} scope="episode" canScrape={canScrape} onScrape={onScrape} />
+      <div className="mt-3"><ScrapeActions key={selected.episode.id}
+        target={{ type: "item", id: selected.episode.id, scope: "episode" }}
+        name={`${work.title} · ${seasonLabel(selected.season)} · ${selected.episode.title}`}
+        canScrape={canScrape} onScrape={onScrape} /></div>
       <Tabs label="分集资料" className="mt-4" tabs={[{ id: "details", label: "分集简介", content: <div className="mt-4 grid items-start gap-4 sm:grid-cols-[minmax(0,45fr)_minmax(0,55fr)] sm:gap-5">
         <EmbyArtwork id={selected.episode.id} tag={selected.episode.image} image="episode" eager />
         <div>
@@ -329,6 +382,10 @@ export const EmbyCatalog = memo(function EmbyCatalog({ libraries, canScrape, onS
         <h3 id={`emby-library-${library.id}`}>{library.name}</h3>
         <span>{library.works.length} 部</span>
       </div>
+      {library.works.length > 0 && <div className="mb-4">
+        <ScrapeActions target={{ type: "library", id: library.id }} name={library.name}
+          canScrape={canScrape} onScrape={onScrape} />
+      </div>}
       {library.works.length ? <ul className="grid grid-cols-library gap-x-3 gap-y-4 sm:grid-cols-library-wide sm:gap-4" role="list">
         {library.works.map((work) => <li className="min-w-0" key={work.id}>
           <button type="button" className="emby-tile" onClick={() => setSelected({ work, library: library.name })}>

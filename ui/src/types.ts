@@ -1,4 +1,7 @@
-export type EmbyScrapeScope = "series" | "episode";
+export type EmbyScrapeScope = "movie" | "series" | "episode";
+export type EmbyScrapeTarget =
+  | { type: "library"; id: string }
+  | { type: "item"; id: string; scope: EmbyScrapeScope };
 export type MediaType = "movie" | "series" | "av";
 export type MediaProvider = "wikidata" | "tvmaze" | "tmdb";
 export const providerLabels: Record<MediaProvider, string> = {
@@ -60,6 +63,11 @@ export interface EmbyWorkPreview {
   overview: string | null;
   genres: string[];
   rating: number | null;
+  official_rating?: string | null;
+  critic_rating?: number | null;
+  imdb_rating?: { value: number; count: number } | null;
+  bangumi_id?: string | null;
+  tags?: string[];
   runtime_minutes: number | null;
   poster: string | null;
   backdrop: string | null;

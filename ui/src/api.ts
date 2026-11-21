@@ -4,6 +4,7 @@ import type {
   EmbyInput,
   EmbyLibraryPreview,
   EmbyScrapeScope,
+  EmbyScrapeTarget,
   EmbySeriesPreview,
   EmbyCredit,
   EmbySettingsView,
@@ -150,9 +151,18 @@ export function importEmbyCatalog(): Promise<number> {
   return invoke ? invoke("import_emby_catalog") : post("/api/emby/import-all", null);
 }
 
+export function importEmbyLibrary(library: string): Promise<number> {
+  return invoke ? invoke("import_emby", { library }) : post("/api/emby/import", library);
+}
+
 export function importEmbyItem(id: string, scope: EmbyScrapeScope): Promise<number> {
   return invoke ? invoke("import_emby_item", { id, scope }) :
     post(`/api/emby/items/${encodeURIComponent(id)}/scrape`, scope);
+}
+
+export function overwriteEmby(target: EmbyScrapeTarget, replaceImages: boolean): Promise<void> {
+  const input = { target, replace_images: replaceImages };
+  return invoke ? invoke("overwrite_emby", { input }) : post("/api/emby/overwrite", input);
 }
 
 export function getEmbySeries(id: string): Promise<EmbySeriesPreview> {

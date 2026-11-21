@@ -8,10 +8,10 @@ use axum::{
     routing::{get, post},
 };
 use collect_metadata::{
-    BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput, EmbyPreviewImage, EmbyScrapeScope,
-    EmbySettings, HistoryItem, LanguageSettings, LookupResponse, MediaKind, MediaProvider,
-    OutputOptions, OutputSettings, TmdbSettings, browse_mounted_folders, preview_folder,
-    scan_mounted_folder,
+    BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput, EmbyOverwriteInput,
+    EmbyPreviewImage, EmbyScrapeScope, EmbySettings, HistoryItem, LanguageSettings, LookupResponse,
+    MediaKind, MediaProvider, OutputOptions, OutputSettings, TmdbSettings, browse_mounted_folders,
+    preview_folder, scan_mounted_folder,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -170,6 +170,7 @@ fn router(collector: Arc<Collector>) -> Router {
         .route("/api/emby/catalog", get(emby_catalog))
         .route("/api/emby/import-all", post(import_emby_catalog))
         .route("/api/emby/items/{id}/scrape", post(import_emby_item))
+        .route("/api/emby/overwrite", post(overwrite_emby))
         .route("/api/emby/series/{id}", get(emby_series_preview))
         .route("/api/emby/credits/{id}", get(emby_credits))
         .route("/api/emby/images/{id}/{image}", get(emby_preview_image))
@@ -356,6 +357,17 @@ async fn import_emby_item(
         .import_emby_item(&id, scope)
         .await
         .map(|id| (StatusCode::CREATED, Json(id)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn overwrite_emby(
+    State(collector): AppState,
+    Json(input): Json<EmbyOverwriteInput>,
+) -> Result<StatusCode, ApiError> {
+    collector
+        .overwrite_emby(input)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
 }
 

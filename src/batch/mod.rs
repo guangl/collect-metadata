@@ -36,8 +36,33 @@ pub struct BatchItemInput {
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbyScrapeScope {
+    Movie,
     Series,
     Episode,
+}
+
+impl EmbyScrapeScope {
+    fn item_type(self) -> &'static str {
+        match self {
+            Self::Movie => "Movie,Video",
+            Self::Series => "Series",
+            Self::Episode => "Episode",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EmbyOverwriteInput {
+    target: EmbyOverwriteTarget,
+    #[serde(default)]
+    replace_images: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum EmbyOverwriteTarget {
+    Library { id: String },
+    Item { id: String, scope: EmbyScrapeScope },
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -208,12 +233,7 @@ impl Collector {
         id: &str,
     ) -> Result<(crate::EmbyLibrary, Vec<crate::EmbyWorkPreview>), String> {
         let emby = self.emby_connection()?;
-        let library = emby
-            .libraries(&self.client)
-            .await?
-            .into_iter()
-            .find(|library| library.id == id)
-            .ok_or("没有找到此 Emby 媒体库。")?;
+        let library = emby.library(&self.client, id).await?;
         let works = emby.library_entries(&self.client, id).await?;
         Ok((library, works))
     }
@@ -288,19 +308,40 @@ impl Collector {
     }
 
     pub async fn import_emby_item(&self, id: &str, scope: EmbyScrapeScope) -> Result<i64, String> {
-        let (item_type, prefix) = match scope {
-            EmbyScrapeScope::Series => ("Series", "emby:"),
-            EmbyScrapeScope::Episode => ("Episode", EPISODE_QUERY_PREFIX),
+        let (kind, prefix) = match scope {
+            EmbyScrapeScope::Movie => (MediaKind::Movie, "emby:"),
+            EmbyScrapeScope::Series => (MediaKind::Series, "emby:"),
+            EmbyScrapeScope::Episode => (MediaKind::Series, EPISODE_QUERY_PREFIX),
         };
-        let title = self.emby_connection()?.scrape_title(&self.client, id, item_type).await?;
+        let title = self
+            .emby_connection()?
+            .scrape_title(&self.client, id, scope.item_type())
+            .await?;
         self.save_emby_batch(
             &format!("Emby · {title}"),
             vec![BatchItemInput {
-                kind: MediaKind::Series,
+                kind,
                 query: format!("{prefix}{id}"),
                 source_files: Vec::new(),
             }],
-        ).await
+        )
+        .await
+    }
+
+    pub async fn overwrite_emby(&self, input: EmbyOverwriteInput) -> Result<(), String> {
+        let emby = self.emby_connection()?;
+        let (id, recursive) = match input.target {
+            EmbyOverwriteTarget::Library { id } => {
+                emby.library(&self.client, &id).await?;
+                (id, true)
+            }
+            EmbyOverwriteTarget::Item { id, scope } => {
+                emby.item(&self.client, &id, scope.item_type(), "").await?;
+                (id, matches!(scope, EmbyScrapeScope::Series))
+            }
+        };
+        emby.overwrite_metadata(&self.client, &id, recursive, input.replace_images)
+            .await
     }
 
     async fn save_emby_batch(&self, name: &str, items: Vec<BatchItemInput>) -> Result<i64, String> {
