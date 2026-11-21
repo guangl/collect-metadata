@@ -1,4 +1,4 @@
-name: Desktop release
+name: Collect Metadata release
 
 on:
   push:
@@ -8,12 +8,39 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: collect-metadata-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  verify:
+    name: Check release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.100.0 --profile minimal
+      - run: echo 'RUSTUP_TOOLCHAIN=1.100.0' >> "$GITHUB_ENV"
+      - name: Verify tag and package versions agree
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const tag = process.env.GITHUB_REF_NAME;
+          const config = JSON.parse(readFileSync('tauri.conf.json', 'utf8'));
+          const npm = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          const { packages } = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], { encoding: 'utf8' }));
+          const rust = packages.find(({ name }) => name === 'collect-metadata');
+          if (!/^v\d+\.\d+\.\d+$/.test(tag) || ![config.version, npm.version, lock.version, lock.packages[""].version, rust?.version].every((v) => `v${v}` === tag)) {
+            throw new Error(`Tag ${tag} must match the Tauri, npm and Cargo versions`);
+          }
+          JS
+
   build:
     name: Build ${{ matrix.platform }} installer
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -47,20 +74,6 @@ jobs:
         run: |
           rustup toolchain install 1.100.0 --profile minimal --target "$TARGET"
           echo 'RUSTUP_TOOLCHAIN=1.100.0' >> "$GITHUB_ENV"
-      - name: Verify tag and desktop version agree
-        run: |
-          node --input-type=module <<'JS'
-          import { readFileSync } from 'node:fs';
-          import { execFileSync } from 'node:child_process';
-          const tag = process.env.GITHUB_REF_NAME;
-          const config = JSON.parse(readFileSync('tauri.conf.json', 'utf8'));
-          const npm = JSON.parse(readFileSync('package.json', 'utf8'));
-          const { packages } = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], { encoding: 'utf8' }));
-          const rust = packages.find(({ name }) => name === 'collect-metadata');
-          if (!/^v\d+\.\d+\.\d+$/.test(tag) || ![config.version, npm.version, rust?.version].every((v) => `v${v}` === tag)) {
-            throw new Error(`Tag ${tag} must match the Tauri, npm and Cargo versions`);
-          }
-          JS
       - run: npm ci
       - name: Build installer
         env:
@@ -96,9 +109,38 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  emby-plugin:
+    name: Build and verify the Emby plugin
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet build emby-plugin/CollectMetadata.Emby.csproj --configuration Release
+      - run: dotnet run --project emby-plugin-tests/OrganizerChecks.csproj --configuration Release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-emby-plugin
+          path: emby-plugin/bin/Release/netstandard2.0/CollectMetadata.Emby.dll
+          if-no-files-found: error
+          retention-days: 7
+
+  container:
+    name: Publish versioned Docker image
+    needs: verify
+    uses: ./.github/workflows/container.yml
+    permissions:
+      contents: read
+      packages: write
+
   publish:
-    name: Publish Windows and macOS installers
-    needs: build
+    name: Publish installers and Emby plugin
+    needs: [build, emby-plugin, container]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -118,17 +160,22 @@ jobs:
           version=${GITHUB_REF_NAME#v}
           dmg="collect-metadata-$version-macos-arm64.dmg"
           exe="collect-metadata-$version-windows-x64-setup.exe"
-          test -s "$dmg" && test -s "$exe"
-          sha256sum "$dmg" "$exe" > SHA256SUMS
-          cat > notes.md <<'EOF'
-          ## 桌面安装包
+          plugin=CollectMetadata.Emby.dll
+          test -s "$dmg" && test -s "$exe" && test -s "$plugin"
+          sha256sum "$dmg" "$exe" "$plugin" > SHA256SUMS
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$version"
+          docs="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/README.md"
+          cat > notes.md <<EOF
+          ## 安装与升级
 
-          - **macOS（Apple Silicon）**：下载 `macos-arm64.dmg`，将 App 拖入「应用程序」。未经过 Apple 公证。
-          - **Windows**：下载 `windows-x64-setup.exe` 并按提示安装。安装器未使用商业证书签名。
-          - 下载后可使用 `SHA256SUMS` 校验文件。只从本仓库的 Release 下载。
+          - **macOS（Apple Silicon）**：下载 $dmg，将 App 拖入「应用程序」。未经过 Apple 公证。
+          - **Windows**：下载 $exe 并按提示安装。安装器未使用商业证书签名。
+          - **Docker Web**：使用 \`$image\`（amd64 / arm64）。
+          - **Emby 插件**：将 $plugin 放进 Emby 的 plugins 目录，然后重启 Emby。
+          - 用 SHA256SUMS 校验下载的安装包和插件。
 
-          预览本地文件夹无需 Docker 或数据库；提交后台批次和查看采集历史需要连接 PostgreSQL。
+          升级既有部署前，参阅[升级说明]($docs#升级)和[备份与恢复]($docs#备份与恢复)。
           EOF
-          gh release create "$GITHUB_REF_NAME" "$dmg" "$exe" SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" "$dmg" "$exe" "$plugin" SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --verify-tag --latest \
             --title "Collect Metadata $GITHUB_REF_NAME" --notes-file notes.md

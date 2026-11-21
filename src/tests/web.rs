@@ -16,6 +16,21 @@ async fn listen(app: Router) -> (String, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
+async fn process_health_is_independent_of_postgres_readiness() {
+    let stalled_db = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let database = format!("postgres://fixture@{}/fixture", stalled_db.local_addr().unwrap());
+    let collector = Arc::new(Collector::from_database_url(&database).unwrap());
+    let (address, server) = listen(router(collector)).await;
+    let api = Api {
+        address,
+        client: Client::builder().no_proxy().build().unwrap(),
+    };
+    assert_eq!(api.send("/healthz", None).await.status(), StatusCode::NO_CONTENT);
+    assert_eq!(api.send("/readyz", None).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    server.abort();
+}
+
+#[tokio::test]
 async fn web_language_preferences_validate_and_persist() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("languages.json");
@@ -406,6 +421,19 @@ impl Api {
         }
     }
 
+    async fn preview_writeback(&self, batch: i64, row: Option<i64>) -> Value {
+        let url = format!("/api/batches/{batch}/writeback");
+        self.success(&row.map_or_else(|| url.clone(), |row| format!("{url}?row={row}")), None).await
+    }
+
+    async fn apply_writeback(&self, batch: i64, row: Option<i64>, preview: &Value) -> Value {
+        self.success(
+            &format!("/api/batches/{batch}/writeback"),
+            Some(json!({"row":row,"token":preview["token"]})),
+        ).await;
+        self.finish(batch).await
+    }
+
     async fn finish(&self, batch: i64) -> Value {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         while tokio::time::Instant::now() < deadline {
@@ -503,6 +531,7 @@ async fn verify_web_routes(test_url: Url) {
         "/icon.png",
         "/tmdb-logo.svg",
         "/healthz",
+        "/readyz",
         "/api/settings/postgres",
     ] {
         assert!(api.send(route, None).await.status().is_success(), "{route}");
@@ -655,7 +684,7 @@ async fn verify_web_routes(test_url: Url) {
     assert_eq!(api.success("/api/batches", None).await, before_preview);
     for (library, expected) in [
         ("7", vec![("emby:30", "success"), ("emby:31", "success")]),
-        ("8", vec![("emby:35", "partial"), ("emby:30", "success"), ("emby:40", "success")]),
+        ("8", vec![("emby:35", "success"), ("emby:30", "success"), ("emby:40", "success")]),
     ] {
         let batch = api
             .success("/api/emby/import", Some(json!(library)))
@@ -679,19 +708,65 @@ async fn verify_web_routes(test_url: Url) {
         .unwrap();
     let view = api.finish(imported).await;
     assert_eq!(view["rows"].as_array().unwrap().len(), 4);
-    let rows = api.success(&format!("/api/batches/{imported}"), None).await;
-    let rows = rows.as_array().unwrap();
-    let film = rows.iter().find(|row| row["query"] == "emby:30").unwrap();
+    let film = view["rows"].as_array().unwrap().iter().find(|row| row["query"] == "emby:30").unwrap();
+    assert_eq!(film["writeback"], "ready");
+    let film_id = film["id"].as_i64().unwrap();
+    let film_nfo = media.join("海报电影.nfo");
+    let film_poster = media.join("海报电影-poster.jpg");
+    assert!(!film_nfo.exists(), "collection must leave sidecars untouched");
+    assert_eq!(fs::read_to_string(season_one.join("S01E01.nfo")).unwrap(), "previous NFO");
+
+    let stale = api.preview_writeback(imported, Some(film_id)).await;
+    fs::write(&film_nfo, "original film metadata").unwrap();
+    assert_eq!(api.send(
+        &format!("/api/batches/{imported}/writeback"),
+        Some(json!({"row":film_id,"token":stale["token"]})),
+    ).await.status(), StatusCode::CONFLICT);
+    assert_eq!(fs::read_to_string(&film_nfo).unwrap(), "original film metadata");
+
+    // A destination that is a directory cannot be replaced. Other files still publish.
+    fs::create_dir(&film_poster).unwrap();
+    let preview = api.preview_writeback(imported, None).await;
+    assert!(preview["files"].as_array().unwrap().iter().any(|file| {
+        file["kind"] == "nfo" && file["destinations"][0]["path"] == film_nfo.to_str().unwrap()
+            && file["destinations"][0]["action"] == "replace"
+    }));
+    let committed = api.apply_writeback(imported, None, &preview).await;
+    let rows = committed["rows"].as_array().unwrap();
+    let film = rows.iter().find(|row| row["id"] == film_id).unwrap();
     assert_eq!(film["stage"], "success");
+    assert_eq!(film["writeback"], "failed");
+    assert_eq!(film["output"]["written"], 2);
     assert_eq!(Path::new(film["output"]["directory"].as_str().unwrap()), media);
-    assert!(media.join("海报电影.nfo").is_file());
-    assert!(media.join("海报电影-poster.jpg").is_file());
+    assert!(film_nfo.is_file());
+    assert!(film_poster.is_dir());
     assert!(media.join("海报电影-thumb.jpg").is_file());
     assert_eq!(fs::read_to_string(media.join("海报电影.mkv")).unwrap(), "video fixture");
+    let status = api.preview_writeback(imported, Some(film_id)).await;
+    let nfo = status["files"].as_array().unwrap().iter().find(|file| file["kind"] == "nfo").unwrap();
+    let backup = nfo["backup"].as_str().unwrap();
+    assert_eq!(fs::read_to_string(backup).unwrap(), "original film metadata");
+    let result_path = format!("/api/batches/{imported}/rows/{film_id}/result");
+    let saved = api.success(&result_path, None).await["saved"]["id"].clone();
+    fs::remove_dir(&film_poster).unwrap();
+    fs::write(&film_nfo, "manual edit after first writeback").unwrap();
+    let retry = api.preview_writeback(imported, Some(film_id)).await;
+    assert_eq!(retry["writable"], 1);
+    let finished = api.apply_writeback(imported, Some(film_id), &retry).await;
+    let film = finished["rows"].as_array().unwrap().iter().find(|row| row["id"] == film_id).unwrap();
+    assert_eq!(film["writeback"], "done");
+    assert_eq!(film["output"]["written"], 3);
+    assert_eq!(api.success(&result_path, None).await["saved"]["id"], saved);
+    assert_eq!(fs::read_to_string(&film_nfo).unwrap(), "manual edit after first writeback");
+    assert_eq!(fs::read_to_string(backup).unwrap(), "original film metadata");
+    assert!(film_poster.is_file());
+
     let unlinked = rows.iter().find(|row| row["query"] == "emby:35").unwrap();
-    assert_eq!(unlinked["stage"], "partial");
+    assert_eq!(unlinked["writeback"], "failed");
     assert!(unlinked["has_result"].as_bool().unwrap());
-    assert!(unlinked["output"]["message"].as_str().unwrap().contains("路径"));
+    let missing = api.preview_writeback(imported, unlinked["id"].as_i64()).await;
+    assert_eq!(missing["writable"], 0);
+    assert!(missing["files"][0]["error"].as_str().unwrap().contains("路径"));
     let video = rows.iter().find(|row| row["query"] == "emby:40").unwrap();
     assert_eq!(video["stage"], "success");
     let video_exports = std::path::Path::new(video["output"]["directory"].as_str().unwrap());
@@ -746,7 +821,10 @@ async fn verify_web_routes(test_url: Url) {
             .await;
         let record = &result["record"];
         assert_eq!(record["work_id"], format!("Emby-{item}"));
-        let directory = Path::new(rows[0]["output"]["directory"].as_str().unwrap());
+        let preview = api.preview_writeback(batch, Some(row)).await;
+        let written = api.apply_writeback(batch, Some(row), &preview).await;
+        assert_eq!(written["rows"][0]["writeback"], "done");
+        let directory = Path::new(written["rows"][0]["output"]["directory"].as_str().unwrap());
         if scope == "episode" {
             assert_eq!(record["scope"], "episode");
             assert_eq!(record["fields"]["episode_number"], 1);

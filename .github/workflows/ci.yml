@@ -46,3 +46,54 @@ jobs:
       - run: npm run build
       - run: rustup toolchain install 1.100.0 --profile minimal
       - run: cargo +1.100.0 test --locked --all-features
+
+
+  postgres:
+    name: PostgreSQL queue and Emby integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_PASSWORD: fixture-password
+        ports:
+          - 127.0.0.1:25432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      COLLECT_METADATA_TEST_POSTGRES: postgres://postgres:fixture-password@127.0.0.1:25432/postgres
+      EMBY_SYNC_TOKEN: fixture-token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+      - run: rustup toolchain install 1.100.0 --profile minimal
+      - run: >-
+          cargo +1.100.0 test --locked --no-default-features --features web --lib
+          storage::batch::tests:: -- --ignored --test-threads=1
+      - run: cargo +1.100.0 test --locked --no-default-features --features web --bin collect-metadata-web web_routes_persist_and_export_an_emby_batch -- --ignored --test-threads=1
+
+  emby-plugin:
+    name: Build Emby plugin and verify organizer rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet build emby-plugin/CollectMetadata.Emby.csproj --configuration Release
+      - run: dotnet run --project emby-plugin-tests/OrganizerChecks.csproj --configuration Release

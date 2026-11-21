@@ -125,6 +125,19 @@ export interface OutputReport {
   message: string | null;
 }
 
+export interface WritebackPreview {
+  token: string;
+  writable: number;
+  files: {
+    source: string;
+    kind: "nfo" | "poster" | "backdrop" | "still";
+    path: string | null;
+    backup: string | null;
+    error: string | null;
+    destinations: { path: string; action: "create" | "replace" | "blocked" }[];
+  }[];
+}
+
 export interface Episode {
   id: number;
   season: number | null;

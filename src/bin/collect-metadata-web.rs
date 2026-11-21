@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -47,6 +47,17 @@ struct MediaInput {
 #[derive(Deserialize)]
 struct BatchBefore {
     before: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct WritebackSelection {
+    row: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct WritebackConfirmation {
+    row: Option<i64>,
+    token: String,
 }
 
 #[derive(Deserialize)]
@@ -151,6 +162,7 @@ fn router(collector: Arc<Collector>) -> Router {
             }),
         )
         .route("/healthz", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/readyz", get(readiness))
         .route("/api/settings/postgres", get(check_storage))
         .route("/api/settings/tmdb", get(tmdb_status).post(save_tmdb))
         .route("/api/settings/tmdb/test", post(test_tmdb))
@@ -200,6 +212,7 @@ fn router(collector: Arc<Collector>) -> Router {
         .route("/api/batches/{batch}", get(batch_rows))
         .route("/api/batches/{batch}/state", get(batch_view))
         .route("/api/batches/{batch}/control", post(control_batch))
+        .route("/api/batches/{batch}/writeback", get(preview_writeback).post(queue_writeback))
         .route("/api/batches/{batch}/rows/{row}/result", get(batch_result))
         .route("/api/batches/{batch}/rows/{row}/files", get(batch_files))
         .route(
@@ -475,6 +488,18 @@ async fn save_output_settings(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(view)))
 }
 
+async fn readiness(State(collector): AppState) -> impl IntoResponse {
+    let status = if matches!(
+        tokio::time::timeout(Duration::from_secs(2), collector.check_storage()).await,
+        Ok(Ok(()))
+    ) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    ([(header::CACHE_CONTROL, "no-store")], status)
+}
+
 async fn check_storage(State(collector): AppState) -> Result<impl IntoResponse, ApiError> {
     collector
         .check_storage()
@@ -682,6 +707,26 @@ async fn control_batch(
     collector
         .control_batch(batch, action)
         .await
+        .map(Json)
+        .map_err(|error| api_error(StatusCode::CONFLICT, error))
+}
+
+async fn preview_writeback(
+    State(collector): AppState,
+    Path(batch): Path<i64>,
+    Query(selection): Query<WritebackSelection>,
+) -> Result<impl IntoResponse, ApiError> {
+    collector.preview_writeback(batch, selection.row).await
+        .map(|preview| ([(header::CACHE_CONTROL, "no-store")], Json(preview)))
+        .map_err(|error| api_error(StatusCode::CONFLICT, error))
+}
+
+async fn queue_writeback(
+    State(collector): AppState,
+    Path(batch): Path<i64>,
+    Json(confirmation): Json<WritebackConfirmation>,
+) -> Result<Json<usize>, ApiError> {
+    collector.queue_writeback(batch, confirmation.row, &confirmation.token).await
         .map(Json)
         .map_err(|error| api_error(StatusCode::CONFLICT, error))
 }

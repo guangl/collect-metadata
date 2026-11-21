@@ -64,6 +64,7 @@ export interface BatchRow extends BatchInput {
   original_languages: string[];
   file_count: number;
   output: OutputReport | null;
+  writeback?: "ready" | "queued" | "collecting" | "paused" | "failed" | "done" | null;
 }
 
 export function parseBatch(input: string, defaultType: MediaType): BatchInput[] {

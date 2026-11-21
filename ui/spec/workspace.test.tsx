@@ -86,6 +86,21 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: Emb
       if (body === "cancel") status = "cancelled";
       return response(1);
     }
+    if (route === "/api/batches/9/writeback" && body) {
+      rows = rows.map((row) => ({
+        ...row, writeback: "done", output: { written: 1, directory: "/media/film", failed: 0, message: null },
+      }));
+      return response(1);
+    }
+    if (route.startsWith("/api/batches/9/writeback")) {
+      const done = rows[0]?.writeback === "done";
+      return response({ token: "approved", writable: done ? 0 : 1, files: [{
+        kind: "nfo", source: "/emby/film.mkv",
+        path: done ? "/media/film.nfo" : null, backup: done ? "/media/.collect-metadata-backups/old.bak" : null,
+        error: done ? null : "无法写回文件，请检查挂载和写入权限。",
+        destinations: done ? [] : [{ path: "/media/film.nfo", action: "replace" }],
+      }] });
+    }
     if (route.endsWith("/files")) return response(Array.from({ length: 101 }, (_, n) => `媒体/${n}.mkv`));
     if (route.endsWith("/result")) return response({ record, saved, storage_error: null });
     if (route.endsWith("/candidate") || route.endsWith("/retry")) {
@@ -376,6 +391,23 @@ describe("后台批次", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "采集所选作品" })).toBeNull());
     fireEvent.click(within(screen.getByRole("listitem", { name: "失败条目" })).getByRole("button", { name: "重试", exact: true }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "重试", exact: true })).toBeNull());
+  });
+
+  it("预览部分写回中的失败文件，确认后能查看原件备份", async () => {
+    const calls = harness([{ ...item, writeback: "failed" }]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看失败并重试" }));
+    const preview = await screen.findByRole("dialog", { name: "Emby 媒体写回" });
+    await within(preview).findByText("替换并备份 ·", { exact: false });
+    expect(calls.mock.calls.some(([route, options]) => route.endsWith("/writeback") && options?.method === "POST")).toBe(false);
+    fireEvent.click(within(preview).getByRole("button", { name: "确认写回（1 项）" }));
+    await screen.findByText("已排入 1 条写回任务。");
+    const confirmation = calls.mock.calls.find(([route, options]) => route.endsWith("/writeback") && options?.method === "POST");
+    expect(JSON.parse(String(confirmation?.[1]?.body))).toEqual({ row: 1, token: "approved" });
+    fireEvent.click(await screen.findByRole("button", { name: "查看写回记录" }));
+    await screen.findByText("/media/.collect-metadata-backups/old.bak");
+    click("关闭");
+    expect(screen.queryByRole("dialog", { name: "Emby 媒体写回" })).toBeNull();
   });
 
   it("不连接 PostgreSQL 也能预览海报，但不能提交刮削", async () => {

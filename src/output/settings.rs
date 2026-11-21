@@ -88,8 +88,6 @@ pub(crate) struct ExportPlan {
     pub(crate) owner: String,
     pub(crate) directory: Option<PathBuf>,
     pub(super) options: OutputOptions,
-    #[serde(default)]
-    pub(crate) media_paths: Option<MediaPaths>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -222,32 +220,18 @@ impl OutputSettings {
         Ok(state.owner.clone())
     }
 
-    pub(crate) fn emby_plan(&self) -> ExportPlan {
-        let state = self.state.lock().expect("output settings lock");
-        ExportPlan {
-            owner: state.owner.clone(),
-            directory: None,
-            options: state.options.clone(),
-            media_paths: Some(self.media_paths_for(&state)),
-        }
-    }
-
-    pub(crate) fn folder_plan(&self, read_emby: bool) -> Result<Option<ExportPlan>, String> {
+    pub(crate) fn folder_plan(&self) -> Result<Option<ExportPlan>, String> {
         let state = self.state.lock().expect("output settings lock");
         let directory = state
             .options
             .enabled
             .then(|| self.resolve(&state.options.directory))
             .transpose()?;
-        let media_paths = read_emby.then(|| self.media_paths_for(&state));
-        Ok(
-            (directory.is_some() || media_paths.is_some()).then(|| ExportPlan {
-                owner: state.owner.clone(),
-                directory,
-                options: state.options.clone(),
-                media_paths,
-            }),
-        )
+        Ok(directory.map(|directory| ExportPlan {
+            owner: state.owner.clone(),
+            directory: Some(directory),
+            options: state.options.clone(),
+        }))
     }
 
     pub(crate) fn media_paths(&self) -> MediaPaths {
@@ -334,7 +318,7 @@ mod tests {
         )
         .unwrap();
         let settings = OutputSettings::load(config.clone(), Some(root.clone())).unwrap();
-        let initial = settings.folder_plan(false).unwrap().unwrap();
+        let initial = settings.folder_plan().unwrap().unwrap();
         assert_eq!(initial.owner, "legacy");
         assert_eq!(initial.options.directory_template, "work-{row}");
         assert!(initial.options.filename_prefix.is_empty());
@@ -350,7 +334,7 @@ mod tests {
         }
         assert_eq!(
             settings
-                .folder_plan(false)
+                .folder_plan()
                 .unwrap()
                 .unwrap()
                 .options
@@ -366,7 +350,7 @@ mod tests {
             json!(["writer", "crew"])
         );
         let reloaded = OutputSettings::load(config, Some(root)).unwrap();
-        let new_plan = reloaded.folder_plan(false).unwrap().unwrap();
+        let new_plan = reloaded.folder_plan().unwrap().unwrap();
         assert_eq!(new_plan.owner, initial.owner);
         assert_eq!(new_plan.options.directory_template, "{title}");
         assert!(new_plan.directory.unwrap().ends_with("new/film"));

@@ -52,20 +52,6 @@ struct OutputFile {
     person: Option<String>,
 }
 
-pub(crate) enum PreparedExport {
-    Batch(BatchExport),
-    Emby(emby::MediaExport),
-}
-
-impl PreparedExport {
-    pub(crate) fn publish(self) -> OutputReport {
-        match self {
-            Self::Batch(batch) => batch.publish(),
-            Self::Emby(media) => media.publish(),
-        }
-    }
-}
-
 pub(crate) fn emby_source(record: &Value) -> Option<&Value> {
     record["sources"]
         .as_array()?
@@ -74,7 +60,8 @@ pub(crate) fn emby_source(record: &Value) -> Option<&Value> {
         .map(|source| &source["data"])
 }
 
-pub(crate) use emby::prepare as prepare_emby;
+pub(crate) use emby::{PreparedWriteback, WritebackJob, WritebackState, plan as plan_writeback, prepare as prepare_writeback};
+pub use emby::WritebackPreviewFile;
 
 pub(crate) struct BatchExport {
     temporary: tempfile::TempDir,
@@ -84,7 +71,7 @@ pub(crate) struct BatchExport {
 }
 
 impl BatchExport {
-    fn publish(self) -> OutputReport {
+    pub(crate) fn publish(self) -> OutputReport {
         let Some(parent) = self.destination.parent() else {
             return OutputReport::error("输出目录无效。");
         };
@@ -124,7 +111,7 @@ pub(crate) async fn prepare(
     row: i64,
     result: &LookupResponse,
     source_files: &[String],
-) -> Result<PreparedExport, OutputReport> {
+) -> Result<BatchExport, OutputReport> {
     let root = plan
         .directory
         .as_deref()
@@ -244,12 +231,12 @@ pub(crate) async fn prepare(
             "provider": source["provider"], "url": source["url"],
         })).collect::<Vec<_>>()
     })).map_err(|_| OutputReport::error("无法写入输出清单。"))?;
-    Ok(PreparedExport::Batch(BatchExport {
+    Ok(BatchExport {
         temporary,
         destination,
         owner: plan.owner.clone(),
         report,
-    }))
+    })
 }
 
 fn metadata(record: &Value, options: &settings::OutputOptions, source_files: &[String]) -> Value {
@@ -338,7 +325,6 @@ mod tests {
             owner: "test-worker".into(),
             directory: Some(root.clone()),
             options,
-            media_paths: None,
         };
         let result = LookupResponse {
             record: json!({

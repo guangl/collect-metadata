@@ -338,6 +338,25 @@ async fn batch_result(
 }
 
 #[tauri::command]
+async fn preview_writeback(
+    state: State<'_, DesktopState>,
+    batch: i64,
+    row: Option<i64>,
+) -> Result<collect_metadata::WritebackPreview, String> {
+    state.collector().preview_writeback(batch, row).await
+}
+
+#[tauri::command]
+async fn queue_writeback(
+    state: State<'_, DesktopState>,
+    batch: i64,
+    row: Option<i64>,
+    token: String,
+) -> Result<usize, String> {
+    state.collector().queue_writeback(batch, row, &token).await
+}
+
+#[tauri::command]
 async fn retry_batch_row(
     state: State<'_, DesktopState>,
     batch: i64,
@@ -560,6 +579,8 @@ fn main() {
             control_batch,
             batch_result,
             retry_batch_row,
+            preview_writeback,
+            queue_writeback,
             choose_batch_candidate,
             lookup,
             search_media,

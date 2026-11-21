@@ -3,7 +3,16 @@ use std::{sync::Arc, time::Duration};
 use unicode_normalization::UnicodeNormalization;
 
 use super::{CandidateChoice, Claim, Outcome};
-use crate::{Collector, MediaKind, MediaProvider, SearchResult, storage::Store};
+use crate::{
+    Collector, MediaKind, MediaProvider, SearchResult,
+    output::{PreparedWriteback, emby_source, prepare_writeback},
+    storage::Store,
+};
+
+enum Work {
+    Collect(Outcome),
+    Writeback(PreparedWriteback),
+}
 
 impl Collector {
     pub async fn run_batch_worker(self: Arc<Self>) {
@@ -34,7 +43,26 @@ impl Collector {
 
     async fn run_claim(&self, store: &Store, claim: &Claim) {
         let outcome = {
-            let work = self.process_claim(store, claim);
+            let work = async {
+                if let Some((job, state)) = &claim.writeback {
+                    let result = store.batch_row_result(claim.batch, claim.id).await.ok()??;
+                    let paths = self.output_settings()?.media_paths();
+                    let emby = self.emby_connection().ok();
+                    Some(Work::Writeback(
+                        prepare_writeback(
+                            &self.client,
+                            emby.as_deref(),
+                            &paths,
+                            job,
+                            &result.record,
+                            state,
+                        )
+                        .await,
+                    ))
+                } else {
+                    self.process_claim(store, claim).await.map(Work::Collect)
+                }
+            };
             tokio::pin!(work);
             let mut heartbeat = tokio::time::interval(Duration::from_secs(4));
             heartbeat.tick().await;
@@ -50,7 +78,14 @@ impl Collector {
             }
         };
         if let Some(outcome) = outcome {
-            match store.finish(claim, outcome).await {
+            let finished = match outcome {
+                Work::Collect(outcome) => store.finish(claim, outcome).await,
+                Work::Writeback(output) => {
+                    let (job, state) = claim.writeback.as_ref().expect("writeback claim");
+                    store.finish_writeback(claim, job, state, output).await
+                }
+            };
+            match finished {
                 Ok(true) => return,
                 Ok(false) => {}
                 Err(error) => {
@@ -134,32 +169,27 @@ impl Collector {
             Ok(result) => Outcome::collected(result),
             Err(error) => Outcome::failed(error),
         };
-        if let Some(result) = outcome.result.as_ref().filter(|result| result.has_fields()) {
-            let plan = claim.export_plan.as_ref();
-            if let Some(data) = crate::output::emby_source(&result.record) {
-                let media_paths = plan.and_then(|plan| plan.media_paths.clone()).or_else(|| {
-                    self.output_settings()
-                        .map(|settings| settings.media_paths())
-                });
-                if let (Some(emby), Some(paths)) = (emby.as_deref(), media_paths) {
-                    outcome.output = Some(
-                        crate::output::prepare_emby(&self.client, emby, &paths, data, result).await,
-                    );
-                }
-            } else if let Some(plan) = plan.filter(|plan| plan.directory.is_some()) {
-                outcome.output = Some(
-                    crate::output::prepare(
-                        &self.client,
-                        emby.as_deref(),
-                        plan,
-                        claim.batch,
-                        claim.id,
-                        result,
-                        &claim.source_files,
-                    )
-                    .await,
-                );
-            }
+        if let Some(result) = outcome
+            .result
+            .as_ref()
+            .filter(|result| result.has_fields() && emby_source(&result.record).is_none())
+            && let Some(plan) = claim
+                .export_plan
+                .as_ref()
+                .filter(|plan| plan.directory.is_some())
+        {
+            outcome.output = Some(
+                crate::output::prepare(
+                    &self.client,
+                    emby.as_deref(),
+                    plan,
+                    claim.batch,
+                    claim.id,
+                    result,
+                    &claim.source_files,
+                )
+                .await,
+            );
         }
         Some(outcome)
     }

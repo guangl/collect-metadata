@@ -459,7 +459,6 @@ mod tests {
         let plan = ExportPlan {
             directory: Some(directory.path().canonicalize().unwrap()),
             owner: "test".into(),
-            media_paths: None,
             options: serde_json::from_value(json!({
                 "metadata":false,"poster":false,"emby_nfo":true,
                 "trailers":true,"theme_videos":true,"theme_music":true,"extras":true

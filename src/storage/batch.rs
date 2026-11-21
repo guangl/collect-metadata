@@ -7,7 +7,7 @@ use crate::{
         BatchAction, BatchItemInput, BatchRow, BatchStatus, BatchSummary, BatchView,
         CandidateChoice, Claim, Outcome,
     },
-    output::ExportPlan,
+    output::{ExportPlan, WritebackJob, WritebackState, emby_source},
 };
 
 use super::Store;
@@ -42,7 +42,9 @@ pub(super) async fn migrate(connection: &mut PgConnection) -> Result<(), sqlx::E
             message text,
             snapshot_id bigint REFERENCES collect_metadata_snapshots(id),
             result jsonb,
-            output_report jsonb
+            output_report jsonb,
+            writeback_state jsonb,
+            writeback_job jsonb
         )",
         "ALTER TABLE collect_metadata_batches ADD COLUMN IF NOT EXISTS status
             text NOT NULL DEFAULT 'running' CHECK (status IN ('running','paused','cancelled'))",
@@ -50,6 +52,8 @@ pub(super) async fn migrate(connection: &mut PgConnection) -> Result<(), sqlx::E
         "ALTER TABLE collect_metadata_batches ADD COLUMN IF NOT EXISTS export_plan jsonb",
         "ALTER TABLE collect_metadata_batches ADD COLUMN IF NOT EXISTS execution_owner text",
         "ALTER TABLE collect_metadata_batch_rows ADD COLUMN IF NOT EXISTS output_report jsonb",
+        "ALTER TABLE collect_metadata_batch_rows ADD COLUMN IF NOT EXISTS writeback_state jsonb",
+        "ALTER TABLE collect_metadata_batch_rows ADD COLUMN IF NOT EXISTS writeback_job jsonb",
         "ALTER TABLE collect_metadata_batch_rows ADD COLUMN IF NOT EXISTS requires_tmdb
             boolean NOT NULL DEFAULT false",
         "ALTER TABLE collect_metadata_batch_rows ADD COLUMN IF NOT EXISTS source_files
@@ -146,6 +150,11 @@ impl Store {
         let rows = sqlx::query(
             "SELECT r.id,r.kind,r.query,r.stage,r.message,r.candidates,b.status,
                 jsonb_array_length(r.source_files) AS file_count, r.output_report,
+                CASE WHEN r.writeback_job IS NOT NULL THEN r.stage
+                     WHEN r.writeback_state->>'remaining' = '0' THEN 'done'
+                     WHEN r.writeback_state->>'remaining' IS NOT NULL THEN 'failed'
+                     WHEN r.writeback_state IS NOT NULL THEN 'ready'
+                END AS writeback,
                 (r.snapshot_id IS NOT NULL OR r.result IS NOT NULL) AS has_result,
                 s.title, coalesce(s.document->'fields'->'original_languages','[]'::jsonb) AS original_languages,
                 coalesce(nullif(s.document->'fields'->>'poster_url',''), nullif(s.document->'fields'->>'cover_url','')) AS cover_url
@@ -173,6 +182,7 @@ impl Store {
                     cover_url: r.get("cover_url"),
                     original_languages: r.get::<Json<Vec<String>>, _>("original_languages").0,
                     file_count: r.get("file_count"),
+                    writeback: r.get("writeback"),
                     output: r
                         .try_get::<Option<Json<OutputReport>>, _>("output_report")?
                         .map(|report| report.0),
@@ -222,7 +232,8 @@ impl Store {
                 Some("UPDATE collect_metadata_batches SET status='cancelled' WHERE id=$1 AND status IN ('running','paused')
                       AND EXISTS (SELECT 1 FROM collect_metadata_batch_rows WHERE batch_id=$1
                                   AND stage IN ('queued','searching','collecting','choice','paused'))"),
-                "UPDATE collect_metadata_batch_rows SET stage='cancelled', updated_at=now(),
+                "UPDATE collect_metadata_batch_rows SET stage=coalesce(writeback_job->>'stage','cancelled'),
+                     writeback_job=NULL, updated_at=now(),
                      attempt=attempt+(stage IN ('searching','collecting'))::integer
                  WHERE batch_id=$1 AND stage IN ('queued','searching','collecting','choice','paused')",
             ),
@@ -339,9 +350,9 @@ impl Store {
                 SELECT r.id, b.export_plan FROM collect_metadata_batch_rows r
                 JOIN collect_metadata_batches b ON b.id=r.batch_id
                 WHERE b.status='running'
-                  AND ($1 OR NOT r.requires_tmdb)
-                  AND (coalesce(b.execution_owner, b.export_plan->>'owner') IS NULL
-                       OR coalesce(b.execution_owner, b.export_plan->>'owner')=$2)
+                  AND (r.writeback_job IS NOT NULL OR $1 OR NOT r.requires_tmdb)
+                  AND (coalesce(r.writeback_job->>'owner', b.execution_owner, b.export_plan->>'owner') IS NULL
+                       OR coalesce(r.writeback_job->>'owner', b.execution_owner, b.export_plan->>'owner')=$2)
                   AND r.stage IN ('queued','searching','collecting')
                   AND (r.lease_until IS NULL OR r.lease_until <= clock_timestamp())
                   AND (SELECT count(*) FROM collect_metadata_batch_rows
@@ -349,14 +360,18 @@ impl Store {
                 ORDER BY r.id FOR UPDATE OF r SKIP LOCKED LIMIT 1
              )
              UPDATE collect_metadata_batch_rows r
-             SET stage=CASE WHEN r.kind='av' OR r.candidate IS NOT NULL THEN 'collecting' ELSE 'searching' END,
+             SET stage=CASE WHEN r.writeback_job IS NOT NULL OR r.kind='av' OR r.candidate IS NOT NULL THEN 'collecting' ELSE 'searching' END,
                  attempt=r.attempt+1, lease_until=clock_timestamp()+interval '15 seconds', updated_at=now()
              FROM next WHERE r.id=next.id
              RETURNING r.id,r.batch_id,r.attempt,r.kind,r.query,r.candidate,(r.source_files <> '[]'::jsonb) AS from_folder,
-                next.export_plan, CASE WHEN next.export_plan IS NULL THEN '[]'::jsonb ELSE r.source_files END AS source_files"
+                next.export_plan, CASE WHEN next.export_plan IS NULL THEN '[]'::jsonb ELSE r.source_files END AS source_files,
+                r.writeback_job, CASE WHEN r.writeback_job IS NOT NULL THEN r.writeback_state END AS writeback_state"
         ).bind(has_tmdb).bind(owner).fetch_optional(&mut *tx).await?;
         tx.commit().await?;
         row.map(|r| {
+            let writeback = r.try_get::<Option<Json<WritebackJob>>, _>("writeback_job")?
+                .map(|job| r.try_get::<Json<WritebackState>, _>("writeback_state").map(|state| (job.0, state.0)))
+                .transpose()?;
             Ok(Claim {
                 id: r.get("id"),
                 batch: r.get("batch_id"),
@@ -368,6 +383,7 @@ impl Store {
                     .try_get::<Option<Json<ExportPlan>>, _>("export_plan")?
                     .map(|plan| plan.0),
                 source_files: r.try_get::<Json<Vec<String>>, _>("source_files")?.0,
+                writeback,
                 candidate: r
                     .try_get::<Option<Json<CandidateChoice>>, _>("candidate")?
                     .map(|value| value.0),
@@ -413,8 +429,12 @@ impl Store {
         }
         let mut snapshot = None;
         let mut failure = None;
+        let mut writeback = None;
         if let Some(result) = outcome.result {
             if result.has_fields() {
+                if emby_source(&result.record).is_some() {
+                    writeback = Some(Json(WritebackState::default()));
+                }
                 let saved = Self::insert_snapshot(&mut tx, result.code(), &result.record).await?;
                 snapshot = Some(saved.id);
             } else {
@@ -433,7 +453,7 @@ impl Store {
             };
         sqlx::query(
             "UPDATE collect_metadata_batch_rows SET stage=$2, message=$3, candidates=$4,
-                 snapshot_id=$5, result=$6, output_report=$7, lease_until=NULL, updated_at=now() WHERE id=$1",
+                 snapshot_id=$5, result=$6, output_report=$7, writeback_state=$8, lease_until=NULL, updated_at=now() WHERE id=$1",
         )
         .bind(claim.id)
         .bind(stage)
@@ -442,6 +462,7 @@ impl Store {
         .bind(snapshot)
         .bind(failure)
         .bind(report.map(Json))
+        .bind(writeback)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -452,7 +473,7 @@ impl Store {
         // Keep the slot until the old worker acknowledges the stop or its lease expires.
         sqlx::query(
             "UPDATE collect_metadata_batch_rows SET lease_until=NULL
-             WHERE id=$1 AND attempt=$2+1 AND stage IN ('paused','queued','cancelled')",
+             WHERE id=$1 AND attempt=$2+1 AND stage IN ('paused','queued','cancelled','success','partial')",
         )
         .bind(claim.id)
         .bind(claim.attempt)
@@ -462,7 +483,7 @@ impl Store {
     }
 }
 
-async fn lock_queue(pool: &PgPool) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+pub(super) async fn lock_queue(pool: &PgPool) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(CLAIM_LOCK)

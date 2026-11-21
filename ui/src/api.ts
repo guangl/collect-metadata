@@ -15,6 +15,7 @@ import type {
   Snapshot,
   StorageStatus,
   TmdbStatus,
+  WritebackPreview,
 } from "./types";
 
 declare global {
@@ -231,6 +232,17 @@ export function getBatchResult(batch: number, row: number): Promise<LookupRespon
 
 export function getBatchFiles(batch: number, row: number): Promise<string[]> {
   return invoke ? invoke("batch_files", { batch, row }) : request("/api/batches/" + batch + "/rows/" + row + "/files");
+}
+
+export function previewWriteback(batch: number, row: number | null): Promise<WritebackPreview> {
+  return invoke ? invoke("preview_writeback", { batch, row }) : request(
+    `/api/batches/${batch}/writeback` + (row === null ? "" : `?row=${row}`), { cache: "no-store" },
+  );
+}
+
+export function queueWriteback(batch: number, row: number | null, token: string): Promise<number> {
+  return invoke ? invoke("queue_writeback", { batch, row, token }) :
+    post(`/api/batches/${batch}/writeback`, { row, token });
 }
 
 export function retryBatchRow(batch: number, row: number): Promise<void> {

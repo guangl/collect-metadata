@@ -1,3 +1,4 @@
+import { WritebackDialog } from "./WritebackDialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import { chooseBatchCandidate, chooseMediaFolder, controlBatch, createBatch, createFolderBatch, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, importEmbyLibrary, isDesktop, listBatches, previewMountedFolder, retryBatchRow } from "../api";
@@ -121,6 +122,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const [embyRefresh, setEmbyRefresh] = useState(0);
   const [embyImportError, setEmbyImportError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [writeback, setWriteback] = useState<{ row: number | null; title: string } | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
 
   const refreshList = useCallback(async (before: number | null = null) => {
@@ -152,6 +154,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     setOpened(null);
     setConfirmCancel(false);
     setPollError(null);
+    setWriteback(null);
   }, [selected, storage]);
 
   useEffect(() => {
@@ -207,7 +210,10 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const sourceBusy = scanning || submitting;
 
   useEffect(() => {
-    if (!active) setOpened(null);
+    if (!active) {
+      setOpened(null);
+      setWriteback(null);
+    }
   }, [active]);
 
   async function updateBatch(next: BatchAction) {
@@ -531,6 +537,17 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
           </div>
           <progress value={ended} max={rows.length} aria-label="批次采集进度" />
         </div>
+        {status !== "cancelled" && rows.some((row) => row.writeback === "ready" || row.writeback === "failed") &&
+          <button className="secondary" type="button" disabled={busy}
+            onClick={() => setWriteback({ row: null, title: "此批次待写回的资料" })}>预览批次写回</button>}
+        {active && writeback && selected !== null && <WritebackDialog
+          key={selected + ":" + writeback.row} batch={selected} row={writeback.row} title={writeback.title}
+          canQueue={status !== "cancelled"} onClose={() => setWriteback(null)}
+          onQueued={(count) => {
+            setWriteback(null);
+            setRefresh((value) => value + 1);
+            onNotice("已排入 " + count + " 条写回任务。" + (status === "paused" ? "继续批次后开始写回。" : ""));
+          }} />}
         {active && opened && openedRow && <DetailDialog response={opened.response}
           opener={opened.opener} closeLabel="收起结果" onDismiss={() => setOpened(null)} />}
         <ol className="poster-grid" role="list" aria-label="批次作品海报">
@@ -548,10 +565,15 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
                   <p className="muted mt-1">{row.query.startsWith("emby-episode:") ? "分集" : mediaLabels[row.kind]}{row.title && " · " + languageText(row.original_languages)}</p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="batch-status" data-stage={row.stage}>{labels[row.stage]}</span>
+                  <span className="batch-status" data-stage={row.stage}>{row.writeback === "queued" ? "等待写回" : row.writeback === "collecting" ? "正在写回" : labels[row.stage]}</span>
                   {view.status !== "cancelled" && (row.stage === "failed" || row.stage === "not_found") && row.query &&
                     <button className="secondary" type="button" disabled={busy} onClick={() => changeRow(row)}>重试</button>}
                 </div>
+                {(row.writeback === "ready" || row.writeback === "failed" || row.writeback === "done") &&
+                  <button type="button" className="secondary" disabled={busy}
+                    onClick={() => setWriteback({ row: row.id, title })}>
+                    {row.writeback === "ready" ? "预览写回" : row.writeback === "failed" ? "查看失败并重试" : "查看写回记录"}
+                  </button>}
                 {row.message && <p className="muted">{row.message}</p>}
                 {row.output && <div className="muted">
                   {row.output.directory && <p>已写出 {row.output.written} 项资料 · <code>{row.output.directory}</code></p>}

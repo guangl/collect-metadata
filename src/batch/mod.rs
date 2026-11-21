@@ -2,6 +2,7 @@ mod folder;
 #[cfg(feature = "web")]
 mod mounted;
 mod worker;
+mod writeback;
 
 use std::collections::HashSet;
 
@@ -12,10 +13,11 @@ use serde_json::Value;
 use crate::{
     Collector, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview, EmbyWorkPreview,
     LookupResponse, MediaKind, MediaProvider, OutputReport,
-    output::{ExportPlan, PreparedExport},
+    output::{BatchExport, ExportPlan, WritebackJob, WritebackState},
     providers::media::emby::{EPISODE_QUERY_PREFIX, Emby},
 };
 
+pub use writeback::WritebackPreview;
 pub use folder::{
     FolderBatchResult, FolderPreview, FolderSelection, FolderWorkPreview, MAX_FOLDER_FILES,
     preview_folder,
@@ -119,6 +121,7 @@ pub struct BatchRow {
     pub original_languages: Vec<String>,
     pub file_count: i32,
     pub output: Option<OutputReport>,
+    pub writeback: Option<String>,
 }
 
 pub(crate) struct Claim {
@@ -131,6 +134,7 @@ pub(crate) struct Claim {
     pub from_folder: bool,
     pub export_plan: Option<ExportPlan>,
     pub source_files: Vec<String>,
+    pub writeback: Option<(WritebackJob, WritebackState)>,
 }
 
 pub(crate) struct Outcome {
@@ -138,7 +142,7 @@ pub(crate) struct Outcome {
     pub message: Option<String>,
     pub candidates: Option<Value>,
     pub result: Option<LookupResponse>,
-    pub output: Option<Result<PreparedExport, OutputReport>>,
+    pub output: Option<Result<BatchExport, OutputReport>>,
 }
 
 impl Outcome {
@@ -351,9 +355,8 @@ impl Collector {
         }
         let settings = self.output_settings().ok_or("后台输出配置不可用。")?;
         let owner = settings.durable_owner()?;
-        let export = settings.emby_plan();
         store
-            .create_batch(items, false, Some(name), Some(&export), Some(&owner))
+            .create_batch(items, false, Some(name), None, Some(&owner))
             .await
             .map_err(|_| "无法保存 Emby 导入批次。".into())
     }
@@ -374,7 +377,7 @@ impl Collector {
                 .is_some();
             let export = self
                 .output_settings()
-                .map(|settings| settings.folder_plan(read_emby))
+                .map(|settings| settings.folder_plan())
                 .transpose()?
                 .flatten();
             let folder_name = items[0].source_files[0]

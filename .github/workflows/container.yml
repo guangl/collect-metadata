@@ -1,6 +1,7 @@
 name: Docker image
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -93,7 +94,7 @@ jobs:
           compose=(docker compose -p collect-metadata-smoke -f compose.yaml -f compose.ghcr.yaml)
           trap '"${compose[@]}" down --volumes' EXIT
           "${compose[@]}" up -d --wait --wait-timeout 90
-          if ! curl -fsS --retry 15 --retry-delay 2 --retry-all-errors http://127.0.0.1:8080/healthz; then
+          if ! curl -fsS --retry 15 --retry-delay 2 --retry-all-errors http://127.0.0.1:8080/readyz; then
             "${compose[@]}" logs --tail 100
             exit 1
           fi

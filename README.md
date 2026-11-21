@@ -23,7 +23,7 @@
 
 macOS 版未经过 Apple 公证，Windows 安装器未使用商业证书签名。请从本仓库下载，并可用 Release 随附的 `SHA256SUMS` 校验。
 
-打开应用后，选择本地媒体文件夹即可预览作品。提交后台批次和查看历史需要在「设置 → PostgreSQL」连接数据库，详见 [Tauri 桌面版](#tauri-桌面版)。[Docker Web 版](#docker-web-版) 是可选部署方式，不是桌面版的前置条件。
+打开应用后，选择本地媒体文件夹即可预览作品。提交后台批次和查看历史需要在「设置 → PostgreSQL」连接数据库，详见 [Tauri 桌面版](#tauri-桌面版)。同一版本也提供 [Docker Web 镜像](#docker-web-版) 和 [Emby 插件](#emby-入库自动刮削插件)。已有部署请先查看 [从 v0.9.0 升级](#从-v090-升级)。
 
 ## 采集范围
 
@@ -130,7 +130,12 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 EMBY_WRITEBACK_MOUNT=/宿主机/媒体目录 docker compose -f compose.yaml -f compose.emby-writeback.yaml up -d --build
 ```
 
-剧集根目录写入 `tvshow.nfo` 和可用封面、背景图。电影和分集的 NFO 用真实视频文件名，例如 `第 1 集.mkv` 对应 `第 1 集.nfo`，分集缩略图放在同一目录。Emby 图片文件名遵循[电影](https://emby.media/support/articles/Movie-Naming.html#video-images)和[分集](https://emby.media/support/articles/TV-Naming.html#episode-images)的约定。写回会替换同名 NFO 或图片。媒体未挂载、路径未映射或写入失败时，后台队列会显示原因，成功获取的元数据仍保存在 PostgreSQL。
+剧集根目录写入 `tvshow.nfo` 和可用封面、背景图。电影和分集的 NFO 用真实视频文件名，例如 `第 1 集.mkv` 对应 `第 1 集.nfo`，分集缩略图放在同一目录。Emby 图片文件名遵循[电影](https://emby.media/support/articles/Movie-Naming.html#video-images)和[分集](https://emby.media/support/articles/TV-Naming.html#episode-images)的约定。
+
+1. 采集完成后，在后台任务中点击「预览写回」或「预览批次写回」。核对本机目标路径、新增和替换项。图片会采用 Emby 实际返回的格式，预览列出可能的目标文件。
+2. 点击「确认写回」。每个现有文件在被替换前都会保存一份备份。目标在预览后发生变化时，请重新预览。整套媒体写回和 Emby 原生「覆盖刮削」是两个独立的操作。
+3. 处理路径映射、挂载或权限问题后，点击「查看失败并重试」。此操作使用同一份已保存的元数据，仅处理未成功文件；图片仍从 Emby 获取。即使媒体不可写，已采集的元数据也可查看和导出。
+4. 点击「查看写回记录」可找到被替换文件和同目录 `.collect-metadata-backups/` 中的备份。如需恢复，先暂停该库的写回或自动刷新，将对应备份复制回记录显示的原路径，再让 Emby 重新读取本地资料。备份由部署者按需保留。
 
 家庭「元数据翻译」的旧定时任务在 NAS 处理作品简介和分集标题，并写回 Emby。采集会读取 Emby 已有资料；如需额外的目标语言，可配置上面的翻译适配器。文件夹刮削在 Emby 未匹配到作品时继续查询常规来源。
 
@@ -144,13 +149,9 @@ EMBY_WRITEBACK_MOUNT=/宿主机/媒体目录 docker compose -f compose.yaml -f c
 
 [`emby-plugin/`](emby-plugin/) 是独立安装在 Emby Server 里的原生插件。Emby 扫描发现新电影、剧集、季、分集或私人影片后，插件会通过 Emby 的后台队列刷新该条目的元数据和图片。给已有剧集添加新分集时，只对新入库的条目提交刷新。插件不会对已有条目做批量回填，也不会请求「替换所有元数据」或「替换所有图片」；已锁定的条目会被跳过。
 
-使用 [Emby Server 4.9.1.90 的 SDK](https://www.nuget.org/packages/MediaBrowser.Server.Core/4.9.1.90) 构建，已在 4.10.2.0 Docker 镜像中验证同步。其他版本请先验证兼容性。构建需要 .NET 8 SDK 或更新版本：
+从 v0.10.0 起，可以直接从 [GitHub Releases](https://github.com/guangl/collect-metadata/releases/latest) 下载 `CollectMetadata.Emby.dll`，并用同一版本的 `SHA256SUMS` 校验。插件使用 [Emby Server 4.9.1.90 的 SDK](https://www.nuget.org/packages/MediaBrowser.Server.Core/4.9.1.90) 构建，已在 4.10.2.0 Docker 镜像中验证同步。其他版本请先验证兼容性。开发时可用 .NET 8 SDK 构建 `dotnet build emby-plugin/CollectMetadata.Emby.csproj -c Release`。
 
-```sh
-dotnet build emby-plugin/CollectMetadata.Emby.csproj -c Release
-```
-
-1. 只把 `emby-plugin/bin/Release/netstandard2.0/CollectMetadata.Emby.dll` 复制到 **Emby 服务端数据目录**的 `plugins/`（官方 Docker 镜像中通常是 `/config/plugins/`）。确保 Emby 进程能读取 DLL，然后重启 Emby；不要复制任何 SDK DLL。
+1. 将 `CollectMetadata.Emby.dll` 复制到 **Emby 服务端数据目录**的 `plugins/`（官方 Docker 镜像中通常是 `/config/plugins/`）。源码构建的 DLL 位于 `emby-plugin/bin/Release/netstandard2.0/`。确保 Emby 进程能读取 DLL，然后重启 Emby。
 2. 在 Emby 控制台的「媒体库」为电影和剧集分别启用所需的元数据下载器、图片下载器和首选语言。插件沿用这些设置，不需要 Collect Metadata Web、PostgreSQL 或本应用里配置的 TMDB 密钥。如果未开启实时监控，文件要等计划扫描或手动扫描才会入库。
 3. 在测试库放入一部新电影或一个新分集，等 Emby 扫描和后台刷新完成。在 Emby 日志中可看到 `Collect Metadata - Auto Scrape` 记录的 `Requested metadata refresh for …`（表示提交刷新，不代表匹配成功）。元数据结果取决于文件命名、媒体库设置和下载器的连通性。
 
@@ -238,7 +239,7 @@ mywife：Mywife-0123
 
 ## 测试
 
-GitHub CI 在推送 `main` 或提交 PR 时运行前端测试与构建，以及 Rust 的桌面和 Web 测试，不需要私有凭据。`npm run test:coverage` 检查 TypeScript 源文件的行覆盖率，门槛为 85%。
+GitHub CI 在推送 `main` 或提交 PR 时运行前端测试与构建、Rust 桌面和 Web 测试、临时 PostgreSQL 的队列和模拟 Emby 集成测试，以及 Emby 插件构建和整理规则检查。这些检查使用测试配置，无需私有凭据。`npm run test:coverage` 检查 TypeScript 源文件的行覆盖率，门槛为 85%。
 
 Rust 的完整覆盖率检查还包含 PostgreSQL 集成测试及实际来源采集。运行前设置 `COLLECT_METADATA_TEST_POSTGRES`（连接账户需有建 schema 权限）和 `TMDB_READ_ACCESS_TOKEN`，并确保能连接测试使用的公开来源。
 
@@ -252,7 +253,7 @@ EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --all-features --summary-onl
 
 从 [`.env.example`](.env.example) 复制本地 `.env` 并设置 `POSTGRES_PASSWORD`。以下两种部署方式都会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
 
-**使用预构建镜像（Compose v2.24.4+）：** [GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata) 镜像供可选的 Docker 部署使用，按需手动构建，不随桌面 Release 更新。如需固定版本，在 `.env` 中把 `COLLECT_METADATA_IMAGE` 设置为 Packages 中列出的标签或镜像摘要。
+**使用预构建镜像（Compose v2.24.4+）：** [GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata) 镜像供可选的 Docker 部署使用。从 v0.10.0 起，发布流程同时构建 amd64 和 arm64 版本镜像。按 Release 给出的版本固定镜像，例如在 `.env` 设置 `COLLECT_METADATA_IMAGE=ghcr.io/guangl/collect-metadata:0.10.0`。可以继续使用手动构建的 `latest`，或使用镜像摘要固定到具体构建。
 
 ```sh
 docker compose -f compose.yaml -f compose.ghcr.yaml pull
@@ -276,6 +277,67 @@ npm ci
 npm run build
 cargo run --locked --no-default-features --features web --bin collect-metadata-web
 ```
+
+## 升级
+
+### 从 v0.9.0 升级
+
+1. 暂停新的采集和写回，等待正在执行的任务收尾。备份 PostgreSQL 和应用配置；Emby 插件如需更新，保留安装目录里原来的 DLL。确认桌面端和 Docker Web 端是否共用数据库，一起升级这些进程。
+2. 桌面版用新版本的 DMG 或 EXE 安装。Docker Web 在原目录用相同的 Compose 文件、项目名和挂载启动。镜像部署先更新 `COLLECT_METADATA_IMAGE`，再 `pull` 和 `up -d --wait`；源码部署使用 `up -d --build --wait`。应用启动时自动添加写回字段，沿用已有的历史、队列和设置。
+3. 新的 Emby 刮削批次要在后台任务中预览并确认写回。既有批次保留原来的输出报告；旧版没有逐文件写回记录，若需要按新流程重试，重新提交所需作品。Emby 插件可独立升级，替换 DLL 后重启 Emby。
+4. 验证 `/readyz`、历史列表和一个测试作品的写回预览。需要回退时，固定原镜像或重装原安装包，并把升级前的备份恢复到独立的数据库和配置副本后再切换。
+
+### NAS 健康检查
+
+- `GET /healthz` 返回 204，代表 Web 进程可以响应。
+- `GET /readyz` 在限时检查 PostgreSQL 后返回 204 或 503。Docker 镜像用它报告容器健康状态；NAS 上的外部监控也可请求这个地址。
+- `docker compose ps` 可确认容器状态。若就绪检查失败，查看 `docker compose logs --tail=100 app db`，并确认数据库容器和连接配置。媒体路径和写回权限可从具体批次的预览与失败记录检查。
+
+### 备份与恢复
+
+下面以 Docker Web 为例。有 Compose 覆盖文件的部署继续使用原有的 `-f` 参数。数据库卷保存快照、队列和同步数据；`tmdb_config` 卷也包含 Emby、语言和输出设置，以及队列使用的本机标识。备份中可能含数据库和服务凭据，请放在受限目录。
+
+在例行维护时先关闭使用同一库的桌面进程。下面的命令停止 Web 应用，把数据库、配置卷和 Compose 环境文件备份到一个新目录，完成后重新启动应用。
+
+```sh
+umask 077
+backup_dir="$PWD/collect-metadata-backup-$(date +%Y%m%d-%H%M%S)"
+(
+  set -e
+  mkdir "$backup_dir"
+  docker compose stop app
+  trap 'docker compose up -d --wait' EXIT
+  docker compose exec -T db sh -c 'exec pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB"' \
+    > "$backup_dir/database.dump"
+  docker compose run -T --rm --no-deps --user 0 --entrypoint tar app \
+    -C /var/lib/collect-metadata -czf - . > "$backup_dir/app-config.tar.gz"
+  cp .env "$backup_dir/compose.env"
+  touch "$backup_dir/COMPLETE"
+)
+```
+
+使用带有 `COMPLETE` 标记的备份目录。另行保留使用中的 Compose 覆盖文件。需要保留导出文件时，备份 `scrape_output` 或 `SCRAPE_OUTPUT_MOUNT`。媒体目录及其中的写回备份随 NAS 媒体备份保存。独立 PostgreSQL 可用同样的 `pg_dump -Fc` 备份，桌面端还要复制应用配置目录。
+
+恢复时，用一个新的 Compose 项目和未使用的端口验证。下面的命令只使用基础 Compose 文件，避免恢复演练写回原媒体目录。由于恢复出来的队列会在服务启动后继续处理，演练前请在原部署中暂停待处理批次再备份，或在测试网络隔离实际 Emby 和翻译服务。在仓库根目录执行，沿用上面的 `backup_dir`。
+
+```sh
+(
+  set -e
+  test -f "$backup_dir/COMPLETE"
+  export APP_PORT=18080
+  docker compose --env-file "$backup_dir/compose.env" -p collect-metadata-restore up -d --wait db
+  docker compose --env-file "$backup_dir/compose.env" -p collect-metadata-restore exec -T db \
+    sh -c 'exec pg_restore --exit-on-error --single-transaction --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    < "$backup_dir/database.dump"
+  docker compose --env-file "$backup_dir/compose.env" -p collect-metadata-restore run -T --build --rm \
+    --no-deps --user 0 --entrypoint tar app -C /var/lib/collect-metadata -xzf - \
+    < "$backup_dir/app-config.tar.gz"
+  docker compose --env-file "$backup_dir/compose.env" -p collect-metadata-restore up -d --wait
+  curl -fsS http://127.0.0.1:18080/readyz
+)
+```
+
+核对历史、批次、设置和输出文件，再切换实际部署。恢复到原服务前，请先备份当前服务的数据库和配置。
 
 ## Tauri 桌面版
 
