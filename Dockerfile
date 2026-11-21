@@ -21,6 +21,7 @@ RUN apt-get update \
     && install -m 0600 -o 65532 -g 65532 /dev/null /output/.initialized \
     && install -m 0600 -o 65532 -g 65532 /dev/null /var/lib/collect-metadata/.initialized
 COPY --from=build /build/target/release/collect-metadata-web /usr/local/bin/
+COPY LICENSE /usr/share/doc/collect-metadata/LICENSE
 ENV APP_BIND=0.0.0.0:8080
 ENV TMDB_CONFIG_FILE=/var/lib/collect-metadata/tmdb-token
 ENV SCRAPE_OUTPUT_ROOT=/output

@@ -1,10 +1,12 @@
 # Collect Metadata
 
 [![CI](https://github.com/guangl/collect-metadata/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/guangl/collect-metadata/actions/workflows/ci.yml)
+[![Docker image](https://github.com/guangl/collect-metadata/actions/workflows/container.yml/badge.svg?branch=main)](https://github.com/guangl/collect-metadata/actions/workflows/container.yml)
+[![Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 **给本地文件夹和 Emby 媒体库用的自托管元数据刮削工具。** 在一个工作台里预览作品、提交后台任务、查看结果并导出资料，不移动或改写原视频。
 
-[快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md)
+[项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md)
 
 - **导入**：选择本地文件夹、服务端挂载目录或 Emby 媒体库，也可手动输入作品清单。
 - **后台采集**：支持暂停、继续和重试；有多个匹配时可手动确认。任务与历史保存在 PostgreSQL。
@@ -20,7 +22,13 @@ cd collect-metadata
 cp .env.example .env
 ```
 
-在 `.env` 中为 `POSTGRES_PASSWORD` 设置新密码，然后运行 `docker compose up -d --build`。打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)，选择文件夹，确认预览后点「开始刮削元数据」。部署与存储选项见 [Docker Web 版](#docker-web-版)。
+在 `.env` 中为 `POSTGRES_PASSWORD` 设置新密码。用 Docker Compose v2.24.4 或以上版本启动预构建镜像：
+
+```sh
+docker compose -f compose.yaml -f compose.ghcr.yaml up -d
+```
+
+打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)，选择文件夹，确认预览后点「开始刮削元数据」。源码构建、镜像版本与存储选项见 [Docker Web 版](#docker-web-版)。
 
 macOS 和 Windows 也可从源码运行 [Tauri 桌面版](#tauri-桌面版)。Web 与桌面共用 React + TypeScript 界面和 Rust 采集核心。
 
@@ -202,7 +210,18 @@ EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --all-features --summary-onl
 
 ## Docker Web 版
 
-从 [`.env.example`](.env.example) 复制本地 `.env` 并设置 `POSTGRES_PASSWORD`。以下命令会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
+从 [`.env.example`](.env.example) 复制本地 `.env` 并设置 `POSTGRES_PASSWORD`。以下两种部署方式都会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
+
+**使用预构建镜像（Compose v2.24.4+）：** 镜像发布到 [GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata)，支持 `linux/amd64` 和 `linux/arm64`。`latest` 跟随 `main`；如需固定版本，在 `.env` 中把 `COLLECT_METADATA_IMAGE` 设置为 Packages 中列出的标签或镜像摘要。
+
+```sh
+docker compose -f compose.yaml -f compose.ghcr.yaml pull
+docker compose -f compose.yaml -f compose.ghcr.yaml up -d
+```
+
+如果拉取时返回 `denied`，请检查镜像标签是否已发布，以及 GHCR 包的可见性；私有包需要先用有读取权限的账号登录 `ghcr.io`。也可以改用下面的方式从源码构建。
+
+**从源码构建：**
 
 ```sh
 docker compose up -d --build
@@ -251,3 +270,7 @@ docker compose -f compose.yaml -f compose.desktop.yaml up -d --build
 | --- | --- |
 | macOS | `~/Library/Application Support/com.collectmetadata.desktop/database-url` |
 | Windows | `%APPDATA%\com.collectmetadata.desktop\database-url` |
+
+## 许可证
+
+本项目代码采用 [Apache License 2.0](LICENSE)。第三方元数据、图片和商标不因本项目的许可证而获得授权，使用时应遵守各来源的条款。
