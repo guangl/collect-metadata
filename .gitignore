@@ -1,0 +1,8 @@
+/target
+/gen
+/.env
+/dist
+/node_modules
+/coverage
+/emby-plugin/bin/
+/emby-plugin/obj/

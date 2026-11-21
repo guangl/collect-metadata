@@ -1,0 +1,6 @@
+.git
+target
+gen
+.env
+dist
+node_modules

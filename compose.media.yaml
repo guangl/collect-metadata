@@ -1,0 +1,12 @@
+# Optional: expose an already-mounted NAS/SMB/NFS directory to the web app.
+services:
+  app:
+    environment:
+      SCRAPE_MEDIA_ROOT: /media-input
+    volumes:
+      - type: bind
+        source: ${SCRAPE_MEDIA_MOUNT:?请指定宿主机已挂载的媒体目录 SCRAPE_MEDIA_MOUNT}
+        target: /media-input
+        read_only: true
+        bind:
+          create_host_path: false
