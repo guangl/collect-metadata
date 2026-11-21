@@ -262,7 +262,7 @@ pub(crate) async fn sync_document(
 ) -> Value {
     let targets = settings.targets(preference);
     let texts = emby_texts(document);
-    let variants = settings
+    let mut variants = settings
         .localize(
             client,
             &targets,
@@ -271,9 +271,26 @@ pub(crate) async fn sync_document(
             &synced_cache(previous, &texts),
         )
         .await;
+    let previous_metadata = &previous["_collect_metadata"];
+    let supplemental_overview = if text(&document["Overview"]).is_none() {
+        text(&previous_metadata["overview_source"]).zip(text(
+            &previous_metadata["localized_metadata"]["zh-CN"]["description"],
+        ))
+    } else {
+        None
+    };
+    if let Some((_, overview)) = supplemental_overview {
+        variants
+            .entry("zh-CN".into())
+            .or_default()
+            .insert("description".into(), overview.into());
+    }
     let mut document = document.clone();
     document["_collect_metadata"] =
         json!({"metadata_languages": targets, "localized_metadata": variants});
+    if let Some((source, _)) = supplemental_overview {
+        document["_collect_metadata"]["overview_source"] = json!(source);
+    }
     document
 }
 
@@ -318,6 +335,41 @@ mod tests {
         );
         assert_eq!(synced["Name"], raw["Name"]);
         assert_eq!(synced["Overview"], raw["Overview"]);
+    }
+
+    #[tokio::test]
+    async fn sync_retains_sourced_overview_until_emby_provides_one() {
+        let settings = LanguageSettings {
+            path: None,
+            languages: std::sync::RwLock::new(vec!["zh-CN".into()]),
+            translator: None,
+        };
+        let client = reqwest::Client::new();
+        let previous = json!({"Id":"12", "_collect_metadata":{
+            "overview_source":"https://example.com/season/1",
+            "localized_metadata":{"zh-CN":{"description":"补充简介"}}
+        }});
+        let raw = json!({"Id":"12","Name":"第一季"});
+        let synced = sync_document(&settings, &client, &raw, &previous, None).await;
+        assert_eq!(
+            synced["_collect_metadata"]["overview_source"],
+            previous["_collect_metadata"]["overview_source"]
+        );
+        assert_eq!(
+            synced["_collect_metadata"]["localized_metadata"]["zh-CN"]["description"],
+            "补充简介"
+        );
+        assert!(synced.get("Overview").is_none());
+
+        let updated = json!({"Id":"12","Name":"第一季","Overview":"Emby 的新简介"});
+        let synced = sync_document(&settings, &client, &updated, &previous, None).await;
+        assert_eq!(synced["Overview"], updated["Overview"]);
+        assert!(synced["_collect_metadata"].get("overview_source").is_none());
+        assert!(
+            synced["_collect_metadata"]["localized_metadata"]
+                .get("zh-CN")
+                .is_none()
+        );
     }
 
     #[test]
