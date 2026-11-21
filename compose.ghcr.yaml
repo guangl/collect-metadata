@@ -1,0 +1,5 @@
+# Requires Docker Compose v2.24.4+ for !reset.
+services:
+  app:
+    build: !reset null
+    image: "${COLLECT_METADATA_IMAGE:-ghcr.io/guangl/collect-metadata:latest}"

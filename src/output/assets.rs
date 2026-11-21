@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use reqwest::{Client, Response, Url, header};
 use serde_json::Value;
@@ -17,7 +17,7 @@ fn entries(value: &Value) -> impl Iterator<Item = &Value> {
     value.as_array().into_iter().flatten()
 }
 
-fn allowed(url: &Url) -> bool {
+pub(super) fn allowed(url: &Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
@@ -312,11 +312,25 @@ pub(super) async fn download(
     if asset.from_emby {
         return image_bytes(emby?.image_response(client, &asset.url).await?).await;
     }
-    let mut url = asset.url.clone();
+    image_bytes(public_response(client, &asset.url, "image/*", Duration::from_secs(10)).await?)
+        .await
+}
+
+pub(super) async fn public_response(
+    client: &Client,
+    original: &Url,
+    accept: &str,
+    timeout: Duration,
+) -> Option<Response> {
+    let mut url = original.clone();
     for _ in 0..4 {
+        if !allowed(&url) {
+            return None;
+        }
         let response = client
             .get(url.clone())
-            .header(header::ACCEPT, "image/*")
+            .header(header::ACCEPT, accept)
+            .timeout(timeout)
             .send()
             .await
             .ok()?;
@@ -324,15 +338,9 @@ pub(super) async fn download(
             url = url
                 .join(response.headers().get(header::LOCATION)?.to_str().ok()?)
                 .ok()?;
-            if !allowed(&url) {
-                return None;
-            }
             continue;
         }
-        if !response.status().is_success() {
-            return None;
-        }
-        return image_bytes(response).await;
+        return (response.status().is_success() && response.url() == &url).then_some(response);
     }
     None
 }

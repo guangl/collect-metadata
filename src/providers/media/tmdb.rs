@@ -156,6 +156,18 @@ impl Tmdb {
             Err(error) => return Source::failure(NAME, &page, error),
         };
 
+        if language.split('-').next() != Some("en")
+            && !list(&data["videos"]["results"]).any(|video| video["type"] == "Trailer")
+        {
+            let endpoint = self.endpoint(&format!("{namespace}/{id}/videos"), "en-US");
+            if let Ok(videos) = self.get(client, &endpoint).await
+                && videos["id"].as_u64() == Some(u64::from(id))
+                && videos["results"].is_array()
+            {
+                data["videos_fallback_en"] = videos;
+            }
+        }
+
         let mut stage_note = None;
         if kind == MediaKind::Series {
             let season_numbers = data["seasons"]
@@ -191,7 +203,7 @@ impl Tmdb {
                 stage_note = Some(format!("已取得剧集资料，有 {missing} 季的分集暂不可用。"));
             }
         }
-        let mut source = Source::found(NAME, &page, fields(kind, id, &data), data);
+        let mut source = Source::found(NAME, &page, fields(kind, id, &data, language), data);
         if let Some(note) = stage_note {
             source.status = "partial";
             source.note = Some(note);
@@ -300,7 +312,7 @@ fn names(value: &Value) -> Vec<&str> {
         .collect()
 }
 
-fn fields(kind: MediaKind, id: u32, data: &Value) -> Fields {
+fn fields(kind: MediaKind, id: u32, data: &Value, language: &str) -> Fields {
     let series = kind == MediaKind::Series;
     let credits = &data[if series {
         "aggregate_credits"
@@ -331,15 +343,63 @@ fn fields(kind: MediaKind, id: u32, data: &Value) -> Fields {
             },
         }))
         .collect::<Vec<_>>();
-    let trailer = list(&data["videos"]["results"]).find_map(|video| {
-        let key = video["key"].as_str()?;
-        let safe_key = !key.is_empty()
-            && key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-        (safe_key && video["type"] == "Trailer" && video["site"] == "YouTube")
-            .then(|| format!("https://www.youtube.com/watch?v={key}"))
-    });
+    let mut videos = list(&data["videos"]["results"])
+        .chain(list(&data["videos_fallback_en"]["results"]))
+        .filter_map(|video| {
+            let key = video["key"].as_str()?;
+            if key.is_empty()
+                || key.len() > 64
+                || !key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return None;
+            }
+            let url = match video["site"].as_str()? {
+                "YouTube" => format!("https://www.youtube.com/watch?v={key}"),
+                "Vimeo" if key.bytes().all(|byte| byte.is_ascii_digit()) => {
+                    format!("https://vimeo.com/{key}")
+                }
+                _ => return None,
+            };
+            Some(json!({
+                "type": video["type"], "name": video["name"], "url": url,
+                "language": video["iso_639_1"], "official": video["official"],
+            }))
+        })
+        .collect::<Vec<_>>();
+    videos.sort_by_key(|video| video["official"] != true);
+    let trailer = videos
+        .iter()
+        .find(|video| video["type"] == "Trailer")
+        .map(|video| video["url"].clone())
+        .unwrap_or_default();
+    let original_description = list(&data["translations"]["translations"])
+        .filter(|entry| {
+            entry["iso_639_1"].is_string() && entry["iso_639_1"] == data["original_language"]
+        })
+        .filter_map(|entry| entry["data"]["overview"].as_str())
+        .find(|value| !value.trim().is_empty())
+        .or_else(|| {
+            (language.split('-').next()? == data["original_language"].as_str()?)
+                .then(|| data["overview"].as_str())
+                .flatten()
+        });
+    let region = language
+        .rsplit_once('-')
+        .map(|(_, region)| region)
+        .unwrap_or("US");
+    let official_rating = if series {
+        list(&data["content_ratings"]["results"])
+            .find(|entry| entry["iso_3166_1"] == region)
+            .and_then(|entry| entry["rating"].as_str())
+    } else {
+        list(&data["release_dates"]["results"])
+            .filter(|entry| entry["iso_3166_1"] == region)
+            .flat_map(|entry| list(&entry["release_dates"]))
+            .filter_map(|entry| entry["certification"].as_str())
+            .find(|value| !value.trim().is_empty())
+    };
     let countries = names(&data["production_countries"]);
     field_map([
         ("title", json!(title(kind, data))),
@@ -356,6 +416,8 @@ fn fields(kind: MediaKind, id: u32, data: &Value) -> Fields {
         ),
         ("original_languages", json!(languages(data))),
         ("description", data["overview"].clone()),
+        ("description_original", json!(original_description)),
+        ("official_rating", json!(official_rating)),
         ("tagline", data["tagline"].clone()),
         (
             "runtime_minutes",
@@ -369,6 +431,13 @@ fn fields(kind: MediaKind, id: u32, data: &Value) -> Fields {
             },
         ),
         ("genres", json!(names(&data["genres"]))),
+        (
+            "tags",
+            json!(names(
+                &data["keywords"][if series { "results" } else { "keywords" }]
+            )),
+        ),
+        ("collection", data["belongs_to_collection"]["name"].clone()),
         (
             "countries",
             if countries.is_empty() {
@@ -408,7 +477,8 @@ fn fields(kind: MediaKind, id: u32, data: &Value) -> Fields {
             "backdrop_url",
             json!(image(&data["backdrop_path"], "w1280")),
         ),
-        ("trailer_url", json!(trailer)),
+        ("trailer_url", trailer),
+        ("videos", json!(videos)),
         ("official_url", data["homepage"].clone()),
         (
             "watch_providers_source",
@@ -431,14 +501,29 @@ mod tests {
             "id": 496243, "title": "寄生虫", "original_title": "기생충", "original_language": "ko",
             "release_date": "2019-05-30", "poster_path": "/test.jpg",
             "credits": {"crew": [{"job": "Director", "name": "Bong Joon Ho"}]},
-            "external_ids": {"imdb_id": "tt6751668"}, "vote_average": 8.5, "vote_count": 10
+            "external_ids": {"imdb_id": "tt6751668"}, "vote_average": 8.5, "vote_count": 10,
+            "translations": {"translations": [{"iso_639_1":"ko","data":{"overview":"원문"}}]},
+            "release_dates": {"results": [{"iso_3166_1":"CN","release_dates":[{"certification":"R"}]}]},
+            "videos":{"results":[
+                {"type":"Trailer","key":"unofficial","site":"YouTube","official":false},
+                {"type":"Trailer","key":"official","site":"YouTube","official":true},
+                {"type":"Behind the Scenes","key":"12345","site":"Vimeo"},
+                {"type":"Trailer","key":"x?y","site":"YouTube"}
+            ]}
         });
         let hit = candidate(MediaKind::Movie, &movie).unwrap();
         assert_eq!(hit.match_titles, ["寄生虫", "기생충"]);
         assert_eq!(hit.original_languages, ["ko"]);
         assert_eq!(hit.year, Some(2019));
-        let movie_fields = fields(MediaKind::Movie, 496243, &movie);
+        let movie_fields = fields(MediaKind::Movie, 496243, &movie, "zh-CN");
         assert_eq!(movie_fields["imdb_id"], "tt6751668");
+        assert_eq!(movie_fields["description_original"], "원문");
+        assert_eq!(movie_fields["official_rating"], "R");
+        assert_eq!(
+            movie_fields["trailer_url"],
+            "https://www.youtube.com/watch?v=official"
+        );
+        assert_eq!(movie_fields["videos"].as_array().unwrap().len(), 3);
         assert_eq!(movie_fields["directors"][0], "Bong Joon Ho");
         assert_eq!(
             movie_fields["cover_url"],
@@ -450,7 +535,7 @@ mod tests {
             "first_air_date": "2017-12-01", "in_production": false, "last_air_date": "2020-06-27",
             "season_details": [{"season_number": 0, "episodes": [{"season_number":0,"episode_number":1,"name":"Special"}]}]
         });
-        let show_fields = fields(MediaKind::Series, 70523, &show);
+        let show_fields = fields(MediaKind::Series, 70523, &show, "zh-CN");
         assert_eq!(show_fields["original_languages"][0], "de");
         assert_eq!(show_fields["end_date"], "2020-06-27");
         assert_eq!(show_fields["episodes"][0]["season"], 0);
@@ -470,7 +555,11 @@ mod tests {
             |headers: HeaderMap, uri: axum::http::Uri| async move {
                 assert_eq!(headers[AUTHORIZATION], "Bearer fake-test-token");
                 let query = uri.query().unwrap_or_default();
-                let language = if uri.path() == "/3/search/movie" { "ja" } else { "zh-CN" };
+                let language = match uri.path() {
+                    "/3/search/movie" => "ja",
+                    path if path.ends_with("/videos") => "en-US",
+                    _ => "zh-CN",
+                };
                 assert!(query.contains(&format!("language={language}")));
                 assert!(!query.contains("fake-test-token"));
                 let body = match uri.path() {
@@ -482,6 +571,7 @@ mod tests {
                         assert!(query.contains("release_dates"));
                         json!({"id":496243,"title":"寄生虫","original_language":"ko","translations":{"translations":[]}})
                     }
+                    "/3/movie/496243/videos" => json!({"id":496243,"results":[{"key":"trailer","type":"Trailer","site":"YouTube"}]}),
                     "/3/tv/70523" => {
                         assert!(query.contains("aggregate_credits"));
                         json!({"id":70523,"name":"暗黑","original_language":"de","seasons":[{"season_number":0},{"season_number":1}]})
@@ -513,6 +603,10 @@ mod tests {
             .await;
         assert_eq!(movie.status, "ok");
         assert!(movie.data["translations"].is_object());
+        assert_eq!(
+            movie.fields["trailer_url"],
+            "https://www.youtube.com/watch?v=trailer"
+        );
         let series = tmdb
             .details(&client, MediaKind::Series, 70523, "zh-CN")
             .await;

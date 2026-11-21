@@ -46,6 +46,10 @@ pub struct OutputOptions {
     pub(super) poster: bool,
     pub(super) backdrop: bool,
     pub(super) stills: bool,
+    pub(super) trailers: bool,
+    pub(super) theme_videos: bool,
+    pub(super) theme_music: bool,
+    pub(super) extras: bool,
     pub(super) portraits: Vec<PortraitRole>,
 }
 
@@ -66,6 +70,10 @@ impl Default for OutputOptions {
             poster: true,
             backdrop: false,
             stills: false,
+            trailers: false,
+            theme_videos: false,
+            theme_music: false,
+            extras: false,
             portraits: Vec::new(),
         }
     }
@@ -154,6 +162,10 @@ impl OutputSettings {
                 || options.poster
                 || options.backdrop
                 || options.stills
+                || options.trailers
+                || options.theme_videos
+                || options.theme_music
+                || options.extras
                 || !options.portraits.is_empty())
             {
                 return Err("请选择至少一项要写出的资料。".into());

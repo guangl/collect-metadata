@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import { chooseBatchCandidate, chooseMediaFolder, controlBatch, createBatch, createFolderBatch, getBatchFiles, getBatchResult, getBatchView, importEmby, isDesktop, listBatches, listEmbyLibraries, previewEmby, previewMountedFolder, retryBatchRow } from "../api";
 import { languageText, PosterArt } from "../Catalog";
-import { formatDate, Movie, Sources } from "../Movie";
+import { DetailDialog } from "../DetailDialog";
+import { formatDate } from "../Movie";
 import { errorText, mediaLabels, providerLabels } from "../types";
 import type { Candidate, EmbyLibrary, EmbyWorkPreview, LookupResponse, MediaType, StorageStatus } from "../types";
 import { MountedFolderPicker } from "./MountedFolderPicker";
@@ -106,14 +107,13 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const [action, setAction] = useState<BatchAction | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [refresh, setRefresh] = useState(0);
-  const [opened, setOpened] = useState<{ id: number; response: LookupResponse } | null>(null);
+  const [opened, setOpened] = useState<{ id: number; response: LookupResponse; opener: HTMLButtonElement } | null>(null);
   const [changing, setChanging] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [folderResult, setFolderResult] = useState<FolderBatchResult | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
   const folderInput = useRef<HTMLInputElement>(null);
-  const detail = useRef<HTMLElement>(null);
   const [source, setSource] = useState<"folder" | "emby">("folder");
   const [embyLibraries, setEmbyLibraries] = useState<EmbyLibrary[]>([]);
   const [embyLibrary, setEmbyLibrary] = useState("");
@@ -192,11 +192,8 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const folderStep = hasPreview ? 2 : (source === "folder" ? folderResult?.id != null : embySubmitted) ? 3 : 1;
 
   useEffect(() => {
-    if (opened && active) {
-      detail.current?.focus({ preventScroll: true });
-      detail.current?.scrollIntoView?.({ block: "start" });
-    }
-  }, [opened, active]);
+    if (!active) setOpened(null);
+  }, [active]);
 
   async function updateBatch(next: BatchAction) {
     if (selected === null || busy) return;
@@ -362,15 +359,12 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     }
   }
 
-  async function open(row: BatchRow) {
-    if (opened?.id === row.id) {
-      setOpened(null);
-      return;
-    }
+  async function open(row: BatchRow, opener: HTMLButtonElement) {
     if (selected === null || busy) return;
     setChanging(row.id);
     try {
-      setOpened({ id: row.id, response: await getBatchResult(selected, row.id) });
+      const response = await getBatchResult(selected, row.id);
+      if (opener.isConnected && !opener.closest("[hidden]")) setOpened({ id: row.id, response, opener });
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -562,18 +556,15 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
           </div>
           <progress value={ended} max={rows.length} aria-label="批次采集进度" />
         </div>
-        {opened && openedRow && <section ref={detail} className="batch-result" tabIndex={-1} aria-label="作品详情">
-          <button className="secondary back-results" type="button" onClick={() => setOpened(null)}>收起结果</button>
-          <Movie response={opened.response} onNotice={onNotice} onError={onError} />
-          <Sources kind={openedRow.kind} sources={opened.response.record.sources} loading={false} onError={onError} />
-        </section>}
+        {active && opened && openedRow && <DetailDialog response={opened.response} kind={openedRow.kind}
+          opener={opened.opener} closeLabel="收起结果" onDismiss={() => setOpened(null)} />}
         <ol className="poster-grid batch-list" role="list" aria-label="批次作品海报">
           {rows.map((row) => {
             const title = row.title || row.query || "缺少作品名称或番号";
             return <li className="batch-row" aria-label={row.query || "空条目"} key={row.id}>
               {row.has_result ? <button className="batch-poster" type="button"
-                aria-label={"打开 " + title + " 的详情"} aria-expanded={opened?.id === row.id}
-                disabled={busy} onClick={() => open(row)}>
+                aria-label={"打开 " + title + " 的详情"} aria-haspopup="dialog"
+                disabled={busy} onClick={(event) => open(row, event.currentTarget)}>
                 <PosterArt url={row.cover_url} title={title} />
               </button> : <PosterArt url={row.cover_url} title={title} />}
               <div className="batch-card-body">

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/main";
 import { configureDatabase, getBatchView } from "../src/api";
@@ -23,7 +23,7 @@ const record = { schema_version: 2, media_type: "movie", query: title,
     fields: { cover_url: cover, director: "导演" }, data: { fixture: 1 } }] };
 const storageOptions = { enabled: true, directory: "library", directory_template: "work-{row}", filename_prefix: "",
   metadata: true, synopsis: true, credits: true, ratings: true, episodes: true,
-  raw: false, emby_nfo: false, poster: true, backdrop: false, stills: false, portraits: [] };
+  raw: false, emby_nfo: false, poster: true, backdrop: false, stills: false, trailers: false, theme_videos: false, theme_music: false, extras: false, portraits: [] };
 
 function response(data: unknown, status = 200) {
   return new Response(status === 204 ? null : JSON.stringify(data), { status });
@@ -120,11 +120,41 @@ function details(text: string) {
 
 beforeEach(() => {
   vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  // jsdom doesn't implement the native dialog top layer.
+  Object.defineProperties(HTMLDialogElement.prototype, {
+    showModal: { configurable: true, value(this: HTMLDialogElement) { this.open = true; } },
+    close: { configurable: true, value(this: HTMLDialogElement) { this.open = false; } },
+  });
 });
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+  Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
+  localStorage.clear();
+  delete document.documentElement.dataset.theme;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("外观", () => {
+  it("随系统变化，手动选择后跨加载保留，也可切回跟随系统", async () => {
+    harness();
+    const media = Object.assign(new EventTarget(), { matches: true });
+    vi.stubGlobal("matchMedia", vi.fn(() => media));
+    const { unmount } = render(<App />);
+    await screen.findByText("暂无后台任务。提交刮削后，可以在这里查看进度。");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    act(() => { media.matches = false; media.dispatchEvent(new Event("change")); });
+    expect(document.documentElement.dataset.theme).toBe("light");
+    setLabel("外观主题", "dark");
+    unmount();
+    render(<App />);
+    await screen.findByText("暂无后台任务。提交刮削后，可以在这里查看进度。");
+    expect((screen.getByLabelText("外观主题") as HTMLSelectElement).value).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    setLabel("外观主题", "system");
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
 });
 
 describe("海报与详情", () => {
@@ -189,9 +219,21 @@ describe("海报与详情", () => {
     await screen.findByRole("button", { name: /寄生虫/ });
     setLabel("原始语言", "ko");
     await waitFor(() => expect(calls).toHaveBeenCalledWith("/api/history?language=ko", undefined));
-    click(/寄生虫/);
-    await screen.findByRole("heading", { name: title, exact: true });
-    click("返回采集历史");
+    const poster = button(/寄生虫/);
+    fireEvent.click(poster);
+    const dialog = await screen.findByRole("dialog", { name: "作品详情" });
+    const heading = within(dialog).getByRole("heading", { name: title, exact: true });
+    expect(document.activeElement).toBe(button("返回采集历史"));
+    fireEvent.pointerDown(heading);
+    fireEvent.click(heading);
+    expect(dialog.isConnected).toBe(true);
+    fireEvent.pointerDown(heading);
+    fireEvent.click(dialog);
+    expect(dialog.isConnected).toBe(true);
+    fireEvent.pointerDown(dialog);
+    fireEvent.click(dialog);
+    expect(dialog.isConnected).toBe(false);
+    expect(document.activeElement).toBe(poster);
     expect((screen.getByLabelText("原始语言") as HTMLSelectElement).value).toBe("ko");
     click("加载更早的记录");
     await waitFor(() => expect(screen.queryByRole("button", { name: "加载更早的记录" })).toBeNull());
@@ -219,7 +261,7 @@ describe("设置", () => {
     expect(JSON.parse(String(sent?.[1]?.body))).toEqual(["ja", "zh-CN"]);
   });
 
-  it("在标签间切换并保存输出路径、命名和图片选项", async () => {
+  it("在标签间切换并保存输出路径、命名和资料选项", async () => {
     const calls = harness();
     render(<App />);
     click("设置");
@@ -229,13 +271,15 @@ describe("设置", () => {
     setLabel("资料文件名前缀", "{id}");
     fireEvent.click(screen.getByLabelText("演员", { exact: true }));
     fireEvent.click(screen.getByLabelText("背景图", { exact: true }));
+    fireEvent.click(screen.getByLabelText("预告片与先导预告"));
+    fireEvent.click(screen.getByLabelText("主题视频", { exact: true }));
     fireEvent.click(screen.getByLabelText("简介与宣传语", { exact: true }));
     expect(screen.getByText("寄生虫 (2019)-7/TMDB-movie-496243-metadata.json")).toBeTruthy();
     click("保存输出设置");
     await screen.findByText("已保存，设置应用于新建的文件夹批次。");
     const sent = calls.mock.calls.find(([route, options]) => route === "/api/settings/output" && options?.method === "POST");
     expect(JSON.parse(String(sent?.[1]?.body))).toMatchObject({
-      directory: "media", directory_template: "{title} ({year})", filename_prefix: "{id}", portraits: ["actor"], backdrop: true, synopsis: false,
+      directory: "media", directory_template: "{title} ({year})", filename_prefix: "{id}", portraits: ["actor"], backdrop: true, synopsis: false, trailers: true, theme_videos: true,
     });
     fireEvent.keyDown(screen.getByRole("tab", { name: "输出与命名" }), { key: "ArrowRight" });
     expect(screen.getByRole("tabpanel", { name: "TMDB" })).toBeTruthy();
@@ -279,10 +323,14 @@ describe("后台批次", () => {
     await screen.findByText("媒体/0.mkv");
     click("显示更多文件");
     expect(screen.getByText("媒体/100.mkv")).toBeTruthy();
-    click("打开 寄生虫 的详情");
-    await screen.findByRole("heading", { name: title, level: 1 });
-    await waitFor(() => expect(button("收起结果")).toBeTruthy());
-    click("收起结果");
+    const poster = button("打开 寄生虫 的详情");
+    fireEvent.click(poster);
+    const dialog = await screen.findByRole("dialog", { name: "作品详情" });
+    expect(within(dialog).getByRole("heading", { name: title, level: 1 })).toBeTruthy();
+    expect(document.activeElement).toBe(button("收起结果"));
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+    expect(dialog.isConnected).toBe(false);
+    expect(document.activeElement).toBe(poster);
     click(/重试全部失败条目/);
     await screen.findByText(/已重新排入/);
     setLabel("候选作品", "0");

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Collect Metadata：为本地文件夹和 Emby 媒体库设计的自托管元数据刮削工具。">
+  <meta name="theme-color" content="#101b20">
+  <title>Collect Metadata · 媒体元数据刮削工作台</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top wrap">
+    <a class="brand" href="./"><span class="brand-mark" aria-hidden="true">CM</span> Collect Metadata</a>
+    <nav aria-label="项目导航">
+      <a href="#install">安装</a>
+      <a href="https://github.com/guangl/collect-metadata">GitHub</a>
+    </nav>
+  </header>
+  <main class="wrap">
+    <section class="hero" aria-labelledby="title">
+      <p class="eyebrow">SELF-HOSTED MEDIA METADATA</p>
+      <h1 id="title">批量补齐媒体库的元数据</h1>
+      <p class="intro">从本地文件夹、服务器挂载目录或 Emby 导入作品。先预览，再交给后台采集。整个过程不移动、不改写原视频。</p>
+      <div class="links">
+        <a class="button" href="#install">下载桌面版</a>
+        <a class="button secondary" href="https://github.com/guangl/collect-metadata#readme">查看完整文档</a>
+      </div>
+    </section>
+    <section class="flow" aria-labelledby="workflow-title">
+      <h2 id="workflow-title">从媒体文件到可导出的资料</h2>
+      <ol>
+        <li><span aria-hidden="true">01</span><h3>导入与预览</h3><p>按文件名识别作品与分集，也可选择 Emby 媒体库或手动清单。</p></li>
+        <li><span aria-hidden="true">02</span><h3>后台采集</h3><p>任务可暂停、继续或重试；遇到同名作品时，可以手动确认匹配。</p></li>
+        <li><span aria-hidden="true">03</span><h3>查看与导出</h3><p>通过历史海报查看详情与来源，按需导出 JSON、图片和 Emby NFO。</p></li>
+      </ol>
+    </section>
+    <section id="install" class="install" aria-labelledby="install-title">
+      <div>
+        <p class="eyebrow">GET STARTED</p>
+        <h2 id="install-title">下载桌面版</h2>
+        <p>桌面版无需 Docker 或 Linux。安装后即可预览本地文件夹；提交后台批次和查看历史需要连接 PostgreSQL。</p>
+        <a class="button" href="https://github.com/guangl/collect-metadata/releases/latest">查看最新 Release</a>
+      </div>
+      <ul class="downloads" aria-label="支持的安装包">
+        <li><strong>macOS · Apple Silicon</strong><span>下载 <code>macos-arm64.dmg</code>，将 App 拖入「应用程序」。</span></li>
+        <li><strong>Windows · x64</strong><span>下载并运行 <code>windows-x64-setup.exe</code>。</span></li>
+      </ul>
+    </section>
+  </main>
+  <footer class="wrap">
+    <span>Collect Metadata · Apache 2.0</span>
+    <a href="https://github.com/guangl/collect-metadata/issues/new/choose">反馈问题</a>
+    <a href="https://github.com/guangl/collect-metadata/blob/main/LICENSE">许可证</a>
+  </footer>
+</body>
+</html>

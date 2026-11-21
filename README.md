@@ -1,10 +1,12 @@
 # Collect Metadata
 
 [![CI](https://github.com/guangl/collect-metadata/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/guangl/collect-metadata/actions/workflows/ci.yml)
+[![桌面版下载](https://img.shields.io/github/v/release/guangl/collect-metadata?label=桌面版)](https://github.com/guangl/collect-metadata/releases/latest)
+[![Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 **给本地文件夹和 Emby 媒体库用的自托管元数据刮削工具。** 在一个工作台里预览作品、提交后台任务、查看结果并导出资料，不移动或改写原视频。
 
-[快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md)
+[项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md)
 
 - **导入**：选择本地文件夹、服务端挂载目录或 Emby 媒体库，也可手动输入作品清单。
 - **后台采集**：支持暂停、继续和重试；有多个匹配时可手动确认。任务与历史保存在 PostgreSQL。
@@ -12,17 +14,16 @@
 
 ## 快速上手
 
-有 Docker 和 Compose 时，先克隆仓库并复制配置示例：
+从 [GitHub Releases](https://github.com/guangl/collect-metadata/releases/latest) 下载桌面安装包，不需要 Docker 或 Linux：
 
-```sh
-git clone https://github.com/guangl/collect-metadata.git
-cd collect-metadata
-cp .env.example .env
-```
+| 系统 | 安装包 |
+| --- | --- |
+| macOS（Apple Silicon / ARM64） | 下载 `macos-arm64.dmg`，打开后将 App 拖入「应用程序」 |
+| Windows（x64） | 下载 `windows-x64-setup.exe`，运行安装程序 |
 
-在 `.env` 中为 `POSTGRES_PASSWORD` 设置新密码，然后运行 `docker compose up -d --build`。打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)，选择文件夹，确认预览后点「开始刮削元数据」。部署与存储选项见 [Docker Web 版](#docker-web-版)。
+macOS 版未经过 Apple 公证，Windows 安装器未使用商业证书签名。请从本仓库下载，并可用 Release 随附的 `SHA256SUMS` 校验。
 
-macOS 和 Windows 也可从源码运行 [Tauri 桌面版](#tauri-桌面版)。Web 与桌面共用 React + TypeScript 界面和 Rust 采集核心。
+打开应用后，选择本地媒体文件夹即可预览作品。提交后台批次和查看历史需要在「设置 → PostgreSQL」连接数据库，详见 [Tauri 桌面版](#tauri-桌面版)。[Docker Web 版](#docker-web-版) 是可选部署方式，不是桌面版的前置条件。
 
 ## 采集范围
 
@@ -120,7 +121,11 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 
 家庭「元数据翻译」的旧定时任务在 NAS 处理作品简介和分集标题，并写回 Emby。采集会读取 Emby 已有资料；如需额外的目标语言，可配置上面的翻译适配器。Emby 是只读资料源，未匹配到作品时继续查询常规来源。
 
-勾选「Emby NFO」可另存 XML 格式的电影、剧集与可匹配分集的 NFO。使用时把电影或分集 NFO 放到对应视频旁边，名称与视频保持一致。剧集的 `tvshow.nfo` 放到剧集根目录。输出默认集中到指定目录，便于检查后再导入媒体库。
+勾选「Emby NFO」可另存电影、剧集和可匹配分集的 XML。NFO 可写入排序名、原名、简介及原文、发行日期、分级、评分及投票数、演职员、系列、标签、厂牌、图片与预告链接。能获得哪些字段取决于来源。将电影和分集 NFO 放到同名视频旁边，剧集的 `tvshow.nfo` 放到剧集根目录。
+
+「附加媒体」可分别勾选预告片、主题视频、主题音乐和花絮。Emby 库里已有的附加媒体可随作品导出，支持直链文件的来源也可下载。每类每部作品最多下载 10 个文件，单文件上限 256 MiB。TMDB 返回的 YouTube 或 Vimeo 播放页会写入 `media-links.json`，主要预告链接也会写入 NFO。输出反馈会显示哪些已选类型没有文件或仅有链接。
+
+导入 Emby 时，把 `trailers/`、`backdrops/`（主题视频）、`theme-music/` 和 `extras/` 随作品放在同一目录。参见 [Emby 预告片命名](https://emby.media/support/articles/Trailers.html)和 [主题媒体命名](https://emby.media/support/articles/Theme-Songs-Videos.html)。
 
 ## Emby 入库自动刮削插件
 
@@ -202,7 +207,18 @@ EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --all-features --summary-onl
 
 ## Docker Web 版
 
-从 [`.env.example`](.env.example) 复制本地 `.env` 并设置 `POSTGRES_PASSWORD`。以下命令会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
+从 [`.env.example`](.env.example) 复制本地 `.env` 并设置 `POSTGRES_PASSWORD`。以下两种部署方式都会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
+
+**使用预构建镜像（Compose v2.24.4+）：** [GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata) 镜像供可选的 Docker 部署使用，按需手动构建，不随桌面 Release 更新。如需固定版本，在 `.env` 中把 `COLLECT_METADATA_IMAGE` 设置为 Packages 中列出的标签或镜像摘要。
+
+```sh
+docker compose -f compose.yaml -f compose.ghcr.yaml pull
+docker compose -f compose.yaml -f compose.ghcr.yaml up -d
+```
+
+如果拉取时返回 `denied`，请检查镜像标签是否已发布，以及 GHCR 包的可见性；私有包需要先用有读取权限的账号登录 `ghcr.io`。也可以改用下面的方式从源码构建。
+
+**从源码构建：**
 
 ```sh
 docker compose up -d --build
@@ -227,14 +243,14 @@ npm ci
 npm run tauri -- dev
 ```
 
-在对应平台打包，可在 `target/release/bundle/` 找到产物。
+在对应平台打包，可在 `target/<目标平台>/release/bundle/` 找到产物。
 
 ```sh
-# macOS
-npm run tauri -- build --bundles app,dmg
+# macOS（Apple Silicon）
+npm run tauri -- build --target aarch64-apple-darwin --bundles dmg
 
-# Windows
-npm run tauri -- build --bundles nsis
+# Windows（x64）
+npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
 ```
 
 桌面版无需连接数据库即可预览文件夹；提交后台批次和查看采集历史则需要 PostgreSQL。在「设置」的「PostgreSQL」中粘贴连接地址，点击「测试连接并保存」。也可在启动前设置 `DATABASE_URL`，或在下列路径写入一行连接串。环境变量优先。Web 和桌面版都可以从「设置」测试当前数据库，Web 的连接地址由服务端环境变量提供。
@@ -251,3 +267,7 @@ docker compose -f compose.yaml -f compose.desktop.yaml up -d --build
 | --- | --- |
 | macOS | `~/Library/Application Support/com.collectmetadata.desktop/database-url` |
 | Windows | `%APPDATA%\com.collectmetadata.desktop\database-url` |
+
+## 许可证
+
+本项目代码采用 [Apache License 2.0](LICENSE)。第三方元数据、图片和商标不因本项目的许可证而获得授权，使用时应遵守各来源的条款。
