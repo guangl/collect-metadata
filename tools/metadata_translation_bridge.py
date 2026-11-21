@@ -56,7 +56,7 @@ class Bridge:
             self.lock.release()
 
 
-def handler(bridge, token):
+def handler(bridge, token, app):
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
             super().setup()
@@ -86,12 +86,18 @@ def handler(bridge, token):
                 data = json.loads(self.rfile.read(size))
             except (ValueError, OSError):
                 return self.reply(400, {'error': 'Invalid JSON'})
-            return self.reply(*bridge.translate(data))
+            with app.app_context():
+                status, result = bridge.translate(data)
+            return self.reply(status, result)
 
     return Handler
 
 
 def main():
+    from db.models.translation import TranslationEvent
+    from extensions import db
+    from flask import Flask
+    from sqlalchemy import URL
     from translation.concurrency import get_concurrency
     from translation.deepseek import DeepSeekBackend
 
@@ -99,17 +105,23 @@ def main():
     if not token:
         raise SystemExit('Set METADATA_TRANSLATION_TOKEN')
     db_path = os.getenv('SUBLARR_DB', '/config/sublarr.db')
-    with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
-        row = db.execute("SELECT value FROM config_entries WHERE key='backend.deepseek.api_key'").fetchone()
+    with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as config_db:
+        row = config_db.execute("SELECT value FROM config_entries WHERE key='backend.deepseek.api_key'").fetchone()
     if not row or not row[0]:
         raise SystemExit('Configure the DeepSeek backend in Sublarr')
     get_concurrency().register('deepseek', 1)
-    bridge = Bridge(DeepSeekBackend(api_key=row[0], model='deepseek-chat'),
-                    os.getenv('METADATA_TRANSLATION_BUDGET_DB', '/config/collect-metadata-translation.db'),
+    budget_path = os.path.abspath(os.getenv('METADATA_TRANSLATION_BUDGET_DB', '/config/collect-metadata-translation.db'))
+    bridge = Bridge(DeepSeekBackend(api_key=row[0], model='deepseek-chat'), budget_path,
                     max(0, int(os.getenv('METADATA_TRANSLATION_DAILY_LIMIT', '100'))))
+    # Sublarr's backend records usage through Flask-SQLAlchemy, even outside its web app.
+    app = Flask(__name__)
+    app.config['SQLALCHEMY_DATABASE_URI'] = URL.create('sqlite', database=budget_path)
+    db.init_app(app)
+    with app.app_context():
+        TranslationEvent.__table__.create(db.engine, checkfirst=True)
     bind = os.getenv('METADATA_TRANSLATION_BIND', '127.0.0.1')
     port = int(os.getenv('METADATA_TRANSLATION_PORT', '7100'))
-    with ThreadingHTTPServer((bind, port), handler(bridge, f'Bearer {token}'.encode('utf-8'))) as server:
+    with ThreadingHTTPServer((bind, port), handler(bridge, f'Bearer {token}'.encode('utf-8'), app)) as server:
         server.serve_forever()
 
 
