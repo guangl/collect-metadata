@@ -4,24 +4,31 @@ import { getHistory, getHistoryLanguages, getStorageStatus, loadSnapshot } from 
 import { Batch } from "./batch/Batch";
 import type { FolderSelection } from "./batch/engine";
 import { ExternalLink, LanguageSelect, languageText, PosterCard } from "./Catalog";
-import { Movie, Sources } from "./Movie";
+import { DetailDialog } from "./DetailDialog";
 import { Settings } from "./Settings";
 import type { SettingsSection } from "./Settings";
+import { themeChoices, useTheme } from "./theme";
+import type { Theme } from "./theme";
 import { errorText, mediaLabels, storageLabels } from "./types";
 import type { LookupResponse, MediaType, Snapshot, StorageStatus } from "./types";
 import "./style.css";
 
 const entries = [
-  { name: "batch", label: "刮削工作台", icon: "folder-icon" },
-  { name: "history", label: "采集历史", icon: "archive" },
-  { name: "settings", label: "设置", icon: "settings" },
-  { name: "about", label: "关于", icon: "info" },
+  { name: "batch", label: "刮削工作台", icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" },
+  { name: "history", label: "采集历史", icon: "M4 9h16v10H4zM3 5h18v4H3zM10 13h4" },
+  { name: "settings", label: "设置", icon: "M4 7h5m4 0h7M4 12h10m4 0h2M4 17h2m4 0h10M9 5v4m5 1v4m-8 1v4" },
+  { name: "about", label: "关于", icon: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 11v5m0-8h.01" },
 ] as const;
 
 type View = typeof entries[number]["name"];
 
-function WorkspaceHeader({ view, setView, storage, openStorage }: {
+const shortStatus: Record<StorageStatus, string> = {
+  pending: "检查中", ready: "已连接", failed: "连接异常", none: "未配置",
+};
+
+function WorkspaceHeader({ view, setView, storage, openStorage, theme, setTheme }: {
   view: View; setView: (view: View) => void; storage: StorageStatus; openStorage: () => void;
+  theme: Theme; setTheme: (theme: Theme) => void;
 }) {
   return (
     <header className="workspace-header">
@@ -34,14 +41,27 @@ function WorkspaceHeader({ view, setView, storage, openStorage }: {
           {entries.map(({ name, label, icon }) => (
             <button type="button" className="nav-button" aria-current={view === name ? "page" : undefined}
               key={name} onClick={() => setView(name)}>
-              <span className={"nav-icon " + icon} aria-hidden="true" />{label}
+              <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65"
+                strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg>{label}
             </button>
           ))}
         </nav>
-        <button type="button" className="storage" data-status={storage}
-          aria-label={"打开设置，" + storageLabels[storage]} onClick={openStorage}>
-          <span aria-hidden="true" />{storageLabels[storage]}
-        </button>
+        <div className="header-actions">
+          <button type="button" className="storage" data-status={storage} title={storageLabels[storage]}
+            aria-label={"打开设置，" + storageLabels[storage]} onClick={openStorage}>
+            <span className="status-dot" aria-hidden="true" /><span className="status-text">{shortStatus[storage]}</span>
+          </button>
+          <label className="theme-control">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65"
+              strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d={theme === "light" ? "M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" :
+                theme === "dark" ? "M20.8 14.2A9 9 0 0 1 9.8 3.2a9 9 0 1 0 11 11Z" : "M3 5h18v12H3zM12 17v3m-4 0h8"} />
+            </svg>
+            <select aria-label="外观主题" value={theme} onChange={(event) => setTheme(event.target.value as Theme)}>
+              {themeChoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>
+        </div>
       </div>
     </header>
   );
@@ -67,7 +87,7 @@ function About({ onError }: { onError: (message: string) => void }) {
 function History({ storage, onStorage, onOpen, onError }: {
   storage: StorageStatus;
   onStorage: (status: StorageStatus) => void;
-  onOpen: (snapshot: LookupResponse) => void;
+  onOpen: (snapshot: LookupResponse, opener: HTMLButtonElement) => void;
   onError: (message: string) => void;
 }) {
   const [items, setItems] = useState<Snapshot[]>([]);
@@ -115,12 +135,12 @@ function History({ storage, onStorage, onOpen, onError }: {
     return () => { openingSequence.current += 1; };
   }, [canRead]);
 
-  async function open(id: number) {
+  async function open(id: number, opener: HTMLButtonElement) {
     const request = ++openingSequence.current;
     setOpening(true);
     try {
       const snapshot = await loadSnapshot(id);
-      if (request === openingSequence.current) onOpen(snapshot);
+      if (request === openingSequence.current) onOpen(snapshot, opener);
     } catch (error) {
       if (request === openingSequence.current) onError(errorText(error));
     } finally {
@@ -150,7 +170,7 @@ function History({ storage, onStorage, onOpen, onError }: {
       {status && <p className="catalog-empty" role="status">{status}</p>}
       <div className="poster-grid">
         {items.map((item) => <PosterCard key={item.id} title={item.title || item.code}
-          cover={item.cover_url} disabled={opening} onOpen={() => open(item.id)}
+          cover={item.cover_url} disabled={opening} onOpen={(opener) => open(item.id, opener)}
           caption={[item.year, mediaLabels[item.media_type], languageText(item.original_languages)].filter(Boolean).join(" · ")} />)}
       </div>
       {more && <button type="button" className="secondary history-more" onClick={() => refresh(items.at(-1)?.id ?? null)}
@@ -161,10 +181,10 @@ function History({ storage, onStorage, onOpen, onError }: {
 
 export function App() {
   const [view, setView] = useState<View>("batch");
-  const [current, setCurrent] = useState<LookupResponse | null>(null);
+  const [current, setCurrent] = useState<{ response: LookupResponse; opener: HTMLButtonElement } | null>(null);
+  const [theme, setTheme] = useTheme();
   const [storage, setStorage] = useState<StorageStatus>("pending");
   const [notice, setNotice] = useState<{ message: string; kind?: "error" } | null>(null);
-  const [resultVersion, setResultVersion] = useState(0);
   const [databaseVersion, setDatabaseVersion] = useState(0);
   const [folderSelection, setFolderSelection] = useState<FolderSelection | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("output");
@@ -184,16 +204,11 @@ export function App() {
     window.scrollTo(0, 0);
   }
 
-  function open(response: LookupResponse) {
+  function open(response: LookupResponse, opener: HTMLButtonElement) {
     setNotice(null);
-    setCurrent(response);
-    setResultVersion((version) => version + 1);
-    if (response.saved) setStorage("ready");
-    if (response.storage_error) {
-      setStorage("failed");
-      showError(response.storage_error + " 可以导出本次结果。");
-    }
-    window.scrollTo(0, 0);
+    setCurrent({ response, opener });
+    if (response.storage_error) setStorage("failed");
+    else if (response.saved) setStorage("ready");
   }
 
   function openStorage() {
@@ -203,7 +218,7 @@ export function App() {
 
   return (
     <div className="workspace">
-      <WorkspaceHeader view={view} setView={navigate} storage={storage} openStorage={openStorage} />
+      <WorkspaceHeader view={view} setView={navigate} storage={storage} openStorage={openStorage} theme={theme} setTheme={setTheme} />
       <main className="main">
         {notice && <div className="notice" role="status" data-kind={notice.kind}>{notice.message}</div>}
         <div className="content">
@@ -216,13 +231,9 @@ export function App() {
                 setDatabaseVersion((version) => version + 1);
               }} />
           ) : view === "about" ? <About onError={showError} /> : view === "history" ? <>
-            <div hidden={Boolean(current)}><History storage={storage} onStorage={setStorage} onOpen={open} onError={showError} /></div>
-            {current && <>
-              <button className="secondary back-results" type="button" onClick={() => setCurrent(null)}>返回采集历史</button>
-              <Movie key={resultVersion} response={current} onNotice={showInfo} onError={showError} />
-              <Sources key={"history-" + resultVersion} kind={current.record.media_type ?? "av"}
-                sources={current.record.sources} loading={false} onError={showError} />
-            </>}
+            <History storage={storage} onStorage={setStorage} onOpen={open} onError={showError} />
+            {current && <DetailDialog response={current.response} kind={current.response.record.media_type ?? "av"}
+              opener={current.opener} closeLabel="返回采集历史" onDismiss={() => setCurrent(null)} />}
           </> : null}
         </div>
       </main>

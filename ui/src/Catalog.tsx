@@ -98,10 +98,11 @@ export function PosterCard({ title, cover, caption, disabled, onOpen }: {
   cover?: string | null;
   caption: string;
   disabled: boolean;
-  onOpen: () => void;
+  onOpen: (opener: HTMLButtonElement) => void;
 }) {
   return (
-    <button className="poster-card" type="button" disabled={disabled} onClick={onOpen}>
+    <button className="poster-card" type="button" aria-haspopup="dialog" disabled={disabled}
+      onClick={(event) => onOpen(event.currentTarget)}>
       <PosterArt url={cover} title={title} />
       <span className="poster-caption">
         <strong>{title}</strong>
