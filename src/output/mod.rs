@@ -1,4 +1,5 @@
 mod assets;
+mod media;
 mod naming;
 mod nfo;
 mod settings;
@@ -138,23 +139,6 @@ pub(crate) async fn prepare(
         }
     }
     let directory = temporary.path();
-    if options.emby_nfo {
-        for (path, contents) in nfo::documents(&result.record, options, source_files) {
-            if tokio::fs::write(directory.join(&path), contents)
-                .await
-                .is_ok()
-            {
-                files.push(OutputFile {
-                    path,
-                    kind: "nfo",
-                    source_url: None,
-                    person: None,
-                });
-            } else {
-                failed += 1;
-            }
-        }
-    }
     let mut downloads = stream::iter(
         assets::selected_assets(&result.record, options, emby)
             .into_iter()
@@ -186,14 +170,34 @@ pub(crate) async fn prepare(
         }
     }
     drop(downloads);
+    if options.emby_nfo {
+        for (path, contents) in nfo::documents(&result.record, options, source_files, &files) {
+            if tokio::fs::write(directory.join(&path), contents)
+                .await
+                .is_ok()
+            {
+                files.push(OutputFile {
+                    path,
+                    kind: "nfo",
+                    source_url: None,
+                    person: None,
+                });
+            } else {
+                failed += 1;
+            }
+        }
+    }
+    let (media_files, media_failed, mut messages) =
+        media::export(client, emby, directory, &result.record, options).await;
+    files.extend(media_files);
+    failed += media_failed;
     files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    let message = if failed > 0 {
-        Some(format!("{failed} 个输出文件下载或写入失败。"))
-    } else if files.is_empty() {
-        Some("来源没有提供所选资料的可用文件。".into())
-    } else {
-        None
-    };
+    if failed > 0 {
+        messages.insert(0, format!("{failed} 个输出文件下载或写入失败。"));
+    } else if files.is_empty() && messages.is_empty() {
+        messages.push("来源没有提供所选资料的可用文件。".into());
+    }
+    let message = (!messages.is_empty()).then(|| messages.join(" "));
     let report = OutputReport {
         directory: Some(destination.to_string_lossy().into_owned()),
         written: files.len(),
@@ -220,11 +224,11 @@ pub(crate) async fn prepare(
 
 fn metadata(record: &Value, options: &settings::OutputOptions, source_files: &[String]) -> Value {
     let included = |name: &str| match name {
-        "description" | "tagline" => options.synopsis,
+        "description" | "description_original" | "tagline" => options.synopsis,
         "cast" | "directors" | "actresses" | "actors" | "other_cast" | "writers" | "producers" => {
             options.credits
         }
-        "rating" => options.ratings,
+        "rating" | "critic_rating" => options.ratings,
         "episodes" | "episode_count" | "season_count" => options.episodes,
         "poster_url" | "cover_url" => options.poster,
         "backdrop_url" => options.backdrop,

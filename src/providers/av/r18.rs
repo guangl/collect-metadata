@@ -102,6 +102,7 @@ pub(super) async fn lookup(client: &Client, code: &Identifier) -> Source {
             "description",
             value_or(&details["comment_en"], &details["comment_ja"]),
         ),
+        ("description_original", details["comment_ja"].clone()),
         (
             "cover_url",
             value_or(

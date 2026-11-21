@@ -2,6 +2,7 @@ use std::{
     env, fs, io,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use reqwest::{Client, Response, Url, header::HeaderValue};
@@ -12,7 +13,7 @@ use unicode_normalization::UnicodeNormalization;
 use super::MediaKind;
 use crate::{collect::Source, providers::field_map};
 
-const FIELDS: &str = "Path,Overview,People,ProviderIds,Genres,Studios,Tags,Taglines,OriginalTitle,SortName,ProductionLocations,MediaSources,MediaStreams,Chapters,ExternalUrls,HomePageUrl";
+const FIELDS: &str = "Path,Overview,People,ProviderIds,Genres,Studios,Tags,Taglines,OriginalTitle,SortName,ProductionLocations,MediaSources,MediaStreams,Chapters,ExternalUrls,HomePageUrl,RemoteTrailers";
 const MAX_RESPONSE: usize = 12 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize, Default)]
@@ -179,13 +180,24 @@ impl Emby {
     }
 
     async fn response(&self, client: &Client, url: Url) -> Result<Response, String> {
+        self.timed_response(client, url, Duration::from_secs(10))
+            .await
+    }
+
+    async fn timed_response(
+        &self,
+        client: &Client,
+        url: Url,
+        timeout: Duration,
+    ) -> Result<Response, String> {
         let response = client
-            .get(url)
+            .get(url.clone())
+            .timeout(timeout)
             .header("X-Emby-Token", self.authorization.clone())
             .send()
             .await
             .map_err(|_| "无法连接 Emby。")?;
-        if !response.status().is_success() {
+        if !response.status().is_success() || response.url() != &url {
             return Err(format!(
                 "Emby 请求失败（HTTP {}）。",
                 response.status().as_u16()
@@ -436,11 +448,95 @@ impl Emby {
             .then(|| self.endpoint(&format!("Items/{id}/Images/{image_type}")))
     }
 
-    pub(crate) async fn image_response(&self, client: &Client, url: &Url) -> Option<Response> {
+    pub(crate) fn owns_source(&self, source: &Value) -> bool {
+        valid_id(&source["data"]["item"]["Id"]).is_some_and(|id| {
+            source["url"]
+                == self
+                    .endpoint(&format!("web/index.html#!/item?id={id}"))
+                    .as_str()
+        })
+    }
+
+    pub(crate) async fn theme_media(
+        &self,
+        client: &Client,
+        id: &Value,
+        audio: bool,
+    ) -> Result<Vec<Value>, String> {
+        let id = valid_id(id).ok_or("Emby 条目 ID 无效。")?;
+        let endpoint = if audio { "ThemeSongs" } else { "ThemeVideos" };
+        let mut url = self.endpoint(&format!("Items/{id}/{endpoint}"));
+        url.query_pairs_mut()
+            .append_pair("InheritFromParent", "false")
+            .append_pair("Fields", "Path,MediaSources")
+            .append_pair("AddApiKeyToDirectStreamUrl", "false");
+        self.read_json(client, url).await?["Items"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| "Emby 未返回主题媒体列表。".into())
+    }
+
+    pub(crate) async fn extras_user(&self, client: &Client) -> Result<String, String> {
+        let users = self
+            .read_json(
+                client,
+                self.endpoint("Users/Query?IsDisabled=false&Limit=100"),
+            )
+            .await?;
+        list(&users["Items"])
+            .filter(|user| {
+                user["Policy"]["IsAdministrator"] == true && user["Policy"]["IsDisabled"] != true
+            })
+            .find_map(|user| valid_id(&user["Id"]))
+            .map(str::to_owned)
+            .ok_or_else(|| "Emby 未返回可读取附加媒体的管理员账户。".into())
+    }
+
+    pub(crate) async fn local_extras(
+        &self,
+        client: &Client,
+        id: &Value,
+        user: &str,
+        trailers: bool,
+    ) -> Result<Vec<Value>, String> {
+        let id = valid_id(id)
+            .filter(|_| is_item_id(user))
+            .ok_or("Emby 条目或账户 ID 无效。")?;
+        let endpoint = if trailers {
+            "LocalTrailers"
+        } else {
+            "SpecialFeatures"
+        };
+        let url = self.endpoint(&format!(
+            "Users/{user}/Items/{id}/{endpoint}?Fields=Path&EnableUserData=false"
+        ));
+        self.read_json(client, url)
+            .await?
+            .as_array()
+            .cloned()
+            .ok_or_else(|| "Emby 未返回附加媒体列表。".into())
+    }
+
+    pub(crate) fn media_file_url(&self, id: &Value) -> Option<Url> {
+        let id = valid_id(id)?;
+        Some(self.endpoint(&format!("Items/{id}/File")))
+    }
+
+    pub(crate) async fn media_response(
+        &self,
+        client: &Client,
+        url: &Url,
+        timeout: Duration,
+    ) -> Option<Response> {
         if url.origin() != self.base.origin() || !url.path().starts_with(self.base.path()) {
             return None;
         }
-        self.response(client, url.clone()).await.ok()
+        self.timed_response(client, url.clone(), timeout).await.ok()
+    }
+
+    pub(crate) async fn image_response(&self, client: &Client, url: &Url) -> Option<Response> {
+        self.media_response(client, url, Duration::from_secs(10))
+            .await
     }
 }
 
@@ -495,10 +591,42 @@ fn fields(item: &Value, children: &[Value]) -> crate::collect::Fields {
         .iter()
         .filter(|entry| entry["Type"] == "Season")
         .count();
+    let streams = &item["MediaStreams"];
+    let resolution = list(streams)
+        .filter(|stream| stream["Type"] == "Video")
+        .find_map(|stream| {
+            let width = stream["Width"].as_u64().filter(|width| *width > 0)?;
+            let height = stream["Height"].as_u64().filter(|height| *height > 0)?;
+            Some(format!("{width}×{height}"))
+        });
+    let has_chinese_subtitles = list(streams)
+        .filter(|stream| stream["Type"] == "Subtitle")
+        .filter_map(|stream| stream["Language"].as_str())
+        .any(|language| {
+            matches!(
+                language.to_ascii_lowercase().split(['-', '_']).next(),
+                Some("zh" | "chi" | "zho" | "cmn" | "yue")
+            )
+        });
+    let videos = list(&item["RemoteTrailers"])
+        .filter_map(|entry| {
+            let url = entry["Url"].as_str()?;
+            Some(json!({"type": "Trailer", "name": entry["Name"], "url": url}))
+        })
+        .collect::<Vec<_>>();
     field_map([
         ("title", item["Name"].clone()),
+        ("sort_title", item["SortName"].clone()),
         ("title_original", item["OriginalTitle"].clone()),
         ("description", item["Overview"].clone()),
+        (
+            "tagline",
+            list(&item["Taglines"]).next().cloned().unwrap_or_default(),
+        ),
+        ("year", item["ProductionYear"].clone()),
+        ("official_rating", item["OfficialRating"].clone()),
+        ("custom_rating", item["CustomRating"].clone()),
+        ("critic_rating", item["CriticRating"].clone()),
         ("release_date", json!(date(&item["PremiereDate"]))),
         (
             "runtime_minutes",
@@ -509,6 +637,21 @@ fn fields(item: &Value, children: &[Value]) -> crate::collect::Fields {
             ),
         ),
         ("genres", item["Genres"].clone()),
+        ("tags", item["Tags"].clone()),
+        ("resolution", json!(resolution)),
+        (
+            "has_chinese_subtitles",
+            json!(has_chinese_subtitles.then_some(true)),
+        ),
+        (
+            "studio",
+            json!(
+                list(&item["Studios"])
+                    .filter_map(|studio| studio["Name"].as_str())
+                    .collect::<Vec<_>>()
+            ),
+        ),
+        ("voice_actors", json!(people("VoiceActor"))),
         ("countries", item["ProductionLocations"].clone()),
         ("cast", json!(people("Actor"))),
         ("directors", json!(people("Director"))),
@@ -529,7 +672,16 @@ fn fields(item: &Value, children: &[Value]) -> crate::collect::Fields {
         ("episodes", json!(episodes)),
         ("imdb_id", item["ProviderIds"]["Imdb"].clone()),
         ("tmdb_id", item["ProviderIds"]["Tmdb"].clone()),
+        ("tvdb_id", item["ProviderIds"]["Tvdb"].clone()),
         ("official_url", item["HomePageUrl"].clone()),
+        (
+            "trailer_url",
+            videos
+                .first()
+                .map(|video| video["url"].clone())
+                .unwrap_or_default(),
+        ),
+        ("videos", json!(videos)),
         ("file_name", json!(file_name(&item["Path"]))),
     ])
 }

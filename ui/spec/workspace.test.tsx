@@ -23,7 +23,7 @@ const record = { schema_version: 2, media_type: "movie", query: title,
     fields: { cover_url: cover, director: "导演" }, data: { fixture: 1 } }] };
 const storageOptions = { enabled: true, directory: "library", directory_template: "work-{row}", filename_prefix: "",
   metadata: true, synopsis: true, credits: true, ratings: true, episodes: true,
-  raw: false, emby_nfo: false, poster: true, backdrop: false, stills: false, portraits: [] };
+  raw: false, emby_nfo: false, poster: true, backdrop: false, stills: false, trailers: false, theme_videos: false, theme_music: false, extras: false, portraits: [] };
 
 function response(data: unknown, status = 200) {
   return new Response(status === 204 ? null : JSON.stringify(data), { status });
@@ -219,7 +219,7 @@ describe("设置", () => {
     expect(JSON.parse(String(sent?.[1]?.body))).toEqual(["ja", "zh-CN"]);
   });
 
-  it("在标签间切换并保存输出路径、命名和图片选项", async () => {
+  it("在标签间切换并保存输出路径、命名和资料选项", async () => {
     const calls = harness();
     render(<App />);
     click("设置");
@@ -229,13 +229,15 @@ describe("设置", () => {
     setLabel("资料文件名前缀", "{id}");
     fireEvent.click(screen.getByLabelText("演员", { exact: true }));
     fireEvent.click(screen.getByLabelText("背景图", { exact: true }));
+    fireEvent.click(screen.getByLabelText("预告片与先导预告"));
+    fireEvent.click(screen.getByLabelText("主题视频", { exact: true }));
     fireEvent.click(screen.getByLabelText("简介与宣传语", { exact: true }));
     expect(screen.getByText("寄生虫 (2019)-7/TMDB-movie-496243-metadata.json")).toBeTruthy();
     click("保存输出设置");
     await screen.findByText("已保存，设置应用于新建的文件夹批次。");
     const sent = calls.mock.calls.find(([route, options]) => route === "/api/settings/output" && options?.method === "POST");
     expect(JSON.parse(String(sent?.[1]?.body))).toMatchObject({
-      directory: "media", directory_template: "{title} ({year})", filename_prefix: "{id}", portraits: ["actor"], backdrop: true, synopsis: false,
+      directory: "media", directory_template: "{title} ({year})", filename_prefix: "{id}", portraits: ["actor"], backdrop: true, synopsis: false, trailers: true, theme_videos: true,
     });
     fireEvent.keyDown(screen.getByRole("tab", { name: "输出与命名" }), { key: "ArrowRight" });
     expect(screen.getByRole("tabpanel", { name: "TMDB" })).toBeTruthy();

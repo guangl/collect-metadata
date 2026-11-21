@@ -30,6 +30,10 @@ export interface OutputOptions {
   poster: boolean;
   backdrop: boolean;
   stills: boolean;
+  trailers: boolean;
+  theme_videos: boolean;
+  theme_music: boolean;
+  extras: boolean;
   portraits: PortraitRole[];
 }
 

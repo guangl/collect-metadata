@@ -1,47 +1,74 @@
-use std::{collections::BTreeMap, fmt::Write, path::Path, sync::LazyLock};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt::Write,
+    path::Path,
+    sync::LazyLock,
+};
 
 use regex::Regex;
 use serde_json::Value;
 
-use super::settings::OutputOptions;
+use super::{OutputFile, media, settings::OutputOptions};
 
 pub(super) fn documents(
     record: &Value,
     options: &OutputOptions,
     source_files: &[String],
+    files: &[OutputFile],
 ) -> BTreeMap<String, String> {
     let fields = &record["fields"];
     let series = record["media_type"] == "series";
     let root = if series { "tvshow" } else { "movie" };
     let mut body = String::new();
-    let title = fields["title"]
-        .as_str()
-        .or_else(|| fields["title_original"].as_str())
-        .or_else(|| record["query"].as_str());
+    let av = record["media_type"] == "av";
+    let original_title = field(fields, &["title_original", "title_ja"]);
+    let title = field(
+        fields,
+        &[
+            "title",
+            "title_site",
+            "title_original",
+            "title_ja",
+            "title_en",
+        ],
+    )
+    .or_else(|| present(&record["query"]));
+    let dvd_id = if av {
+        present(&fields["dvd_id"]).or_else(|| present(&record["query"]))
+    } else {
+        None
+    };
+    let release = present(&fields["release_date"]);
+    let collection = field(fields, &["collection", "series"]);
+    let label = field(fields, &["label", "publisher"]);
+
     tag(&mut body, "title", title);
     tag(
         &mut body,
-        "originaltitle",
-        fields["title_original"].as_str(),
+        "sorttitle",
+        present(&fields["sort_title"]).or(dvd_id).or(title),
     );
-    tag(&mut body, "premiered", fields["release_date"].as_str());
+    tag(&mut body, "originaltitle", original_title);
+    for name in ["premiered", "release", "releasedate"] {
+        tag(&mut body, name, release);
+    }
+    let year = fields["year"].as_u64().map(|value| value.to_string());
     tag(
         &mut body,
         "year",
-        fields["release_date"]
-            .as_str()
-            .and_then(|date| date.get(..4)),
+        year.as_deref().or_else(|| {
+            release
+                .and_then(|date| date.get(..4))
+                .filter(|year| year.bytes().all(|byte| byte.is_ascii_digit()))
+        }),
     );
-    tag(
-        &mut body,
-        "runtime",
-        fields["runtime_minutes"]
-            .as_u64()
-            .map(|value| value.to_string())
-            .as_deref(),
-    );
-    for (kind, key) in [("tmdb", "tmdb_id"), ("imdb", "imdb_id")] {
-        if let Some(id) = fields[key].as_str() {
+    number_tag(&mut body, "runtime", fields["runtime_minutes"].as_u64());
+    for (kind, key) in [
+        ("tmdb", "tmdb_id"),
+        ("imdb", "imdb_id"),
+        ("tvdb", "tvdb_id"),
+    ] {
+        if let Some(id) = present(&fields[key]) {
             let _ = writeln!(
                 body,
                 "  <uniqueid type=\"{kind}\">{}</uniqueid>",
@@ -50,41 +77,129 @@ pub(super) fn documents(
         }
     }
     if options.synopsis {
-        tag(&mut body, "plot", fields["description"].as_str());
-        tag(&mut body, "tagline", fields["tagline"].as_str());
-    }
-    if options.ratings {
+        synopsis(&mut body, fields);
+        let release_tagline = release
+            .filter(|_| av)
+            .map(|date| format!("发行日期 {date}"));
         tag(
             &mut body,
-            "rating",
-            fields["rating"]["value"]
-                .as_f64()
-                .map(|value| value.to_string())
-                .as_deref(),
+            "tagline",
+            present(&fields["tagline"]).or(release_tagline.as_deref()),
         );
+    }
+    tag(&mut body, "mpaa", present(&fields["official_rating"]));
+    tag(&mut body, "customrating", present(&fields["custom_rating"]));
+    if options.ratings {
+        rating_tags(&mut body, fields);
     }
     for (key, name) in [
         ("genres", "genre"),
         ("countries", "country"),
         ("studio", "studio"),
+        ("studio", "maker"),
     ] {
-        for value in texts(&fields[key]) {
+        for value in unique(texts(&fields[key])) {
             tag(&mut body, name, Some(value));
         }
     }
+    tag(&mut body, "publisher", label);
+    tag(&mut body, "label", label);
+    tag(&mut body, "series", present(&fields["series"]));
+    if !series && let Some(collection) = collection {
+        let _ = writeln!(body, "  <set><name>{}</name></set>", escape(collection));
+    }
+    tag(&mut body, "num", dvd_id);
+
+    let actors = || {
+        unique(
+            ["cast", "voice_actors", "actresses", "actors", "other_cast"]
+                .into_iter()
+                .flat_map(|key| texts(&fields[key])),
+        )
+    };
     if options.credits {
         for (key, name) in [("directors", "director"), ("writers", "credits")] {
-            for value in texts(&fields[key]) {
+            for value in unique(texts(&fields[key])) {
                 tag(&mut body, name, Some(value));
             }
         }
-        for actor in ["cast", "actresses", "actors", "other_cast"]
-            .into_iter()
-            .flat_map(|key| texts(&fields[key]))
-        {
+        for actor in actors() {
             let _ = writeln!(body, "  <actor><name>{}</name></actor>", escape(actor));
         }
     }
+
+    let mut tags = texts(&fields["tags"])
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if av {
+        tags.extend(texts(&fields["genres"]).map(str::to_owned));
+        tags.extend(
+            dvd_id
+                .and_then(|id| id.split_once('-'))
+                .filter(|(prefix, _)| prefix.bytes().any(|byte| byte.is_ascii_alphabetic()))
+                .map(|(prefix, _)| prefix.to_owned()),
+        );
+        tags.extend(present(&fields["censorship"]).map(str::to_owned));
+        for (prefix, values) in [
+            ("系列", collection.into_iter().collect::<Vec<_>>()),
+            ("片商", texts(&fields["studio"]).collect()),
+            ("发行", label.into_iter().collect()),
+        ] {
+            tags.extend(values.into_iter().map(|value| format!("{prefix}：{value}")));
+        }
+        if options.credits {
+            tags.extend(actors().map(str::to_owned));
+        }
+    }
+    tags.extend(present(&fields["resolution"]).map(str::to_owned));
+    if fields["has_chinese_subtitles"] == true {
+        tags.push("中文字幕".into());
+    }
+    for value in unique(tags.iter().map(String::as_str)) {
+        tag(&mut body, "tag", Some(value));
+    }
+    let image = |kind, keys: &[&str]| {
+        files
+            .iter()
+            .find(|file| file.kind == kind)
+            .map(|file| file.path.as_str())
+            .or_else(|| keys.iter().find_map(|key| media::web_url(&fields[*key])))
+    };
+    let poster = image("poster", &["poster_url", "cover_url"]);
+    let cover = image(
+        "backdrop",
+        if av {
+            &["backdrop_url", "cover_url"]
+        } else {
+            &["backdrop_url"]
+        },
+    );
+    tag(&mut body, "poster", poster);
+    tag(&mut body, "thumb", poster);
+    tag(&mut body, "cover", cover);
+    if let Some(cover) = cover {
+        let _ = writeln!(body, "  <fanart><thumb>{}</thumb></fanart>", escape(cover));
+    }
+    let trailer = media::links(record)
+        .into_iter()
+        .find(|link| link.kind == media::Kind::Trailer);
+    tag(
+        &mut body,
+        "trailer",
+        media::web_url(&fields["trailer_url"])
+            .or_else(|| trailer.as_ref().map(|link| link.url.as_str())),
+    );
+    tag(
+        &mut body,
+        "website",
+        media::web_url(&fields["official_url"]).or_else(|| {
+            record["sources"]
+                .as_array()?
+                .iter()
+                .filter(|source| source["status"] == "ok" || source["status"] == "partial")
+                .find_map(|source| media::web_url(&source["url"]))
+        }),
+    );
     let work = xml(root, &body);
     let mut result = BTreeMap::new();
     if series {
@@ -145,7 +260,11 @@ fn episode_xml(episode: &Value, season: u64, number: u64, options: &OutputOption
     tag(&mut parts, "episode", Some(&number.to_string()));
     tag(&mut parts, "aired", episode["date"].as_str());
     if options.synopsis {
-        tag(&mut parts, "plot", episode["description"].as_str());
+        synopsis(&mut parts, episode);
+    }
+    number_tag(&mut parts, "runtime", episode["runtime_minutes"].as_u64());
+    if options.ratings {
+        rating_tags(&mut parts, episode);
     }
     xml("episodedetails", &parts)
 }
@@ -190,6 +309,56 @@ fn texts(value: &Value) -> impl Iterator<Item = &str> {
     )
 }
 
+fn present(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn field<'a>(fields: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| present(&fields[*key]))
+}
+
+fn unique<'a>(values: impl Iterator<Item = &'a str>) -> impl Iterator<Item = &'a str> {
+    let mut seen = HashSet::new();
+    values
+        .map(str::trim)
+        .filter(move |value| !value.is_empty() && seen.insert(*value))
+}
+
+fn synopsis(body: &mut String, fields: &Value) {
+    let plot = present(&fields["description"]);
+    tag(body, "plot", plot);
+    tag(body, "outline", plot);
+    tag(
+        body,
+        "originalplot",
+        present(&fields["description_original"]),
+    );
+}
+
+fn number_tag(body: &mut String, name: &str, value: Option<impl ToString>) {
+    tag(body, name, value.map(|value| value.to_string()).as_deref());
+}
+
+fn rating_tags(body: &mut String, fields: &Value) {
+    let rating = &fields["rating"];
+    if let Some(score) = rating["value"].as_f64() {
+        let scale = rating["scale"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(10.0);
+        if (0.0..=scale).contains(&score) {
+            let score = (score / scale * 1000.0).round() / 100.0;
+            number_tag(body, "rating", Some(score));
+            number_tag(body, "score", Some(score));
+        }
+    }
+    number_tag(body, "votes", rating["count"].as_u64());
+    number_tag(body, "criticrating", fields["critic_rating"].as_f64());
+}
+
 fn tag(body: &mut String, name: &str, value: Option<&str>) {
     if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         let _ = writeln!(body, "  <{name}>{}</{name}>", escape(value));
@@ -220,6 +389,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn writes_compatibility_fields_from_real_values() {
+        let record = json!({
+            "media_type": "av", "query": "ABC-123",
+            "fields": {
+                "title": "译名", "title_ja": "原題", "release_date": "2024-04-03",
+                "description": "简介", "description_original": "原文 & <>",
+                "rating": {"value": 4.1, "scale": 5, "count": 45},
+                "official_rating": "R", "custom_rating": "PG", "critic_rating": 92,
+                "studio": ["Studio"], "label": "Label", "series": "Title & Series",
+                "genres": ["Drama"], "tags": ["Drama"], "cast": ["Actor"], "actresses": ["Actor"],
+                "trailer_url": "https://www.youtube.com/watch?v=demo&x=2",
+                "official_url": "https://example.com/film"
+            }
+        });
+        let options = OutputOptions::default();
+        let files = [OutputFile {
+            path: "poster.jpg".into(),
+            kind: "poster",
+            source_url: None,
+            person: None,
+        }];
+        let docs = documents(&record, &options, &[], &files);
+        let nfo = &docs["movie.nfo"];
+        for expected in [
+            "<title>译名</title>",
+            "<sorttitle>ABC-123</sorttitle>",
+            "<originaltitle>原題</originaltitle>",
+            "<outline>简介</outline>",
+            "<originalplot>原文 &amp; &lt;&gt;</originalplot>",
+            "<releasedate>2024-04-03</releasedate>",
+            "<mpaa>R</mpaa>",
+            "<customrating>PG</customrating>",
+            "<rating>8.2</rating>",
+            "<score>8.2</score>",
+            "<votes>45</votes>",
+            "<criticrating>92</criticrating>",
+            "<maker>Studio</maker>",
+            "<publisher>Label</publisher>",
+            "<set><name>Title &amp; Series</name></set>",
+            "<tag>片商：Studio</tag>",
+            "<poster>poster.jpg</poster>",
+            "<trailer>https://www.youtube.com/watch?v=demo&amp;x=2</trailer>",
+            "<website>https://example.com/film</website>",
+        ] {
+            assert!(nfo.contains(expected), "{expected} missing from {nfo}");
+        }
+        assert_eq!(nfo.matches("<actor>").count(), 1);
+        assert_eq!(nfo.matches("<tag>Drama</tag>").count(), 1);
+        let options =
+            serde_json::from_value(json!({"synopsis":false, "ratings":false, "credits":false}))
+                .unwrap();
+        let docs = documents(&record, &options, &[], &[]);
+        for field in [
+            "originalplot",
+            "outline",
+            "criticrating",
+            "rating",
+            "votes",
+            "actor",
+        ] {
+            assert!(!docs["movie.nfo"].contains(&format!("<{field}>")));
+        }
+    }
+
+    #[test]
     fn exports_special_episodes_and_preserves_xml_and_video_names() {
         let record = json!({"media_type":"series","query":"标题",
             "fields":{"title":"A & B <C>\u{0001}","imdb_id":"tt01","genres":["动画"],
@@ -233,13 +467,13 @@ mod tests {
             "Shows/Series S03E01.mkv",
         ]
         .map(str::to_owned);
-        let docs = documents(&record, &options, &paths);
+        let docs = documents(&record, &options, &paths, &[]);
         assert_eq!(docs.len(), 3);
         assert!(docs["tvshow.nfo"].contains("A &amp; B &lt;C&gt;</title>"));
         assert!(docs["tvshow.nfo"].contains("<name>演员</name>"));
         assert!(docs["tvshow.nfo"].contains("<uniqueid type=\"imdb\">tt01</uniqueid>"));
         assert!(docs["Series S00E003.nfo"].contains("<plot>简介</plot>"));
         assert!(docs["Series 1x02.nfo"].contains("<season>1</season>"));
-        assert_eq!(documents(&record, &options, &[]).len(), 2);
+        assert_eq!(documents(&record, &options, &[], &[]).len(), 2);
     }
 }

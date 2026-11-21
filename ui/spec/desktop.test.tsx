@@ -11,7 +11,7 @@ it("chooses and saves a native output directory and can reconnect PostgreSQL", a
   const initial: OutputOptions = {
     enabled: false, directory: "", directory_template: "work-{row}", filename_prefix: "",
     metadata: true, synopsis: true, credits: true, ratings: true, episodes: true,
-    raw: false, emby_nfo: false, poster: true, backdrop: false, stills: false, portraits: [],
+    raw: false, emby_nfo: false, poster: true, backdrop: false, stills: false, trailers: false, theme_videos: false, theme_music: false, extras: false, portraits: [],
   };
   const choose = vi.fn().mockRejectedValueOnce("目录选择器打开失败").mockResolvedValueOnce(null).mockResolvedValue("/Volumes/Export");
   const selection = { folder: "/Volumes/Library", paths: ["Library/Movie.mkv"],

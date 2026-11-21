@@ -121,7 +121,11 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 
 家庭「元数据翻译」的旧定时任务在 NAS 处理作品简介和分集标题，并写回 Emby。采集会读取 Emby 已有资料；如需额外的目标语言，可配置上面的翻译适配器。Emby 是只读资料源，未匹配到作品时继续查询常规来源。
 
-勾选「Emby NFO」可另存 XML 格式的电影、剧集与可匹配分集的 NFO。使用时把电影或分集 NFO 放到对应视频旁边，名称与视频保持一致。剧集的 `tvshow.nfo` 放到剧集根目录。输出默认集中到指定目录，便于检查后再导入媒体库。
+勾选「Emby NFO」可另存电影、剧集和可匹配分集的 XML。NFO 可写入排序名、原名、简介及原文、发行日期、分级、评分及投票数、演职员、系列、标签、厂牌、图片与预告链接。能获得哪些字段取决于来源。将电影和分集 NFO 放到同名视频旁边，剧集的 `tvshow.nfo` 放到剧集根目录。
+
+「附加媒体」可分别勾选预告片、主题视频、主题音乐和花絮。Emby 库里已有的附加媒体可随作品导出，支持直链文件的来源也可下载。每类每部作品最多下载 10 个文件，单文件上限 256 MiB。TMDB 返回的 YouTube 或 Vimeo 播放页会写入 `media-links.json`，主要预告链接也会写入 NFO。输出反馈会显示哪些已选类型没有文件或仅有链接。
+
+导入 Emby 时，把 `trailers/`、`backdrops/`（主题视频）、`theme-music/` 和 `extras/` 随作品放在同一目录。参见 [Emby 预告片命名](https://emby.media/support/articles/Trailers.html)和 [主题媒体命名](https://emby.media/support/articles/Theme-Songs-Videos.html)。
 
 ## Emby 入库自动刮削插件
 

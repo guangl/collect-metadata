@@ -17,6 +17,13 @@ const imageFields = [
   ["stills", "剧照与分集截图"],
 ] as const;
 
+const mediaFields = [
+  ["trailers", "预告片与先导预告"],
+  ["theme_videos", "主题视频"],
+  ["theme_music", "主题音乐"],
+  ["extras", "花絮与其他片段"],
+] as const;
+
 const roles: Record<PortraitRole, string> = {
   actor: "演员",
   voice: "声优",
@@ -127,6 +134,13 @@ export function OutputSettings() {
               {imageFields.map(([key, label]) => <label className="check-option" key={key}>
                 <input type="checkbox" checked={options[key]} onChange={(event) => change(key, event.target.checked)} />{label}
               </label>)}
+            </fieldset>
+            <fieldset disabled={busy !== null}>
+              <legend>附加媒体</legend>
+              {mediaFields.map(([key, label]) => <label className="check-option" key={key}>
+                <input type="checkbox" checked={options[key]} onChange={(event) => change(key, event.target.checked)} />{label}
+              </label>)}
+              <p className="muted">可下载的媒体保存为文件。只有播放页时，保存链接。</p>
             </fieldset>
             <fieldset disabled={busy !== null}>
               <legend>人物头像</legend>
