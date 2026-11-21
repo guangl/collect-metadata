@@ -6,6 +6,7 @@ use super::{CandidateChoice, Claim, Outcome};
 use crate::{
     Collector, MediaKind, MediaProvider, SearchResult,
     output::{PreparedWriteback, emby_source, prepare_writeback},
+    providers::media::emby::Emby,
     storage::Store,
 };
 
@@ -26,7 +27,14 @@ impl Collector {
         let owner = self.output_settings().map(|settings| settings.owner());
         loop {
             let delay = if let Ok(store) = self.require_store().await {
-                match store.claim(self.tmdb_configured(), owner.as_deref()).await {
+                match store
+                    .claim_with_ai(
+                        self.tmdb_configured(),
+                        owner.as_deref(),
+                        self.ai_configured(),
+                    )
+                    .await
+                {
                     Ok(Some(claim)) => {
                         self.run_claim(store, &claim).await;
                         continue;
@@ -101,7 +109,8 @@ impl Collector {
         if claim.query.is_empty() {
             return Some(Outcome::failed("缺少作品名称或番号。".into()));
         }
-        let (query, year) = if claim.from_folder {
+        let from_folder = claim.folder_root.is_some();
+        let (query, year) = if from_folder || claim.use_ai {
             super::folder::split_search_year(&claim.query)
         } else {
             (claim.query.as_str(), None)
@@ -114,16 +123,74 @@ impl Collector {
                 settings.active()
             }
         });
-        let home = if (claim.from_folder || import)
+        let key = match_key(claim, import, emby.as_deref());
+        let remembered = if claim.kind != MediaKind::Av
             && claim.candidate.is_none()
-            && let Some(emby) = emby.as_deref()
+            && let Some(key) = key.as_deref()
         {
-            self.gather_emby(emby, claim.kind, query, year).await
+            match store.remembered_match(claim.kind, key).await {
+                Ok(value) => value,
+                Err(_) => return Some(Outcome::failed("无法读取已保存的作品匹配。".into())),
+            }
         } else {
             None
         };
-        let result = if let Some(home) = home {
-            Ok(home)
+        let prefer_emby = claim.fill_missing && claim.export_revision == 0;
+        let mut candidate = claim.candidate.clone().or(remembered);
+        let mut ai_matched = false;
+        let home = if (from_folder || import)
+            && let Some(emby) = emby.as_deref()
+        {
+            emby.find(&self.client, claim.kind, query, year).await
+        } else {
+            None
+        };
+        let result = if let Some((id, home)) = home {
+            let item = &home.data["item"];
+            let is_public_work = matches!(item["Type"].as_str(), Some("Movie" | "Series"))
+                && !self.emby_path_excluded(&item["Path"]);
+            let needs_metadata = claim.use_ai
+                || !item["ImageTags"]["Primary"].is_string()
+                || item["Overview"]
+                    .as_str()
+                    .is_none_or(|overview| overview.trim().is_empty());
+            if candidate.is_none() && prefer_emby && is_public_work && needs_metadata {
+                let title = item["OriginalTitle"]
+                    .as_str()
+                    .filter(|title| !title.trim().is_empty())
+                    .or_else(|| item["Name"].as_str())
+                    .unwrap_or(query);
+                let year = item["ProductionYear"]
+                    .as_u64()
+                    .and_then(|year| year.try_into().ok());
+                let provider_id = item["ProviderIds"]["Tmdb"].as_str().filter(|id| {
+                    self.tmdb_configured() && id.parse::<u32>().is_ok_and(|id| id > 0)
+                });
+                let search_query =
+                    provider_id.map_or_else(|| title.to_owned(), |id| format!("tmdb:{id}"));
+                candidate = match self
+                    .search_match(claim.kind, &search_query, year, claim.use_ai)
+                    .await
+                {
+                    Ok((found, from_ai)) => {
+                        ai_matched = from_ai;
+                        Some(found)
+                    }
+                    Err(outcome) => return Some(*outcome),
+                };
+                if !matches!(store.collecting(claim, candidate.as_ref()?).await, Ok(true)) {
+                    return None;
+                }
+            }
+            self.gather_emby(
+                emby.as_deref()?,
+                claim.kind,
+                query,
+                (id, home),
+                candidate.as_ref(),
+                prefer_emby,
+            )
+            .await
         } else if import {
             return Some(Outcome::failed(
                 "无法读取该 Emby 条目，请检查媒体库与连接设置。".into(),
@@ -131,68 +198,152 @@ impl Collector {
         } else if claim.kind == MediaKind::Av {
             self.gather_av(&claim.query).await
         } else {
-            let candidate = if let Some(candidate) = &claim.candidate {
+            let found = if let Some(candidate) = &candidate {
                 candidate.clone()
             } else {
-                let mut search = match self.gather_candidates(claim.kind, query).await {
-                    Ok(search) => search,
-                    Err(error) => return Some(Outcome::failed(error)),
+                let (found, from_ai) = match self
+                    .search_match(claim.kind, query, year, claim.use_ai)
+                    .await
+                {
+                    Ok(found) => found,
+                    Err(outcome) => return Some(*outcome),
                 };
-                if search.candidates.is_empty() {
-                    return Some(if search.notes.is_empty() {
-                        Outcome::new("not_found", Some("没有找到候选作品。".into()))
-                    } else {
-                        Outcome::failed(search.notes.join(" "))
-                    });
-                }
-                let Some(candidate) = unique_candidate(query, year, &search) else {
-                    for candidate in &mut search.candidates {
-                        candidate.match_titles.clear();
-                    }
-                    let mut outcome = Outcome::new(
-                        "choice",
-                        (!search.notes.is_empty()).then(|| search.notes.join(" ")),
-                    );
-                    outcome.candidates = serde_json::to_value(search.candidates).ok();
-                    return Some(outcome);
-                };
-                if !matches!(store.collecting(claim, &candidate).await, Ok(true)) {
+                if !matches!(store.collecting(claim, &found).await, Ok(true)) {
                     return None;
                 }
-                candidate
+                ai_matched = from_ai;
+                found
             };
-            self.gather_media(claim.kind, candidate.provider, &candidate.id)
+            self.gather_media(claim.kind, found.provider, &found.id)
                 .await
         };
+        let result = result.map(|mut result| {
+            if ai_matched {
+                result.record["match_method"] = serde_json::json!("ai");
+            }
+            result
+        });
 
         let mut outcome = match result {
             Ok(result) => Outcome::collected(result),
             Err(error) => Outcome::failed(error),
         };
-        if let Some(result) = outcome
-            .result
-            .as_ref()
-            .filter(|result| result.has_fields() && emby_source(&result.record).is_none())
-            && let Some(plan) = claim
-                .export_plan
-                .as_ref()
-                .filter(|plan| plan.directory.is_some())
-        {
-            outcome.output = Some(
-                crate::output::prepare(
-                    &self.client,
-                    emby.as_deref(),
-                    plan,
-                    claim.batch,
-                    claim.id,
-                    result,
-                    &claim.source_files,
-                )
-                .await,
-            );
+        if let Some(result) = outcome.result.as_ref().filter(|result| result.has_fields()) {
+            if claim.remember_match {
+                outcome.remembered_match = key.zip(candidate);
+            }
+            if emby_source(&result.record).is_none()
+                && let Some(plan) = claim
+                    .export_plan
+                    .as_ref()
+                    .filter(|plan| plan.directory.is_some())
+            {
+                outcome.output = Some(
+                    crate::output::prepare(
+                        &self.client,
+                        emby.as_deref(),
+                        plan,
+                        claim.batch,
+                        (claim.id, claim.export_revision),
+                        result,
+                        &claim.source_files,
+                    )
+                    .await,
+                );
+            }
         }
         Some(outcome)
     }
+
+    async fn search_match(
+        &self,
+        kind: MediaKind,
+        query: &str,
+        year: Option<u16>,
+        use_ai: bool,
+    ) -> Result<(CandidateChoice, bool), Box<Outcome>> {
+        let mut search = self
+            .gather_candidates(kind, query)
+            .await
+            .map_err(|error| Box::new(Outcome::failed(error)))?;
+        if let Some(candidate) = unique_candidate(query, year, &search) {
+            return Ok((candidate, false));
+        }
+        if use_ai
+            && crate::providers::media::tmdb_id_query(query).is_none()
+            && !query
+                .strip_prefix(['Q', 'q'])
+                .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            let mut suggestion = self
+                .suggest_ai_match(kind, query, year, &search.candidates)
+                .await;
+            if let Ok(first) = &suggestion
+                && first.index.is_none()
+                && let Some(title) = first
+                    .search_title
+                    .as_deref()
+                    .filter(|title| normalize(title) != normalize(query))
+                && let Ok(revised) = self.gather_candidates(kind, title).await
+                && !revised.candidates.is_empty()
+            {
+                search = revised;
+                suggestion = self
+                    .suggest_ai_match(kind, query, year, &search.candidates)
+                    .await;
+            }
+            match suggestion {
+                Ok(suggestion) => {
+                    if let Some(index) = suggestion.index {
+                        let candidate = &search.candidates[index];
+                        if suggestion.confident
+                            && year.is_none_or(|year| candidate.year == Some(year))
+                        {
+                            return Ok((
+                                CandidateChoice {
+                                    provider: candidate.provider,
+                                    id: candidate.id.clone(),
+                                },
+                                true,
+                            ));
+                        }
+                        search.candidates.swap(0, index);
+                        search
+                            .notes
+                            .push("首项为 AI 建议，请核对片名和年份。".into());
+                    }
+                }
+                Err(error) => search.notes.push(error),
+            }
+        }
+        if search.candidates.is_empty() {
+            return Err(Box::new(if search.notes.is_empty() {
+                Outcome::new("not_found", Some("没有找到候选作品。".into()))
+            } else {
+                Outcome::failed(search.notes.join(" "))
+            }));
+        }
+        for candidate in &mut search.candidates {
+            candidate.match_titles.clear();
+        }
+        let mut outcome = Outcome::new(
+            "choice",
+            (!search.notes.is_empty()).then(|| search.notes.join(" ")),
+        );
+        outcome.candidates = serde_json::to_value(search.candidates).ok();
+        Err(Box::new(outcome))
+    }
+}
+
+fn match_key(claim: &Claim, import: bool, emby: Option<&Emby>) -> Option<String> {
+    if import {
+        return Some(format!("emby:{}:{}", emby?.server_address(), claim.query));
+    }
+    let query = normalize(&claim.query);
+    Some(match &claim.folder_root {
+        Some(root) => format!("folder:{}:{root}:{query}", root.len()),
+        None => format!("manual:{query}"),
+    })
 }
 
 fn normalize(value: &str) -> String {

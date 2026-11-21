@@ -5,7 +5,7 @@ use crate::{
     LookupResponse, OutputReport,
     batch::{
         BatchAction, BatchItemInput, BatchRow, BatchStatus, BatchSummary, BatchView,
-        CandidateChoice, Claim, Outcome,
+        CandidateChoice, Claim, MatchMode, Outcome,
     },
     output::{ExportPlan, WritebackJob, WritebackState, emby_source},
 };
@@ -58,6 +58,18 @@ pub(super) async fn migrate(connection: &mut PgConnection) -> Result<(), sqlx::E
             boolean NOT NULL DEFAULT false",
         "ALTER TABLE collect_metadata_batch_rows ADD COLUMN IF NOT EXISTS source_files
             jsonb NOT NULL DEFAULT '[]'::jsonb",
+        "ALTER TABLE collect_metadata_batches ADD COLUMN IF NOT EXISTS match_mode
+            text NOT NULL DEFAULT 'existing' CHECK (match_mode IN ('existing','fill_missing','ai'))",
+        "ALTER TABLE collect_metadata_batch_rows ADD COLUMN IF NOT EXISTS remember_match
+            boolean NOT NULL DEFAULT false",
+        "ALTER TABLE collect_metadata_batch_rows ADD COLUMN IF NOT EXISTS export_revision
+            bigint NOT NULL DEFAULT 0",
+        "CREATE TABLE IF NOT EXISTS collect_metadata_matches (
+            kind text NOT NULL,
+            query_key text NOT NULL,
+            candidate jsonb NOT NULL,
+            PRIMARY KEY (kind, query_key)
+        )",
         "CREATE INDEX IF NOT EXISTS collect_metadata_batch_rows_batch_idx
             ON collect_metadata_batch_rows(batch_id, id)",
         "CREATE INDEX IF NOT EXISTS collect_metadata_batch_rows_claim_idx
@@ -92,13 +104,35 @@ impl Store {
         export: Option<&ExportPlan>,
         owner: Option<&str>,
     ) -> Result<i64, sqlx::Error> {
+        self.create_batch_mode(
+            items,
+            use_tmdb,
+            folder_name,
+            export,
+            owner,
+            MatchMode::Existing,
+        )
+        .await
+    }
+
+    pub(crate) async fn create_batch_mode(
+        &self,
+        items: Vec<BatchItemInput>,
+        use_tmdb: bool,
+        folder_name: Option<&str>,
+        export: Option<&ExportPlan>,
+        owner: Option<&str>,
+        mode: MatchMode,
+    ) -> Result<i64, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let id = sqlx::query_scalar(
-            "INSERT INTO collect_metadata_batches (folder_name, export_plan, execution_owner) VALUES ($1,$2,$3) RETURNING id",
+            "INSERT INTO collect_metadata_batches (folder_name, export_plan, execution_owner, match_mode)
+             VALUES ($1,$2,$3,$4) RETURNING id",
         )
         .bind(folder_name)
         .bind(export.map(Json))
         .bind(owner)
+        .bind(mode.code())
         .fetch_one(&mut *tx)
         .await?;
         for chunk in items.chunks(500) {
@@ -106,10 +140,12 @@ impl Store {
                 "INSERT INTO collect_metadata_batch_rows (batch_id, kind, query, requires_tmdb, source_files) ",
             );
             insert.push_values(chunk, |mut row, item| {
+                let explicit_tmdb = matches!(mode, MatchMode::Ai)
+                    && crate::providers::media::tmdb_id_query(&item.query).is_some();
                 row.push_bind(id)
                     .push_bind(item.kind.code())
                     .push_bind(item.query.trim())
-                    .push_bind(use_tmdb && item.kind != crate::MediaKind::Av)
+                    .push_bind((use_tmdb || explicit_tmdb) && item.kind != crate::MediaKind::Av)
                     .push_bind(Json(&item.source_files));
             });
             insert.build().persistent(false).execute(&mut *tx).await?;
@@ -293,7 +329,7 @@ impl Store {
         let provider = candidate.provider.code();
         let affected = sqlx::query(
             "UPDATE collect_metadata_batch_rows r SET stage='queued', updated_at=now(), candidate=$3,
-                 candidates=NULL, message=NULL, requires_tmdb=(r.requires_tmdb OR $4='tmdb')
+                 candidates=NULL, message=NULL, requires_tmdb=($4='tmdb'), remember_match=true
              FROM collect_metadata_batches b
              WHERE r.batch_id=$1 AND r.id=$2 AND r.stage='choice' AND b.id=r.batch_id AND b.status='running'
                AND EXISTS (SELECT 1 FROM jsonb_array_elements(r.candidates) AS c
@@ -302,6 +338,50 @@ impl Store {
           .execute(&mut *tx).await?.rows_affected();
         tx.commit().await?;
         Ok(affected == 1)
+    }
+
+    pub(crate) async fn correct_batch_match(
+        &self,
+        batch: i64,
+        row: i64,
+        candidate: CandidateChoice,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = lock_queue(&self.pool).await?;
+        let changed = sqlx::query(
+            "UPDATE collect_metadata_batch_rows r SET
+                stage=CASE WHEN b.status='paused' THEN 'paused' ELSE 'queued' END,
+                candidate=$3, candidates=NULL, message=NULL, output_report=NULL,
+                requires_tmdb=($4='tmdb'), remember_match=true, updated_at=now(),
+                export_revision=r.export_revision+1
+             FROM collect_metadata_batches b
+             WHERE r.batch_id=$1 AND r.id=$2 AND b.id=r.batch_id AND b.status IN ('running','paused')
+               AND r.stage IN ('choice','failed','not_found','success','partial','paused')
+               AND r.writeback_job IS NULL
+               AND r.kind IN ('movie','series') AND ($4<>'tvmaze' OR r.kind='series')
+               AND (r.query NOT LIKE 'emby-episode:%' OR $4='tmdb')",
+        )
+        .bind(batch)
+        .bind(row)
+        .bind(Json(&candidate))
+        .bind(candidate.provider.code())
+        .execute(&mut *tx).await?.rows_affected() == 1;
+        tx.commit().await?;
+        Ok(changed)
+    }
+
+    pub(crate) async fn remembered_match(
+        &self,
+        kind: crate::MediaKind,
+        key: &str,
+    ) -> Result<Option<CandidateChoice>, sqlx::Error> {
+        sqlx::query_scalar::<_, Json<CandidateChoice>>(
+            "SELECT candidate FROM collect_metadata_matches WHERE kind=$1 AND query_key=$2",
+        )
+        .bind(kind.code())
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|value| value.map(|candidate| candidate.0))
     }
 
     pub(crate) async fn batch_row_result(
@@ -331,10 +411,20 @@ impl Store {
             }))
     }
 
+    #[cfg(test)]
     pub(crate) async fn claim(
         &self,
         has_tmdb: bool,
         owner: Option<&str>,
+    ) -> Result<Option<Claim>, sqlx::Error> {
+        self.claim_with_ai(has_tmdb, owner, false).await
+    }
+
+    pub(crate) async fn claim_with_ai(
+        &self,
+        has_tmdb: bool,
+        owner: Option<&str>,
+        has_ai: bool,
     ) -> Result<Option<Claim>, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         // The shared database has three slots even if desktop and web workers are both running.
@@ -347,10 +437,11 @@ impl Store {
         }
         let row = sqlx::query(
             "WITH next AS (
-                SELECT r.id, b.export_plan FROM collect_metadata_batch_rows r
+                SELECT r.id, b.export_plan, b.match_mode FROM collect_metadata_batch_rows r
                 JOIN collect_metadata_batches b ON b.id=r.batch_id
                 WHERE b.status='running'
                   AND (r.writeback_job IS NOT NULL OR $1 OR NOT r.requires_tmdb)
+                  AND (r.writeback_job IS NOT NULL OR $3 OR b.match_mode<>'ai' OR r.candidate IS NOT NULL)
                   AND (coalesce(r.writeback_job->>'owner', b.execution_owner, b.export_plan->>'owner') IS NULL
                        OR coalesce(r.writeback_job->>'owner', b.execution_owner, b.export_plan->>'owner')=$2)
                   AND r.stage IN ('queued','searching','collecting')
@@ -363,10 +454,13 @@ impl Store {
              SET stage=CASE WHEN r.writeback_job IS NOT NULL OR r.kind='av' OR r.candidate IS NOT NULL THEN 'collecting' ELSE 'searching' END,
                  attempt=r.attempt+1, lease_until=clock_timestamp()+interval '15 seconds', updated_at=now()
              FROM next WHERE r.id=next.id
-             RETURNING r.id,r.batch_id,r.attempt,r.kind,r.query,r.candidate,(r.source_files <> '[]'::jsonb) AS from_folder,
-                next.export_plan, CASE WHEN next.export_plan IS NULL THEN '[]'::jsonb ELSE r.source_files END AS source_files,
+             RETURNING r.id,r.batch_id,r.attempt,r.kind,r.query,r.candidate,
+                split_part(r.source_files->>0, '/', 1) AS folder_root, next.export_plan,
+                (next.match_mode='ai') AS use_ai, (next.match_mode<>'existing') AS fill_missing,
+                r.remember_match, r.export_revision,
+                CASE WHEN next.export_plan IS NULL THEN '[]'::jsonb ELSE r.source_files END AS source_files,
                 r.writeback_job, CASE WHEN r.writeback_job IS NOT NULL THEN r.writeback_state END AS writeback_state"
-        ).bind(has_tmdb).bind(owner).fetch_optional(&mut *tx).await?;
+        ).bind(has_tmdb).bind(owner).bind(has_ai).fetch_optional(&mut *tx).await?;
         tx.commit().await?;
         row.map(|r| {
             let writeback = r.try_get::<Option<Json<WritebackJob>>, _>("writeback_job")?
@@ -378,7 +472,11 @@ impl Store {
                 attempt: r.get("attempt"),
                 kind: batch_kind(r.get("kind"))?,
                 query: r.get("query"),
-                from_folder: r.get("from_folder"),
+                folder_root: r.get("folder_root"),
+                remember_match: r.get("remember_match"),
+                use_ai: r.get("use_ai"),
+                fill_missing: r.get("fill_missing"),
+                export_revision: r.get("export_revision"),
                 export_plan: r
                     .try_get::<Option<Json<ExportPlan>>, _>("export_plan")?
                     .map(|plan| plan.0),
@@ -441,6 +539,16 @@ impl Store {
                 failure = Some(result.record);
             }
         }
+        if let Some((key, candidate)) = outcome.remembered_match {
+            sqlx::query(
+                "INSERT INTO collect_metadata_matches (kind, query_key, candidate) VALUES ($1,$2,$3)
+                 ON CONFLICT (kind, query_key) DO UPDATE SET candidate=EXCLUDED.candidate",
+            )
+            .bind(claim.kind.code())
+            .bind(key)
+            .bind(Json(candidate))
+            .execute(&mut *tx).await?;
+        }
         let report = outcome.output.map(|output| match output {
             Ok(prepared) => prepared.publish(),
             Err(report) => report,
@@ -453,7 +561,9 @@ impl Store {
             };
         sqlx::query(
             "UPDATE collect_metadata_batch_rows SET stage=$2, message=$3, candidates=$4,
-                 snapshot_id=$5, result=$6, output_report=$7, writeback_state=$8, lease_until=NULL, updated_at=now() WHERE id=$1",
+                 snapshot_id=coalesce($5, snapshot_id), result=$6, output_report=$7,
+                 writeback_state=$8, lease_until=NULL, remember_match=remember_match AND $5 IS NULL,
+                 updated_at=now() WHERE id=$1",
         )
         .bind(claim.id)
         .bind(stage)
@@ -523,15 +633,7 @@ mod tests {
             .parse::<PgConnectOptions>()
             .unwrap();
         let admin = PgPool::connect_with(options.clone()).await.unwrap();
-        // The SQL identifier consists of a fixed prefix and two integers.
-        let schema = format!(
-            "batch_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros()
-        );
+        let schema = format!("batch_test_{}", uuid::Uuid::new_v4().simple());
         sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
             .execute(&admin)
             .await
@@ -547,6 +649,115 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("expected a claim");
+    }
+
+    #[tokio::test]
+    #[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
+    async fn correction_reuses_the_row_and_saves_only_a_successful_match() {
+        let (admin, options, schema) = test_database().await;
+        let store = Store::connect(&options).await.unwrap();
+        let files = vec!["Movies/Dark (2017)/Dark S01E01.mkv".to_owned()];
+        let batch = store
+            .create_batch(
+                vec![BatchItemInput {
+                    kind: MediaKind::Series,
+                    query: "Dark (2017)".into(),
+                    source_files: files.clone(),
+                }],
+                false,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let claim = claim_when_free(&store).await;
+        let failure = || Outcome {
+            stage: "not_found",
+            message: None,
+            candidates: None,
+            result: None,
+            remembered_match: None,
+            output: None,
+        };
+        assert!(store.finish(&claim, failure()).await.unwrap());
+        let candidate = CandidateChoice {
+            provider: MediaProvider::Tvmaze,
+            id: "16788".into(),
+        };
+        let key = "folder:6:Movies:dark (2017)";
+        assert!(
+            store
+                .correct_batch_match(batch, claim.id, candidate.clone())
+                .await
+                .unwrap()
+        );
+        let corrected = claim_when_free(&store).await;
+        assert_eq!(corrected.id, claim.id);
+        assert_eq!(corrected.query, claim.query);
+        assert_eq!(corrected.folder_root.as_deref(), Some("Movies"));
+        assert_eq!(corrected.export_revision, 1);
+        assert!(corrected.remember_match);
+        assert_eq!(corrected.candidate.as_ref().unwrap().id, candidate.id);
+        assert_eq!(
+            store.batch_files(batch, claim.id).await.unwrap().unwrap(),
+            files
+        );
+        assert!(
+            store
+                .remembered_match(MediaKind::Series, key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.finish(&corrected, failure()).await.unwrap());
+        assert!(
+            store
+                .remembered_match(MediaKind::Series, key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.retry_batch_row(batch, claim.id).await.unwrap());
+        let retried = claim_when_free(&store).await;
+        let outcome = Outcome {
+            stage: "success",
+            message: None,
+            candidates: None,
+            output: None,
+            result: Some(LookupResponse {
+                record: json!({"media_type":"series", "query":"Dark", "fields":{"title":"Dark"}}),
+                saved: None,
+                storage_error: None,
+            }),
+            remembered_match: Some((key.into(), candidate)),
+        };
+        assert!(store.finish(&retried, outcome).await.unwrap());
+        let reconnected = Store::connect(&options).await.unwrap();
+        assert_eq!(
+            reconnected
+                .remembered_match(MediaKind::Series, key)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            "16788"
+        );
+        assert!(
+            reconnected
+                .remembered_match(MediaKind::Movie, key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            reconnected.batch_view(batch).await.unwrap().unwrap().rows[0].stage,
+            "success"
+        );
+        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -589,6 +800,7 @@ mod tests {
         assert_eq!(resumed.attempt, expired.attempt + 1);
         assert!(!first.renew(expired).await.unwrap());
         let success = || Outcome {
+            remembered_match: None,
             output: None,
             stage: "success",
             message: None,
@@ -624,6 +836,7 @@ mod tests {
             .finish(
                 review,
                 Outcome {
+                    remembered_match: None,
                     output: None,
                     stage: "choice",
                     message: None,
@@ -699,6 +912,7 @@ mod tests {
         assert!(store.claim(false, None).await.unwrap().is_none());
         let completed = claim_when_free(&store).await;
         let ready = || Outcome {
+            remembered_match: None,
             output: None,
             stage: "success",
             message: None,
@@ -717,6 +931,7 @@ mod tests {
                     .finish(
                         &claim,
                         Outcome {
+                            remembered_match: None,
                             output: None,
                             stage,
                             message: None,

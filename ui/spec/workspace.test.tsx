@@ -31,7 +31,7 @@ function response(data: unknown, status = 200) {
   return new Response(status === 204 ? null : JSON.stringify(data), { status });
 }
 
-function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: EmbyLibraryPreview[] | null = null) {
+function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: EmbyLibraryPreview[] | null = null, aiConfigured = false) {
   const handle = vi.fn<(route: string, options?: RequestInit) => Promise<Response>>();
   let storage = storageOptions;
   let rows = initialRows;
@@ -39,6 +39,8 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: Emb
   let id = initialRows.length > 0 ? 9 : 0;
   handle.mockImplementation(async (route, options) => {
     const body = options?.body ? JSON.parse(String(options.body)) : null;
+    if (route === "/api/settings/ai") return response(aiConfigured);
+    if (route === "/api/search") return response({ candidates: [candidate], notes: [] });
     if (route === "/api/settings/postgres") return hasStorage ? response(null, 204) : response({ error: "未连接" }, 503);
     if (route === "/api/settings/output") {
       if (body) storage = body;
@@ -70,7 +72,7 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: Emb
       return response({ works: [{ kind: "movie", query: "文件夹中的电影", file_count: 1 }], files: 1,
         skipped: 1, unrecognized: ["媒体/未知.mkv"] });
     }
-    if (["/api/emby/import", "/api/emby/import-all", "/api/folder-batches"].includes(route) || (route === "/api/batches" && body)) {
+    if (["/api/emby/import", "/api/emby/import-all", "/api/emby/import-selection", "/api/batches/ai", "/api/folder-batches"].includes(route) || (route === "/api/batches" && body)) {
       id = 9;
       status = "running";
       return response(route === "/api/folder-batches"
@@ -103,7 +105,7 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: Emb
     }
     if (route.endsWith("/files")) return response(Array.from({ length: 101 }, (_, n) => `媒体/${n}.mkv`));
     if (route.endsWith("/result")) return response({ record, saved, storage_error: null });
-    if (route.endsWith("/candidate") || route.endsWith("/retry")) {
+    if (route.endsWith("/candidate") || route.endsWith("/retry") || route.endsWith("/match")) {
       const rowId = Number(route.split("/")[5]);
       rows = rows.map((row) => row.id === rowId ? { ...row, stage: "success" } : row);
       return response(null, 204);
@@ -579,6 +581,60 @@ describe("后台批次", () => {
     expect(screen.getByRole("tab", { name: "电影馆" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "空媒体库" }));
     expect(screen.getByRole("tabpanel", { name: "空媒体库" }).tabIndex).toBe(0);
+  });
+
+  it("在 Emby 库中搜索、筛缺资料并保持跨筛选选择，支持普通和 AI 刮削", async () => {
+    const film = { id: "30", kind: "movie" as const, title: "红辣椒", year: 2006,
+      original_title: "Paprika", overview: "梦境", genres: [], rating: null,
+      runtime_minutes: null, poster: null, backdrop: null };
+    const series = { ...film, id: "31", kind: "series" as const, title: "暗黑",
+      original_title: "Dark", overview: null, poster: "art", year: 2017 };
+    const calls = harness([], true, [{ id: "7", name: "影片库", works: [film, series] }], true);
+    render(<App />);
+    await screen.findByRole("checkbox", { name: "选择 红辣椒" });
+    setLabel("资料完整性", "poster");
+    expect(screen.queryByRole("checkbox", { name: "选择 暗黑" })).toBeNull();
+    click("选择当前结果");
+    expect(screen.getByRole("checkbox", { name: "选择 红辣椒" })).toHaveProperty("checked", true);
+    setLabel("资料完整性", "overview");
+    setLabel("搜索片名", "Ｄａｒｋ");
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 暗黑" }));
+    expect(screen.getByText("显示 1 部 · 已选 2 部")).toBeTruthy();
+    click("AI 刮削所选");
+    await screen.findByText("已将所选 2 部作品提交到 AI 刮削。");
+    const requests = () => calls.mock.calls.filter(([route]) => route === "/api/emby/import-selection");
+    expect(JSON.parse(String(requests()[0][1]?.body))).toEqual({
+      items: [{ id: "30", scope: "movie" }, { id: "31", scope: "series" }], use_ai: true,
+    });
+    await waitFor(() => expect(button("刮削所选")).toHaveProperty("disabled", true));
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 暗黑" }));
+    click("刮削所选");
+    await waitFor(() => expect(requests()).toHaveLength(2));
+    expect(JSON.parse(String(requests()[1][1]?.body))).toEqual({
+      items: [{ id: "31", scope: "series" }], use_ai: false,
+    });
+  });
+
+  it("在原批次条目搜索新匹配或直接按 TMDB ID 重新采集", async () => {
+    const row: BatchRow = { id: 19, query: "原条目", title: null, kind: "movie", stage: "not_found",
+      message: null, has_result: false, candidates: null, cover_url: null,
+      original_languages: [], file_count: 1, output: null };
+    const calls = harness([row]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "纠正匹配" }));
+    setLabel("片名或 TMDB ID", "寄生虫");
+    click("搜索作品");
+    await screen.findByRole("option", { name: /寄生虫 · 2019/ });
+    setLabel("搜索结果", "0");
+    click("重新采集并记住");
+    await screen.findByText(/已提交纠正匹配/);
+    const requests = () => calls.mock.calls.filter(([route]) => route === "/api/batches/9/rows/19/match");
+    expect(JSON.parse(String(requests()[0][1]?.body))).toEqual({ provider: "tmdb", id: "496243" });
+    click("纠正匹配");
+    setLabel("片名或 TMDB ID", "tmdb:1234");
+    click("重新采集并记住");
+    await waitFor(() => expect(requests()).toHaveLength(2));
+    expect(JSON.parse(String(requests()[1][1]?.body))).toEqual({ provider: "tmdb", id: "1234" });
   });
 
   it("按当前库或单部影片提交刮削，并在确认后单独向 Emby 提交覆盖", async () => {

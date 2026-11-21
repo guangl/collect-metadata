@@ -286,6 +286,10 @@ impl Emby {
             .filter(|rating| (1.0..=10.0).contains(&rating.value) && rating.count > 0)
     }
 
+    pub(crate) fn server_address(&self) -> &str {
+        self.base.as_str()
+    }
+
     fn endpoint(&self, path: &str) -> Url {
         self.base.join(path).expect("static Emby API path")
     }
@@ -919,7 +923,7 @@ fn valid_id(value: &Value) -> Option<&str> {
     value.as_str().filter(|id| is_item_id(id))
 }
 
-fn is_item_id(id: &str) -> bool {
+pub(crate) fn is_item_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 96 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 

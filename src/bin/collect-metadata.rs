@@ -14,12 +14,12 @@ use std::{
 #[cfg(test)]
 use collect_metadata::scan_folder_paths;
 use collect_metadata::{
-    BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice, Collector,
-    EmbyInput, EmbyLibrary, EmbyLibraryPreview, EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope,
-    EmbySeriesPreview, EmbySettings, EmbySettingsView, EmbyWorkPreview, FolderBatchResult,
-    FolderSelection, HistoryItem, LanguageSettings, LanguageSettingsView, LookupResponse, MediaKind,
-    MediaProvider, OutputOptions, OutputSettings, OutputSettingsView, SearchResult, TmdbSettings,
-    TmdbStatus, scan_native_folder,
+    AiBatchInput, BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice,
+    Collector, EmbyInput, EmbyLibrary, EmbyLibraryPreview, EmbyOverwriteInput, EmbyPreviewImage,
+    EmbyScrapeScope, EmbySelectionInput, EmbySeriesPreview, EmbySettings, EmbySettingsView,
+    EmbyWorkPreview, FolderBatchResult, FolderSelection, HistoryItem, LanguageSettings,
+    LanguageSettingsView, LookupResponse, MediaKind, MediaProvider, OutputOptions, OutputSettings,
+    OutputSettingsView, SearchResult, TmdbSettings, TmdbStatus, scan_native_folder,
 };
 use serde_json::Value;
 use tauri::{
@@ -72,6 +72,7 @@ async fn configure_database(state: State<'_, DesktopState>, url: String) -> Resu
         return Err("请输入 PostgreSQL 连接地址。".into());
     }
     let collector = Collector::from_database_url(url)?
+        .with_ai_config_file(&state.database_file.with_file_name("ai.json"))?
         .with_tmdb_settings(Arc::clone(&state.tmdb))
         .with_output_settings(Arc::clone(&state.output))
         .with_emby_settings(Arc::clone(&state.emby))
@@ -113,6 +114,40 @@ async fn save_tmdb(
     credential: String,
 ) -> Result<TmdbStatus, String> {
     state.collector().save_tmdb(credential).await
+}
+
+#[tauri::command]
+fn ai_status(state: State<'_, DesktopState>) -> bool {
+    state.collector().ai_configured()
+}
+
+#[tauri::command]
+async fn create_ai_batch(
+    state: State<'_, DesktopState>,
+    input: AiBatchInput,
+) -> Result<i64, String> {
+    state.collector().create_ai_batch(input).await
+}
+
+#[tauri::command]
+async fn import_emby_selection(
+    state: State<'_, DesktopState>,
+    input: EmbySelectionInput,
+) -> Result<i64, String> {
+    state.collector().import_emby_selection(input).await
+}
+
+#[tauri::command]
+async fn correct_batch_match(
+    state: State<'_, DesktopState>,
+    batch: i64,
+    row: i64,
+    candidate: CandidateChoice,
+) -> Result<(), String> {
+    state
+        .collector()
+        .correct_batch_match(batch, row, candidate)
+        .await
 }
 
 #[tauri::command]
@@ -507,6 +542,7 @@ fn main() {
                     .map_err(std::io::Error::other)?,
             );
             let collector = Collector::from_environment(url)
+                .and_then(|collector| collector.with_ai_config_file(&path.with_file_name("ai.json")))
                 .map_err(std::io::Error::other)?
                 .with_tmdb_settings(Arc::clone(&tmdb))
                 .with_output_settings(Arc::clone(&output))
@@ -555,6 +591,10 @@ fn main() {
             emby_settings,
             language_settings,
             save_languages,
+            ai_status,
+            create_ai_batch,
+            import_emby_selection,
+            correct_batch_match,
             emby_libraries,
             preview_emby,
             import_emby,

@@ -218,7 +218,12 @@ impl Collector {
                 );
             }
         }
-        let (official, origins) = official_catalog(&response.record, &targets);
+        let (mut official, origins) = official_catalog(&response.record, &targets);
+        if response.record["fill_missing"] == true {
+            for fields in official.values_mut() {
+                fields.retain(|key, _| response.record["field_sources"][key] != "Emby");
+            }
+        }
         let variants = self
             .languages
             .localize(
@@ -236,8 +241,10 @@ impl Collector {
                         *field = json!(value);
                     }
                 } else {
-                    if let Some(source) =
-                        origins.get(&targets[0]).and_then(|fields| fields.get(key))
+                    if let Some(source) = official
+                        .get(&targets[0])
+                        .and_then(|fields| fields.get(key))
+                        .and_then(|_| origins.get(&targets[0]).and_then(|fields| fields.get(key)))
                     {
                         response.record["field_sources"][key] = json!(source);
                     } else if texts.get(key) != Some(value) {

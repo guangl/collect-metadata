@@ -108,7 +108,7 @@ pub(crate) async fn prepare(
     emby: Option<&Emby>,
     plan: &ExportPlan,
     batch: i64,
-    row: i64,
+    (row, revision): (i64, i64),
     result: &LookupResponse,
     source_files: &[String],
 ) -> Result<BatchExport, OutputReport> {
@@ -122,7 +122,12 @@ pub(crate) async fn prepare(
     }
     settings::make_child_dir(&parent).map_err(|_| OutputReport::error("无法创建批次输出目录。"))?;
     let names = naming::Names::new(result, row);
-    let destination = parent.join(names.directory(&plan.options.directory_template));
+    let name = names.directory(&plan.options.directory_template);
+    let destination = parent.join(if revision == 0 {
+        name
+    } else {
+        format!("{name}-r{revision}")
+    });
     let file_names = names.files(&plan.options.filename_prefix);
     let temporary = tempfile::Builder::new()
         .prefix(".collect-metadata-")
@@ -337,7 +342,7 @@ mod tests {
         };
         let client = Client::new();
         let linked = ["Library/Work.mkv".to_owned()];
-        let prepared = prepare(&client, None, &plan, 1, 2, &result, &linked)
+        let prepared = prepare(&client, None, &plan, 1, (2, 0), &result, &linked)
             .await
             .unwrap_or_else(|_| panic!("prepare output"));
         let directory = root.join("batch-1/work-2");
@@ -351,7 +356,7 @@ mod tests {
         assert!(metadata["field_sources"]["description"].is_null());
         assert!(!directory.join("raw-sources.json").exists());
         assert_eq!(
-            prepare(&client, None, &plan, 1, 2, &result, &linked)
+            prepare(&client, None, &plan, 1, (2, 0), &result, &linked)
                 .await
                 .unwrap_or_else(|_| panic!("retry output"))
                 .publish()

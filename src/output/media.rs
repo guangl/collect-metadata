@@ -465,7 +465,7 @@ mod tests {
             }))
             .unwrap(),
         };
-        let prepared = prepare(&client, Some(&emby), &plan, 1, 2, &lookup, &[])
+        let prepared = prepare(&client, Some(&emby), &plan, 1, (2, 0), &lookup, &[])
             .await
             .unwrap_or_else(|_| panic!("prepare"));
         let work = plan.directory.as_ref().unwrap().join("batch-1/work-2");

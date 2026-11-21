@@ -71,7 +71,8 @@ impl Collector {
                 let Some(data) = emby_source(&row.record) else {
                     continue;
                 };
-                let (entries, preview, count) = plan_writeback(&paths, data, &row.state);
+                let (entries, preview, count) =
+                    plan_writeback(&paths, data, &row.record, &row.state);
                 files.extend(preview);
                 writable += count;
                 if !entries.is_empty() {

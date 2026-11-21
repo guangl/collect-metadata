@@ -9,6 +9,7 @@ import type {
   EmbyCredit,
   EmbySettingsView,
   LookupResponse,
+  MediaProvider,
   MediaType,
   OutputOptions,
   OutputSettingsView,
@@ -159,6 +160,29 @@ export function importEmbyLibrary(library: string): Promise<number> {
 export function importEmbyItem(id: string, scope: EmbyScrapeScope): Promise<number> {
   return invoke ? invoke("import_emby_item", { id, scope }) :
     post(`/api/emby/items/${encodeURIComponent(id)}/scrape`, scope);
+}
+
+export function importEmbySelection(items: { id: string; scope: EmbyScrapeScope }[], useAi: boolean): Promise<number> {
+  const input = { items, use_ai: useAi };
+  return invoke ? invoke("import_emby_selection", { input }) : post("/api/emby/import-selection", input);
+}
+
+export function getAiStatus(): Promise<boolean> {
+  return invoke ? invoke("ai_status") : request("/api/settings/ai", { cache: "no-store" });
+}
+
+export function createAiBatch(items: BatchInput[]): Promise<number> {
+  const input = { items };
+  return invoke ? invoke("create_ai_batch", { input }) : post("/api/batches/ai", input);
+}
+
+export function searchWorks(kind: MediaType, query: string): Promise<{ candidates: Candidate[]; notes: string[] }> {
+  return invoke ? invoke("search_media", { kind, query }) : post("/api/search", { kind, query });
+}
+
+export function correctBatchMatch(batch: number, row: number, candidate: { provider: MediaProvider; id: string }): Promise<void> {
+  return invoke ? invoke("correct_batch_match", { batch, row, candidate })
+    : post(`/api/batches/${batch}/rows/${row}/match`, candidate);
 }
 
 export function overwriteEmby(target: EmbyScrapeTarget, replaceImages: boolean): Promise<void> {

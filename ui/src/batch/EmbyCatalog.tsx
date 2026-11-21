@@ -371,33 +371,136 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
   </dialog>;
 }
 
-export const EmbyCatalog = memo(function EmbyCatalog({ libraries, canScrape, onScrape }: ScrapeControls & { libraries: EmbyLibraryPreview[] }) {
+type SelectionControls = {
+  aiConfigured: boolean;
+  onSelection: (works: EmbyWorkPreview[], useAi: boolean) => Promise<number>;
+};
+
+const MAX_SELECTION = 500;
+
+function LibraryWorks({ library, canScrape, onScrape, aiConfigured, onSelection, onOpen }: ScrapeControls & SelectionControls & {
+  library: EmbyLibraryPreview;
+  onOpen: (work: EmbyWorkPreview) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [missing, setMissing] = useState("all");
+  const [selections, setSelections] = useState<Set<string>>(() => new Set());
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const term = query.trim().normalize("NFKC").toLowerCase();
+  const visible = library.works.filter((work) =>
+    (!term || [work.title, work.original_title, work.year].some((value) =>
+      String(value ?? "").normalize("NFKC").toLowerCase().includes(term))) &&
+    (missing === "all" || (missing === "poster" && !work.poster) ||
+      (missing === "overview" && !work.overview?.trim()) ||
+      (missing === "any" && (!work.poster || !work.overview?.trim())))
+  );
+  const selected = library.works.filter((work) => selections.has(work.id));
+  const canSelect = canScrape && !pending;
+  const allVisible = visible.length > 0 && visible.every((work) => selections.has(work.id));
+
+  function selectVisible() {
+    setSelections((before) => {
+      const next = new Set(before);
+      for (const work of visible) {
+        if (allVisible) next.delete(work.id);
+        else if (next.size < MAX_SELECTION) next.add(work.id);
+      }
+      return next;
+    });
+  }
+
+  async function submit(useAi: boolean) {
+    setError("");
+    setPending(true);
+    try {
+      await onSelection(selected, useAi);
+      setSelections(new Set());
+    } catch (error) {
+      setError(errorText(error));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return <section className="py-4 sm:py-6" aria-labelledby={`emby-library-${library.id}`}>
+    <div className="section-heading justify-start [overflow-wrap:anywhere]">
+      <h3 id={`emby-library-${library.id}`}>{library.name}</h3>
+      <span>{library.works.length} 部</span>
+    </div>
+    {library.works.length > 0 && <>
+      <div className="mb-4">
+        <ScrapeActions target={{ type: "library", id: library.id }} name={library.name}
+          canScrape={canScrape} onScrape={onScrape} />
+      </div>
+      <div className="mb-4 flex flex-wrap items-end gap-2">
+        <label className="filter">搜索片名
+          <input className="field" type="search" value={query} onChange={(event) => setQuery(event.target.value)} />
+        </label>
+        <label className="filter">资料完整性
+          <select className="field" value={missing} onChange={(event) => setMissing(event.target.value)}>
+            <option value="all">全部作品</option>
+            <option value="any">缺少海报或简介</option>
+            <option value="poster">缺少海报</option>
+            <option value="overview">缺少简介</option>
+          </select>
+        </label>
+        <span className="muted" role="status">显示 {visible.length} 部 · 已选 {selected.length} 部</span>
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <button className="secondary" type="button"
+          disabled={!canSelect || visible.length === 0 || (!allVisible && selected.length >= MAX_SELECTION)}
+          onClick={selectVisible}>{allVisible ? "取消选择当前结果" : "选择当前结果"}</button>
+        {selected.length > 0 && <button className="secondary" type="button" disabled={pending}
+          onClick={() => setSelections(new Set())}>清空选择</button>}
+        <button className="primary" type="button" disabled={!canSelect || !selected.length}
+          onClick={() => void submit(false)}>刮削所选</button>
+        {aiConfigured && <button className="secondary" type="button" disabled={!canSelect || !selected.length}
+          onClick={() => void submit(true)}>AI 刮削所选</button>}
+        {selected.length === MAX_SELECTION && <span className="muted">每批最多选择 {MAX_SELECTION} 部作品。</span>}
+      </div>
+      {error && <p className="batch-error" role="alert">{error}</p>}
+    </>}
+    {visible.length ? <ul className="grid grid-cols-library gap-x-3 gap-y-4 sm:grid-cols-library-wide sm:gap-4" role="list">
+      {visible.map((work) => <li className="relative min-w-0" key={work.id}>
+        <label className="absolute end-1.5 top-1.5 z-10 flex cursor-pointer rounded bg-canvas p-1.5 shadow">
+          <input type="checkbox" aria-label={`选择 ${work.title}`} checked={selections.has(work.id)}
+            disabled={!canSelect || (selected.length >= MAX_SELECTION && !selections.has(work.id))}
+            onChange={(event) => {
+              const checked = event.target.checked;
+              setSelections((before) => {
+                const next = new Set(before);
+                if (checked) next.add(work.id);
+                else next.delete(work.id);
+                return next;
+              });
+            }} />
+        </label>
+        <button type="button" className="emby-tile" onClick={() => onOpen(work)}>
+          <EmbyArtwork key={work.poster} id={work.id} tag={work.poster} image="poster" />
+          <span className="emby-tile-caption">
+            <strong title={work.title}>{work.title}</strong>
+            <span>{[work.year, mediaLabels[work.kind]].filter(Boolean).join(" · ")}</span>
+          </span>
+        </button>
+      </li>)}
+    </ul> : <p className="muted">{library.works.length ? "没有符合筛选条件的作品。" : "这个媒体库没有可刮削的电影、剧集或私人影片。"}</p>}
+  </section>;
+}
+
+export const EmbyCatalog = memo(function EmbyCatalog({ libraries, ...controls }: ScrapeControls & SelectionControls & { libraries: EmbyLibraryPreview[] }) {
   const [selected, setSelected] = useState<{ work: EmbyWorkPreview; library: string }>();
 
   return <div className="min-w-0">
-    <Tabs label="Emby 媒体库" className="mt-3" tabs={libraries.map((library) => ({ id: library.id, label: library.name,
+    <Tabs label="Emby 媒体库" className="mt-3" tabs={libraries.map((library) => ({
+      id: library.id,
+      label: library.name,
+      retain: true,
       panelFocusable: library.works.length === 0,
-      content: <section className="py-4 sm:py-6" aria-labelledby={`emby-library-${library.id}`}>
-      <div className="section-heading justify-start [overflow-wrap:anywhere]">
-        <h3 id={`emby-library-${library.id}`}>{library.name}</h3>
-        <span>{library.works.length} 部</span>
-      </div>
-      {library.works.length > 0 && <div className="mb-4">
-        <ScrapeActions target={{ type: "library", id: library.id }} name={library.name}
-          canScrape={canScrape} onScrape={onScrape} />
-      </div>}
-      {library.works.length ? <ul className="grid grid-cols-library gap-x-3 gap-y-4 sm:grid-cols-library-wide sm:gap-4" role="list">
-        {library.works.map((work) => <li className="min-w-0" key={work.id}>
-          <button type="button" className="emby-tile" onClick={() => setSelected({ work, library: library.name })}>
-            <EmbyArtwork key={work.poster} id={work.id} tag={work.poster} image="poster" />
-            <span className="emby-tile-caption">
-              <strong title={work.title}>{work.title}</strong>
-              <span>{[work.year, mediaLabels[work.kind]].filter(Boolean).join(" · ")}</span>
-            </span>
-          </button>
-        </li>)}
-      </ul> : <p className="muted">这个媒体库没有可刮削的电影、剧集或私人影片。</p>}
-    </section> }))} />
-    {selected && <WorkPreview {...selected} canScrape={canScrape} onScrape={onScrape} onClose={() => setSelected(undefined)} />}
+      content: <LibraryWorks library={library} {...controls}
+        onOpen={(work) => setSelected({ work, library: library.name })} />,
+    }))} />
+    {selected && <WorkPreview {...selected} canScrape={controls.canScrape} onScrape={controls.onScrape}
+      onClose={() => setSelected(undefined)} />}
   </div>;
 });

@@ -8,10 +8,10 @@ use axum::{
     routing::{get, post},
 };
 use collect_metadata::{
-    BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput, EmbyOverwriteInput,
-    EmbyPreviewImage, EmbyScrapeScope, EmbySettings, HistoryItem, LanguageSettings, LookupResponse,
-    MediaKind, MediaProvider, OutputOptions, OutputSettings, TmdbSettings, browse_mounted_folders,
-    preview_folder, scan_mounted_folder,
+    AiBatchInput, BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput,
+    EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope, EmbySelectionInput, EmbySettings,
+    HistoryItem, LanguageSettings, LookupResponse, MediaKind, MediaProvider, OutputOptions,
+    OutputSettings, TmdbSettings, browse_mounted_folders, preview_folder, scan_mounted_folder,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -102,8 +102,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let languages = Arc::new(LanguageSettings::load(Some(
         config.with_file_name("metadata-languages.json"),
     ))?);
+    let ai_file = config.with_file_name("ai.json");
     let tmdb = TmdbSettings::from_file(config)?;
     let collector = Collector::from_environment(None)?
+        .with_ai_config_file(&ai_file)?
         .with_tmdb_settings(Arc::new(tmdb))
         .with_output_settings(Arc::new(output))
         .with_emby_settings(emby)
@@ -163,6 +165,7 @@ fn router(collector: Arc<Collector>) -> Router {
         )
         .route("/healthz", get(|| async { StatusCode::NO_CONTENT }))
         .route("/readyz", get(readiness))
+        .route("/api/settings/ai", get(ai_status))
         .route("/api/settings/postgres", get(check_storage))
         .route("/api/settings/tmdb", get(tmdb_status).post(save_tmdb))
         .route("/api/settings/tmdb/test", post(test_tmdb))
@@ -181,6 +184,7 @@ fn router(collector: Arc<Collector>) -> Router {
         .route("/api/emby/preview", post(preview_emby))
         .route("/api/emby/catalog", get(emby_catalog))
         .route("/api/emby/import-all", post(import_emby_catalog))
+        .route("/api/emby/import-selection", post(import_emby_selection))
         .route("/api/emby/items/{id}/scrape", post(import_emby_item))
         .route("/api/emby/overwrite", post(overwrite_emby))
         .route("/api/emby/series/{id}", get(emby_series_preview))
@@ -197,6 +201,11 @@ fn router(collector: Arc<Collector>) -> Router {
         .route("/api/history/languages", get(history_languages))
         .route("/api/history/{id}", get(load_snapshot))
         .route("/api/batches", get(list_batches).post(create_batch))
+        .route("/api/batches/ai", post(create_ai_batch))
+        .route(
+            "/api/batches/{batch}/rows/{row}/match",
+            post(correct_batch_match),
+        )
         .route(
             "/api/media-folders",
             get(browse_media_folders).post(preview_mounted_folder),
@@ -241,6 +250,44 @@ async fn index() -> impl IntoResponse {
         ],
         Html(include_str!("../../dist/index.html")),
     )
+}
+
+async fn ai_status(State(collector): AppState) -> Json<bool> {
+    Json(collector.ai_configured())
+}
+
+async fn create_ai_batch(
+    State(collector): AppState,
+    Json(input): Json<AiBatchInput>,
+) -> Result<Json<i64>, ApiError> {
+    collector
+        .create_ai_batch(input)
+        .await
+        .map(Json)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn import_emby_selection(
+    State(collector): AppState,
+    Json(input): Json<EmbySelectionInput>,
+) -> Result<Json<i64>, ApiError> {
+    collector
+        .import_emby_selection(input)
+        .await
+        .map(Json)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn correct_batch_match(
+    State(collector): AppState,
+    Path((batch, row)): Path<(i64, i64)>,
+    Json(candidate): Json<CandidateChoice>,
+) -> Result<StatusCode, ApiError> {
+    collector
+        .correct_batch_match(batch, row, candidate)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
 }
 
 async fn tmdb_status(State(collector): AppState) -> impl IntoResponse {

@@ -1,13 +1,14 @@
 import { WritebackDialog } from "./WritebackDialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
-import { chooseBatchCandidate, chooseMediaFolder, controlBatch, createBatch, createFolderBatch, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, importEmbyLibrary, isDesktop, listBatches, previewMountedFolder, retryBatchRow } from "../api";
+import { chooseBatchCandidate, chooseMediaFolder, controlBatch, correctBatchMatch, createAiBatch, createBatch, createFolderBatch, getAiStatus, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, importEmbyLibrary, importEmbySelection, isDesktop, listBatches, previewMountedFolder, retryBatchRow } from "../api";
 import { languageText, PosterArt } from "../Catalog";
 import { DetailDialog } from "../DetailDialog";
 import { formatDate } from "../Movie";
 import { errorText, mediaLabels, providerLabels } from "../types";
-import type { Candidate, EmbyLibraryPreview, EmbyScrapeTarget, LookupResponse, MediaType, StorageStatus } from "../types";
+import type { Candidate, EmbyLibraryPreview, EmbyScrapeTarget, EmbyWorkPreview, LookupResponse, MediaProvider, MediaType, StorageStatus } from "../types";
 import { EmbyCatalog } from "./EmbyCatalog";
+import { MatchCorrection } from "./MatchCorrection";
 import { MountedFolderPicker } from "./MountedFolderPicker";
 import { AV_PREFIXES, MAX_FOLDER_FILES, MAX_ITEMS, parseBatch, terminal } from "./engine";
 import type { BatchAction, BatchRow, BatchStage, BatchStatus, BatchSummary, BatchView, FolderBatchResult, FolderSelection } from "./engine";
@@ -111,6 +112,8 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [opened, setOpened] = useState<{ id: number; response: LookupResponse; opener: HTMLButtonElement } | null>(null);
+  const [aiConfigured, setAiConfigured] = useState(false);
+  const [correcting, setCorrecting] = useState<number | null>(null);
   const [changing, setChanging] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -139,6 +142,17 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   }, [active, storage, refreshList]);
 
   useEffect(() => {
+    if (!active) return;
+    let stopped = false;
+    getAiStatus().then((configured) => {
+      if (!stopped) setAiConfigured(configured === true);
+    }, () => {
+      if (!stopped) setAiConfigured(false);
+    });
+    return () => { stopped = true; };
+  }, [active]);
+
+  useEffect(() => {
     if (!active || selectedSource === "folder") return;
     let stopped = false;
     setEmbyResult(undefined);
@@ -152,6 +166,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
 
   useEffect(() => {
     setOpened(null);
+    setCorrecting(null);
     setConfirmCancel(false);
     setPollError(null);
     setWriteback(null);
@@ -236,13 +251,13 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     }
   }
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function submit(useAi: boolean) {
     if (submitting || scanning || storage !== "ready") return;
     setSubmitting(true);
     setError(null);
     try {
-      const id = await createBatch(parseBatch(input, kind));
+      const items = parseBatch(input, kind);
+      const id = await (useAi ? createAiBatch(items) : createBatch(items));
       setSelected(id);
       setInput("");
       await refreshList();
@@ -329,6 +344,20 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     }
   }
 
+  async function saveCorrection(row: BatchRow, candidate: { provider: MediaProvider; id: string }) {
+    if (selected === null || busy) return;
+    setChanging(row.id);
+    try {
+      await correctBatchMatch(selected, row.id, candidate);
+      setOpened((previous) => previous?.id === row.id ? null : previous);
+      setCorrecting(null);
+      setRefresh((value) => value + 1);
+      onNotice("已提交纠正匹配。取得资料后会记住此选择。");
+    } finally {
+      setChanging(null);
+    }
+  }
+
   const queueEmby = useCallback(async (request: () => Promise<number>, notice: string) => {
     if (sourceBusy || storage !== "ready") throw new Error("后台任务当前不可用。");
     setSubmitting(true);
@@ -360,6 +389,11 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
       : () => importEmbyItem(target.id, target.scope);
     return queueEmby(request, `已将「${name}」提交到后台任务。`);
   }, [queueEmby]);
+
+  const submitEmbySelection = useCallback((works: EmbyWorkPreview[], useAi: boolean) =>
+    queueEmby(() => importEmbySelection(works.map(({ id, kind }) => ({ id, scope: kind })), useAi),
+      `已将所选 ${works.length} 部作品提交到${useAi ? " AI 刮削" : "后台任务"}。`),
+  [queueEmby]);
 
   async function open(row: BatchRow, opener: HTMLButtonElement) {
     if (selected === null || busy) return;
@@ -438,7 +472,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
         {embyImportError && <p className="batch-error" role="alert">{embyImportError}</p>}
         {embyResult && !libraries && !embyError && <p className="catalog-empty">连接 Emby 后会自动显示全部媒体库。</p>}
         {libraries && (libraries.length > 0
-          ? <EmbyCatalog libraries={libraries} canScrape={!sourceBusy && storage === "ready"} onScrape={submitEmbyTarget} />
+          ? <EmbyCatalog libraries={libraries} canScrape={!sourceBusy && storage === "ready"} onScrape={submitEmbyTarget} aiConfigured={aiConfigured} onSelection={submitEmbySelection} />
           : <p className="catalog-empty">Emby 尚无媒体库。</p>)}
       </section>}
       {preview && <section className="mt-5 min-w-0" aria-labelledby="folder-preview-heading">
@@ -463,7 +497,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
       </section>}
       <details className="mt-4 text-sm [&>summary]:text-muted">
       <summary>手动输入作品</summary>
-      <form className="panel batch-form mt-2" onSubmit={submit}>
+      <form className="panel batch-form mt-2" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit(false); }}>
         <label className="filter">默认类型
           <select className="field" value={kind} onChange={(event) => setKind(event.target.value as MediaType)}>
             {(Object.keys(mediaLabels) as MediaType[]).map((type) => (
@@ -479,6 +513,9 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
         <button className="primary" type="submit" disabled={submitting || scanning || !input.trim() || storage !== "ready"}>
           {submitting ? "正在提交…" : "提交后台采集"}
         </button>
+        {aiConfigured && <button className="secondary" type="button"
+          disabled={submitting || scanning || !input.trim() || storage !== "ready"}
+          onClick={() => void submit(true)}>提交 AI 刮削</button>}
       </form>
       </details>
       <section className="panel mt-6" aria-labelledby="queue-title">
@@ -568,7 +605,14 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
                   <span className="batch-status" data-stage={row.stage}>{row.writeback === "queued" ? "等待写回" : row.writeback === "collecting" ? "正在写回" : labels[row.stage]}</span>
                   {view.status !== "cancelled" && (row.stage === "failed" || row.stage === "not_found") && row.query &&
                     <button className="secondary" type="button" disabled={busy} onClick={() => changeRow(row)}>重试</button>}
+                  {view.status !== "cancelled" && row.kind !== "av" && row.query && correcting !== row.id &&
+                    row.writeback !== "queued" && row.writeback !== "collecting" &&
+                    (row.stage === "choice" || row.stage === "paused" || terminal(row.stage)) &&
+                    <button className="secondary" type="button" disabled={busy} onClick={() => setCorrecting(row.id)}>纠正匹配</button>}
                 </div>
+                {correcting === row.id && view.status !== "cancelled" && <MatchCorrection key={row.id}
+                  kind={row.kind} episode={row.query.startsWith("emby-episode:")} busy={busy}
+                  onSave={(candidate) => saveCorrection(row, candidate)} onClose={() => setCorrecting(null)} />}
                 {(row.writeback === "ready" || row.writeback === "failed" || row.writeback === "done") &&
                   <button type="button" className="secondary" disabled={busy}
                     onClick={() => setWriteback({ row: row.id, title })}>

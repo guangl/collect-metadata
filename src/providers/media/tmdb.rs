@@ -138,6 +138,18 @@ impl Tmdb {
         item: &Value,
         language: &str,
     ) -> Option<Source> {
+        self.emby_episode_with_series(client, emby, item, language, None)
+            .await
+    }
+
+    pub(crate) async fn emby_episode_with_series(
+        &self,
+        client: &Client,
+        emby: &emby::Emby,
+        item: &Value,
+        language: &str,
+        series_override: Option<u32>,
+    ) -> Option<Source> {
         let number = item["IndexNumber"].as_u64();
         if number
             .zip(item["IndexNumberEnd"].as_u64())
@@ -145,28 +157,42 @@ impl Tmdb {
         {
             return None;
         }
-        let ids = &item["ProviderIds"];
+        let empty_ids = Value::Null;
+        let ids = if series_override.is_some() {
+            &empty_ids
+        } else {
+            &item["ProviderIds"]
+        };
         let expected_id = ids["Tmdb"].as_str().and_then(id).map(u64::from);
-        let episode = match self.find_episode(client, ids, language).await {
-            Ok(episode) => episode,
-            Err(error) => {
-                let fallback = match (item["ParentIndexNumber"].as_u64(), number) {
-                    (Some(season), Some(number)) if number > 0 => emby
-                        .series_tmdb_id(client, item)
-                        .await
-                        .map(|series| Episode {
-                            series,
-                            season,
-                            number,
-                            id: expected_id,
-                        }),
-                    _ => None,
-                };
-                let Some(episode) = fallback else {
-                    let page = Url::parse("https://www.themoviedb.org/").unwrap();
-                    return Some(Source::failure(NAME, &page, error));
-                };
-                episode
+        let episode = if let Some(series) = series_override {
+            Episode {
+                series,
+                season: item["ParentIndexNumber"].as_u64()?,
+                number: number.filter(|number| *number > 0)?,
+                id: None,
+            }
+        } else {
+            match self.find_episode(client, ids, language).await {
+                Ok(episode) => episode,
+                Err(error) => {
+                    let fallback = match (item["ParentIndexNumber"].as_u64(), number) {
+                        (Some(season), Some(number)) if number > 0 => emby
+                            .series_tmdb_id(client, item)
+                            .await
+                            .map(|series| Episode {
+                                series,
+                                season,
+                                number,
+                                id: expected_id,
+                            }),
+                        _ => None,
+                    };
+                    let Some(episode) = fallback else {
+                        let page = Url::parse("https://www.themoviedb.org/").unwrap();
+                        return Some(Source::failure(NAME, &page, error));
+                    };
+                    episode
+                }
             }
         };
         let Episode {
@@ -230,11 +256,19 @@ impl Tmdb {
                 )),
             ),
         };
-        let fields = field_map([
+        let mut fields = field_map([
             ("release_date", details["air_date"].clone()),
             ("rating", rating(&details)),
             ("original_languages", json!(languages(&series_data))),
         ]);
+        if series_override.is_some() {
+            fields.extend(field_map([
+                ("title", details["name"].clone()),
+                ("description", details["overview"].clone()),
+                ("series", series_data["name"].clone()),
+                ("still_url", json!(image(&details["still_path"], "w500"))),
+            ]));
+        }
         let mut source = Source::found(
             NAME,
             &page,

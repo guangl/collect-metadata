@@ -1,3 +1,4 @@
+pub(crate) mod ai;
 mod folder;
 #[cfg(feature = "web")]
 mod mounted;
@@ -51,6 +52,24 @@ impl EmbyScrapeScope {
             Self::Episode => "Episode",
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct EmbySelectionInput {
+    pub items: Vec<EmbySelectionItem>,
+    #[serde(default)]
+    pub use_ai: bool,
+}
+
+#[derive(Deserialize)]
+pub struct EmbySelectionItem {
+    pub id: String,
+    pub scope: EmbyScrapeScope,
+}
+
+#[derive(Deserialize)]
+pub struct AiBatchInput {
+    pub items: Vec<BatchItemInput>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +143,23 @@ pub struct BatchRow {
     pub writeback: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum MatchMode {
+    Existing,
+    FillMissing,
+    Ai,
+}
+
+impl MatchMode {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Existing => "existing",
+            Self::FillMissing => "fill_missing",
+            Self::Ai => "ai",
+        }
+    }
+}
+
 pub(crate) struct Claim {
     pub id: i64,
     pub batch: i64,
@@ -131,7 +167,11 @@ pub(crate) struct Claim {
     pub kind: MediaKind,
     pub query: String,
     pub candidate: Option<CandidateChoice>,
-    pub from_folder: bool,
+    pub remember_match: bool,
+    pub use_ai: bool,
+    pub fill_missing: bool,
+    pub export_revision: i64,
+    pub folder_root: Option<String>,
     pub export_plan: Option<ExportPlan>,
     pub source_files: Vec<String>,
     pub writeback: Option<(WritebackJob, WritebackState)>,
@@ -142,6 +182,7 @@ pub(crate) struct Outcome {
     pub message: Option<String>,
     pub candidates: Option<Value>,
     pub result: Option<LookupResponse>,
+    pub remembered_match: Option<(String, CandidateChoice)>,
     pub output: Option<Result<BatchExport, OutputReport>>,
 }
 
@@ -152,6 +193,7 @@ impl Outcome {
             message,
             candidates: None,
             result: None,
+            remembered_match: None,
             output: None,
         }
     }
@@ -208,6 +250,7 @@ impl Outcome {
             message,
             candidates: None,
             result: Some(result),
+            remembered_match: None,
             output: None,
         }
     }
@@ -332,6 +375,47 @@ impl Collector {
         .await
     }
 
+    pub async fn import_emby_selection(&self, input: EmbySelectionInput) -> Result<i64, String> {
+        if !(1..=500).contains(&input.items.len()) {
+            return Err("每批可选择 1 到 500 个 Emby 条目。".into());
+        }
+        self.check_ai(input.use_ai)?;
+        let mut seen = HashSet::new();
+        let mut items = Vec::new();
+        for item in input.items {
+            if !crate::providers::media::emby::is_item_id(&item.id) {
+                return Err("Emby 条目 ID 无效。".into());
+            }
+            let (kind, prefix) = match item.scope {
+                EmbyScrapeScope::Movie => (MediaKind::Movie, "emby:"),
+                EmbyScrapeScope::Series => (MediaKind::Series, "emby:"),
+                EmbyScrapeScope::Episode if !input.use_ai => {
+                    (MediaKind::Series, EPISODE_QUERY_PREFIX)
+                }
+                EmbyScrapeScope::Episode => return Err("AI 刮削请选择电影或整部剧集。".into()),
+            };
+            if seen.insert((prefix, item.id.clone())) {
+                items.push(BatchItemInput {
+                    kind,
+                    query: format!("{prefix}{}", item.id),
+                    source_files: Vec::new(),
+                });
+            }
+        }
+        self.emby_connection()?;
+        let name = if input.use_ai {
+            "Emby · AI 刮削"
+        } else {
+            "Emby · 所选条目"
+        };
+        let mode = if input.use_ai {
+            MatchMode::Ai
+        } else {
+            MatchMode::FillMissing
+        };
+        self.save_emby_batch_mode(name, items, mode).await
+    }
+
     pub async fn overwrite_emby(&self, input: EmbyOverwriteInput) -> Result<(), String> {
         let emby = self.emby_connection()?;
         let (id, recursive) = match input.target {
@@ -349,6 +433,16 @@ impl Collector {
     }
 
     async fn save_emby_batch(&self, name: &str, items: Vec<BatchItemInput>) -> Result<i64, String> {
+        self.save_emby_batch_mode(name, items, MatchMode::Existing)
+            .await
+    }
+
+    async fn save_emby_batch_mode(
+        &self,
+        name: &str,
+        items: Vec<BatchItemInput>,
+        mode: MatchMode,
+    ) -> Result<i64, String> {
         let store = self.require_store().await?;
         if items.is_empty() {
             return Err("此媒体库没有可刮削的电影、剧集或私人影片。".into());
@@ -356,7 +450,7 @@ impl Collector {
         let settings = self.output_settings().ok_or("后台输出配置不可用。")?;
         let owner = settings.durable_owner()?;
         store
-            .create_batch(items, false, Some(name), None, Some(&owner))
+            .create_batch_mode(items, false, Some(name), None, Some(&owner), mode)
             .await
             .map_err(|_| "无法保存 Emby 导入批次。".into())
     }
@@ -407,6 +501,28 @@ impl Collector {
     }
 
     pub async fn create_batch(&self, items: Vec<BatchItemInput>) -> Result<i64, String> {
+        self.create_manual_batch(items, false).await
+    }
+
+    pub async fn create_ai_batch(&self, input: AiBatchInput) -> Result<i64, String> {
+        self.create_manual_batch(input.items, true).await
+    }
+
+    async fn create_manual_batch(
+        &self,
+        items: Vec<BatchItemInput>,
+        use_ai: bool,
+    ) -> Result<i64, String> {
+        self.check_ai(use_ai)?;
+        if items.iter().any(|item| {
+            let query = item.query.trim();
+            query.starts_with("emby:") || query.starts_with(EPISODE_QUERY_PREFIX)
+        }) {
+            return Err("Emby 条目请通过媒体库入口提交。".into());
+        }
+        if use_ai && items.iter().any(|item| item.kind == MediaKind::Av) {
+            return Err("AI 批次只接受电影和剧集片名或来源 ID。".into());
+        }
         if !(1..=100).contains(&items.len()) {
             return Err("每批支持 1 到 100 条作品。".into());
         }
@@ -421,9 +537,21 @@ impl Collector {
         {
             return Err("批次包含 TMDB ID，请先在「设置」中配置 TMDB API 凭据。".into());
         }
+        let mode = if use_ai {
+            MatchMode::Ai
+        } else {
+            MatchMode::Existing
+        };
         self.require_store()
             .await?
-            .create_batch(items, self.tmdb_configured(), None, None, None)
+            .create_batch_mode(
+                items,
+                self.tmdb_configured() && !use_ai,
+                use_ai.then_some("AI 刮削"),
+                None,
+                None,
+                mode,
+            )
             .await
             .map_err(|_| "无法保存批次。".into())
     }
@@ -490,6 +618,40 @@ impl Collector {
             .map_err(|_| "无法保存候选选择。")?
             .then_some(())
             .ok_or("该候选已变动，请刷新进度后再选择。".into())
+    }
+
+    pub async fn correct_batch_match(
+        &self,
+        batch: i64,
+        item: i64,
+        candidate: CandidateChoice,
+    ) -> Result<(), String> {
+        let id = &candidate.id;
+        let valid = match candidate.provider {
+            MediaProvider::Tmdb => {
+                if !self.tmdb_configured() {
+                    return Err("请先在「设置」中配置 TMDB API 凭据。".into());
+                }
+                id.parse::<u32>().is_ok_and(|id| id > 0)
+            }
+            MediaProvider::Wikidata => id
+                .strip_prefix('Q')
+                .is_some_and(|digits| digits.parse::<u64>().is_ok_and(|id| id > 0)),
+            MediaProvider::Tvmaze => id.parse::<u64>().is_ok_and(|id| id > 0),
+        };
+        if !valid {
+            return Err("来源 ID 无效。".into());
+        }
+        self.require_store()
+            .await?
+            .correct_batch_match(batch, item, candidate)
+            .await
+            .map_err(|_| "无法更新条目匹配。".into())
+            .and_then(|changed| {
+                changed
+                    .then_some(())
+                    .ok_or("此条目当前无法纠正匹配。".into())
+            })
     }
 
     pub async fn batch_row_result(&self, batch: i64, item: i64) -> Result<LookupResponse, String> {

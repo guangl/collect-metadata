@@ -3,7 +3,7 @@ use std::{
     ffi::OsString,
     fs, io,
     path::{Component, Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use cap_std::{
@@ -11,11 +11,16 @@ use cap_std::{
     fs::{Dir, OpenOptions},
 };
 use futures_util::{StreamExt, stream::FuturesOrdered};
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{OutputFile, OutputReport, assets::image_bytes, nfo, settings::OutputOptions};
+use super::{
+    OutputFile, OutputReport,
+    assets::{allowed, image_bytes, public_response},
+    nfo,
+    settings::OutputOptions,
+};
 use crate::providers::media::emby::{Emby, episode_fields};
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -342,6 +347,8 @@ pub(crate) struct PlannedFile {
     source: String,
     item_id: Value,
     kind: FileKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_image: Option<String>,
     target: Option<Target>,
     destinations: Vec<Destination>,
     blocked: Option<String>,
@@ -441,6 +448,7 @@ impl Target {
 pub(crate) fn plan(
     paths: &MediaPaths,
     data: &Value,
+    record: &Value,
     state: &WritebackState,
 ) -> (Vec<PlannedFile>, Vec<WritebackPreviewFile>, usize) {
     let item = &data["item"];
@@ -450,6 +458,15 @@ pub(crate) fn plan(
         .into_iter()
         .flatten()
         .filter(|child| series && child["Type"] == "Episode" && child["LocationType"] != "Virtual");
+    let fields = &record["fields"];
+    let episodes: HashMap<_, _> = fields["episodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|episode| Some((episode["id"].as_str()?, episode)))
+        .collect();
+    let fill_missing = record["fill_missing"] == true;
+    let main_item = item;
     let mut seen = HashSet::new();
     let mut files = Vec::new();
     let mut preview = Vec::new();
@@ -473,23 +490,54 @@ pub(crate) fn plan(
             None
         };
         let episode = item["Type"] == "Episode";
+        let image_fields = if item["Id"] == main_item["Id"] {
+            fields
+        } else {
+            item["Id"]
+                .as_str()
+                .and_then(|id| episodes.get(id).copied())
+                .unwrap_or(&Value::Null)
+        };
+        let primary = if episode {
+            image_fields["still_url"].as_str()
+        } else {
+            image_fields["poster_url"]
+                .as_str()
+                .or_else(|| image_fields["cover_url"].as_str())
+        };
         let mut kinds = Vec::new();
-        if item["ImageTags"]["Primary"].is_string() {
-            kinds.push(if episode {
-                FileKind::Still
-            } else {
-                FileKind::Poster
-            });
+        for (kind, emby_available, url) in [
+            (
+                if episode {
+                    FileKind::Still
+                } else {
+                    FileKind::Poster
+                },
+                item["ImageTags"]["Primary"].is_string(),
+                primary,
+            ),
+            (
+                FileKind::Backdrop,
+                !episode
+                    && item["BackdropImageTags"]
+                        .as_array()
+                        .is_some_and(|tags| !tags.is_empty()),
+                (!episode)
+                    .then(|| image_fields["backdrop_url"].as_str())
+                    .flatten(),
+            ),
+        ] {
+            let public_image = url
+                .filter(|_| !fill_missing || !emby_available)
+                .and_then(|url| Url::parse(url).ok())
+                .filter(allowed)
+                .map(|url| url.to_string());
+            if emby_available || public_image.is_some() {
+                kinds.push((kind, public_image));
+            }
         }
-        if !episode
-            && item["BackdropImageTags"]
-                .as_array()
-                .is_some_and(|tags| !tags.is_empty())
-        {
-            kinds.push(FileKind::Backdrop);
-        }
-        kinds.push(FileKind::Nfo);
-        for kind in kinds {
+        kinds.push((FileKind::Nfo, None));
+        for (kind, public_image) in kinds {
             let key = format!("{}\n{}", kind.label(), source);
             if !seen.insert(key.clone()) {
                 continue;
@@ -536,6 +584,7 @@ pub(crate) fn plan(
                 source: source.clone(),
                 item_id: item["Id"].clone(),
                 kind,
+                public_image,
                 target: target.clone(),
                 destinations,
                 blocked: blocked.map(str::to_owned),
@@ -680,18 +729,24 @@ async fn prepare_image(
     let staged = async {
         check_target(file, paths)?;
         let stage = stage.ok_or("无法创建写回临时目录。")?;
-        let emby = emby.ok_or("无法连接此快照对应的 Emby 服务来读取图片。")?;
-        let mut url = emby
-            .image_url(&file.item_id, image_type)
-            .ok_or("Emby 图片地址无效。")?;
-        url.query_pairs_mut().append_pair("format", "jpg");
-        let response = emby
-            .image_response(client, &url)
-            .await
-            .ok_or("无法下载 Emby 图片。")?;
+        let response = if let Some(url) = &file.public_image {
+            let url = Url::parse(url).map_err(|_| "来源图片地址无效。")?;
+            public_response(client, &url, "image/*", Duration::from_secs(10))
+                .await
+                .ok_or("无法下载公开来源的图片。")?
+        } else {
+            let emby = emby.ok_or("无法连接此快照对应的 Emby 服务来读取图片。")?;
+            let mut url = emby
+                .image_url(&file.item_id, image_type)
+                .ok_or("Emby 图片地址无效。")?;
+            url.query_pairs_mut().append_pair("format", "jpg");
+            emby.image_response(client, &url)
+                .await
+                .ok_or("无法下载 Emby 图片。")?
+        };
         let (bytes, extension) = image_bytes(response)
             .await
-            .ok_or("Emby 图片格式无效或超出大小限制。")?;
+            .ok_or("图片格式无效或超出大小限制。")?;
         let destination = file
             .destinations
             .iter()
@@ -965,6 +1020,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn writeback_preview_includes_public_artwork_and_keeps_existing_emby_artwork() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Film.mkv"), "video").unwrap();
+        let paths = MediaPaths::new(
+            vec![PathMapping {
+                server: "/media".into(),
+                local: String::new(),
+            }],
+            true,
+            Some(root.path().into()),
+        );
+        let mut data = json!({"item":{"Id":"1","Type":"Movie","Path":"/media/Film.mkv"}});
+        let poster_url = "https://image.tmdb.org/t/p/w500/poster.jpg";
+        let mut record = json!({"fill_missing":true,"fields":{"poster_url":poster_url}});
+        let state = WritebackState::default();
+
+        let (files, _, writable) = plan(&paths, &data, &record, &state);
+        assert_eq!(writable, 2);
+        assert_eq!(files[0].public_image.as_deref(), Some(poster_url));
+        assert_eq!(files[0].destinations[0].name, "Film-poster.jpg");
+
+        data["item"]["ImageTags"] = json!({"Primary":"existing"});
+        let (files, _, _) = plan(&paths, &data, &record, &state);
+        assert!(files[0].public_image.is_none());
+
+        record["fill_missing"] = json!(false);
+        let (files, _, _) = plan(&paths, &data, &record, &state);
+        assert_eq!(files[0].public_image.as_deref(), Some(poster_url));
+
+        data["item"]["ImageTags"] = Value::Null;
+        record["fields"]["poster_url"] = json!("http://127.0.0.1/other.jpg");
+        let (files, _, _) = plan(&paths, &data, &record, &state);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].kind.label(), "nfo");
+    }
+
     #[tokio::test]
     async fn writeback_checks_the_confirmed_target_and_reuses_its_backup_on_replay() {
         let workspace = tempfile::tempdir().unwrap();
@@ -990,7 +1082,7 @@ mod tests {
         );
         let data = json!({"item":{"Id":"1","Type":"Movie","Path":"/media/Film.mkv"}});
         let state = WritebackState::default();
-        let (files, _, _) = plan(&paths, &data, &state);
+        let (files, _, _) = plan(&paths, &data, &Value::Null, &state);
         serde_json::to_vec(&files).unwrap();
         let staged = stage_file(root, &files[0].destinations[0], "collected metadata")
             .await
@@ -1004,7 +1096,7 @@ mod tests {
         );
         assert!(!root.join(BACKUP_DIRECTORY).exists());
 
-        let (files, _, _) = plan(&paths, &data, &state);
+        let (files, _, _) = plan(&paths, &data, &Value::Null, &state);
         let staged = stage_file(root, &files[0].destinations[0], "collected metadata")
             .await
             .unwrap();
@@ -1055,6 +1147,7 @@ mod tests {
         let (files, _, writable) = plan(
             &paths,
             &json!({"item":{"Id":"1","Type":"Movie","Path":"/media/Film.mkv"}}),
+            &Value::Null,
             &WritebackState::default(),
         );
         assert_eq!(writable, 0);

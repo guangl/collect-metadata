@@ -701,6 +701,21 @@ async fn verify_web_routes(test_url: Url) {
         );
         assert!(rows.iter().all(|row| row["has_result"] == true));
     }
+    let selected = api.success("/api/emby/import-selection", Some(json!({
+        "items": [{"id":"30","scope":"movie"}, {"id":"30","scope":"movie"}, {"id":"40","scope":"movie"}]
+    }))).await.as_i64().unwrap();
+    let selected = api.finish(selected).await;
+    assert_eq!(selected["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(selected["rows"][0]["query"], "emby:30");
+    assert_eq!(selected["rows"][1]["query"], "emby:40");
+    assert!(
+        selected["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["stage"] == "success")
+    );
+
     let imported = api
         .success("/api/emby/import-all", Some(Value::Null))
         .await

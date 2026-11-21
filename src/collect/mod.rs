@@ -34,6 +34,7 @@ pub struct Collector {
     output: Option<Arc<OutputSettings>>,
     emby: Option<Arc<EmbySettings>>,
     languages: Arc<LanguageSettings>,
+    pub(crate) ai: Option<crate::batch::ai::Ai>,
 }
 
 impl Collector {
@@ -81,6 +82,7 @@ impl Collector {
             output: None,
             emby: None,
             languages: Arc::new(LanguageSettings::load(None).expect("default language settings")),
+            ai: crate::batch::ai::Ai::from_environment(),
         })
     }
 
@@ -137,29 +139,74 @@ impl Collector {
 
     pub(crate) async fn gather_emby(
         &self,
-        source: &media::emby::Emby,
+        emby: &media::emby::Emby,
         kind: MediaKind,
         query: &str,
-        year: Option<u16>,
-    ) -> Option<LookupResponse> {
-        let (id, emby_source) = source.find(&self.client, kind, query, year).await?;
+        (id, mut home): (String, Source),
+        candidate: Option<&crate::CandidateChoice>,
+        prefer_emby: bool,
+    ) -> Result<LookupResponse, String> {
         let targets = self.languages.targets(None);
         let is_episode = query.starts_with(media::emby::EPISODE_QUERY_PREFIX);
-        let mut sources = vec![emby_source];
-        if is_episode && let Some(tmdb) = self.tmdb.provider() {
-            let episode = &sources[0].data["item"];
-            if let Some(enrichment) = tmdb
-                .emby_episode(&self.client, source, episode, &targets[0])
-                .await
-            {
-                sources.push(enrichment);
+        let sources = if let Some(candidate) = candidate {
+            let mut external = if is_episode {
+                let tmdb = self.tmdb.provider().ok_or("请先配置 TMDB API 凭据。")?;
+                let series = candidate
+                    .id
+                    .parse::<u32>()
+                    .map_err(|_| "剧集 TMDB ID 无效。")?;
+                let episode = tmdb
+                    .emby_episode_with_series(
+                        &self.client,
+                        emby,
+                        &home.data["item"],
+                        &targets[0],
+                        Some(series),
+                    )
+                    .await
+                    .ok_or("此分集缺少单集季集号。")?;
+                vec![episode]
+            } else {
+                self.media_sources(kind, candidate.provider, &candidate.id, &targets[0])
+                    .await?
+            };
+            if external.iter().all(|source| source.fields.is_empty()) {
+                return Err(external
+                    .into_iter()
+                    .find_map(|source| source.note)
+                    .unwrap_or_else(|| "来源未返回可用资料。".into()));
             }
-        }
-        let mut lookup = make_lookup(kind, query, Some(&format!("Emby-{id}")), sources).ok()?;
+            // Keep Emby episode IDs and file associations while applying known titles and stills.
+            if kind == MediaKind::Series && !is_episode {
+                merge_emby_episodes(&mut home, &mut external, prefer_emby);
+            }
+            if prefer_emby {
+                external.insert(0, home);
+            } else {
+                external.push(home);
+            }
+            external
+        } else {
+            let mut sources = vec![home];
+            if is_episode && let Some(tmdb) = self.tmdb.provider() {
+                let episode = &sources[0].data["item"];
+                if let Some(enrichment) = tmdb
+                    .emby_episode(&self.client, emby, episode, &targets[0])
+                    .await
+                {
+                    sources.push(enrichment);
+                }
+            }
+            sources
+        };
+        let mut lookup = make_lookup(kind, query, Some(&format!("Emby-{id}")), sources)?;
         if is_episode {
             lookup.record["scope"] = serde_json::json!("episode");
         }
-        Some(self.localize_lookup(lookup, targets).await)
+        if prefer_emby {
+            lookup.record["fill_missing"] = serde_json::json!(true);
+        }
+        Ok(self.localize_lookup(lookup, targets).await)
     }
 
     pub async fn upsert_emby_item(
@@ -307,16 +354,7 @@ impl Collector {
         id: &str,
     ) -> Result<LookupResponse, String> {
         let targets = self.languages.targets(None);
-        let sources = media::collect(
-            &self.client,
-            &self.entities,
-            self.tmdb.provider().as_deref(),
-            kind,
-            provider,
-            id,
-            &targets[0],
-        )
-        .await?;
+        let sources = self.media_sources(kind, provider, id, &targets[0]).await?;
         let key = match provider {
             MediaProvider::Wikidata => format!("Wikidata-{id}"),
             MediaProvider::Tvmaze => format!("TVmaze-{id}"),
@@ -329,6 +367,25 @@ impl Collector {
             .to_owned();
         let lookup = make_lookup(kind, &query, Some(&key), sources)?;
         Ok(self.localize_lookup(lookup, targets).await)
+    }
+
+    async fn media_sources(
+        &self,
+        kind: MediaKind,
+        provider: MediaProvider,
+        id: &str,
+        language: &str,
+    ) -> Result<Vec<Source>, String> {
+        media::collect(
+            &self.client,
+            &self.entities,
+            self.tmdb.provider().as_deref(),
+            kind,
+            provider,
+            id,
+            language,
+        )
+        .await
     }
 
     async fn save_lookup(&self, mut response: LookupResponse) -> LookupResponse {
@@ -378,6 +435,54 @@ impl Collector {
             saved: Some(saved),
             storage_error: None,
         })
+    }
+}
+
+fn merge_emby_episodes(home: &mut Source, external: &mut [Source], prefer_emby: bool) {
+    let mut by_number = BTreeMap::new();
+    for source in external {
+        if let Some(episodes) = source.fields.remove("episodes") {
+            for episode in episodes.as_array().into_iter().flatten() {
+                if let Some(number) = episode["season"].as_u64().zip(episode["number"].as_u64()) {
+                    by_number.entry(number).or_insert_with(|| episode.clone());
+                }
+            }
+        }
+        source.fields.remove("season_count");
+    }
+    if let Some(episodes) = home
+        .fields
+        .get_mut("episodes")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for episode in episodes {
+            let number = episode["season"].as_u64().zip(episode["number"].as_u64());
+            if let Some(source) = number.and_then(|number| by_number.get(&number)) {
+                for key in [
+                    "title",
+                    "description",
+                    "date",
+                    "runtime_minutes",
+                    "still_url",
+                    "url",
+                ] {
+                    if prefer_emby
+                        && !episode[key].is_null()
+                        && episode[key]
+                            .as_str()
+                            .is_none_or(|text| !text.trim().is_empty())
+                    {
+                        continue;
+                    }
+                    if let Some(value) = source.get(key).filter(|value| {
+                        !value.is_null()
+                            && value.as_str().is_none_or(|text| !text.trim().is_empty())
+                    }) {
+                        episode[key] = value.clone();
+                    }
+                }
+            }
+        }
     }
 }
 

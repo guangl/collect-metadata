@@ -16,9 +16,9 @@ pub use providers::media::{MediaKind, MediaProvider, SearchResult};
 pub use storage::HistoryItem;
 
 pub use batch::{
-    BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice,
-    EmbyOverwriteInput, EmbyScrapeScope, FolderBatchResult, FolderPreview, FolderSelection,
-    FolderWorkPreview, MAX_FOLDER_FILES, WritebackPreview, preview_folder,
+    AiBatchInput, BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice,
+    EmbyOverwriteInput, EmbyScrapeScope, EmbySelectionInput, FolderBatchResult, FolderPreview,
+    FolderSelection, FolderWorkPreview, MAX_FOLDER_FILES, WritebackPreview, preview_folder,
 };
 #[cfg(feature = "web")]
 pub use batch::{browse_mounted_folders, scan_mounted_folder};
