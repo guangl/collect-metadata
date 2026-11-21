@@ -500,8 +500,10 @@ impl Emby {
             ("Limit", "60"),
             ("Fields", "Path,ProviderIds,OriginalTitle,SortName,ProductionYear"),
         ];
-        let exact_tmdb = super::tmdb_id_query(query);
-        let provider_id = exact_tmdb.map(|id| format!("Tmdb.{id}"));
+        let explicit = super::tmdb_id_query(query)
+            .map(|id| ("Tmdb", id))
+            .or_else(|| super::bangumi::id_query(query).map(|id| ("Bangumi", id)));
+        let provider_id = explicit.map(|(provider, id)| format!("{provider}.{id}"));
         if let Some(id) = &provider_id {
             params.push(("AnyProviderIdEquals", id));
         } else {
@@ -515,8 +517,8 @@ impl Emby {
             {
                 return false;
             }
-            if let Some(tmdb) = exact_tmdb {
-                return item["ProviderIds"]["Tmdb"].as_str() == Some(tmdb);
+            if let Some((provider, id)) = explicit {
+                return item["ProviderIds"][provider].as_str() == Some(id);
             }
             ["Name", "OriginalTitle", "SortName"]
                 .iter()

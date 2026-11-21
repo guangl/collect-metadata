@@ -1,3 +1,4 @@
+pub(crate) mod bangumi;
 pub(crate) mod emby;
 mod tmdb;
 mod tvmaze;
@@ -66,6 +67,7 @@ pub enum MediaProvider {
     Wikidata,
     Tvmaze,
     Tmdb,
+    Bangumi,
 }
 
 impl MediaKind {
@@ -84,6 +86,7 @@ impl MediaProvider {
             Self::Wikidata => "wikidata",
             Self::Tvmaze => "tvmaze",
             Self::Tmdb => "tmdb",
+            Self::Bangumi => "bangumi",
         }
     }
 }
@@ -107,6 +110,8 @@ pub struct Candidate {
     pub(crate) tvmaze_id: Option<u64>,
     #[serde(skip)]
     pub(crate) tmdb_id: Option<u32>,
+    #[serde(skip)]
+    pub(crate) bangumi_id: Option<u32>,
 }
 
 pub(crate) fn tmdb_id_query(query: &str) -> Option<&str> {
@@ -144,7 +149,25 @@ pub(crate) async fn search(
             },
         };
     }
-    let (wiki, maze, movie_db) = tokio::join!(
+    if let Some(raw_id) = bangumi::id_query(query) {
+        return match bangumi::id(raw_id) {
+            Some(id) => match search_within(bangumi::search_id(client, cache, kind, id)).await {
+                Ok(candidates) => SearchResult {
+                    candidates,
+                    notes: Vec::new(),
+                },
+                Err(error) => SearchResult {
+                    candidates: Vec::new(),
+                    notes: vec![format!("Bangumi：{}", error.description())],
+                },
+            },
+            None => SearchResult {
+                candidates: Vec::new(),
+                notes: vec!["Bangumi ID 无效。".into()],
+            },
+        };
+    }
+    let (wiki, maze, movie_db, bgm) = tokio::join!(
         search_within(wikidata::search(client, cache, kind, query)),
         search_within(async {
             if kind == MediaKind::Series && !wikidata::valid_id(query) {
@@ -157,6 +180,13 @@ pub(crate) async fn search(
             match tmdb.filter(|_| !wikidata::valid_id(query)) {
                 Some(tmdb) => tmdb.search(client, kind, query, language).await,
                 None => Ok(Vec::new()),
+            }
+        }),
+        search_within(async {
+            if kind != MediaKind::Av && !wikidata::valid_id(query) {
+                bangumi::search(client, kind, query).await
+            } else {
+                Ok(Vec::new())
             }
         }),
     );
@@ -203,6 +233,25 @@ pub(crate) async fn search(
             candidates.push(item);
         }
     }
+    let bgm = bgm.unwrap_or_else(|error| {
+        notes.push(format!("Bangumi：{}", error.description()));
+        Vec::new()
+    });
+    for item in bgm {
+        if let Some(candidate) = candidates
+            .iter_mut()
+            .find(|candidate| candidate.bangumi_id == item.bangumi_id)
+        {
+            candidate.match_titles.extend(item.match_titles);
+            if candidate.original_languages.is_empty() {
+                candidate.original_languages = item.original_languages;
+            }
+            candidate.cover_url = candidate.cover_url.take().or(item.cover_url);
+            candidate.year = candidate.year.or(item.year);
+        } else {
+            candidates.push(item);
+        }
+    }
     SearchResult { candidates, notes }
 }
 
@@ -229,28 +278,43 @@ pub(crate) async fn collect(
             if !wikidata::matches_kind(&entity, kind) {
                 return Err("条目类型与所选类别不一致。".into());
             }
-            let maze_id = (kind == MediaKind::Series)
-                .then(|| wikidata::tvmaze_id(&entity))
-                .flatten();
-            let tmdb_id = wikidata::tmdb_id(&entity, kind);
-            let (wiki, maze, movie_db) = tokio::join!(
-                wikidata::details(client, id, entity),
+            let bangumi_id = wikidata::bangumi_id(&entity);
+            let (mut linked, bgm) = tokio::join!(
+                wikidata_and_links(client, tmdb, kind, id, entity, language),
                 async {
-                    match maze_id {
-                        Some(id) => Some(tvmaze::details(client, id).await),
+                    match bangumi_id {
+                        Some(id) => Some(bangumi::details(client, cache, kind, id).await),
                         None => None,
                     }
                 },
-                async {
-                    match (tmdb, tmdb_id) {
-                        (Some(tmdb), Some(id)) => {
-                            Some(tmdb.details(client, kind, id, language).await)
-                        }
-                        _ => None,
-                    }
-                },
             );
-            Ok(std::iter::once(wiki).chain(maze).chain(movie_db).collect())
+            if let Some(bgm) = bgm {
+                linked.insert(0, bgm);
+            }
+            Ok(linked)
+        }
+        MediaProvider::Bangumi if kind != MediaKind::Av => {
+            let id = bangumi::id(id).ok_or("Bangumi ID 无效。")?;
+            let (bgm, wiki) = tokio::join!(
+                bangumi::details(client, cache, kind, id),
+                search_within(wikidata::by_bangumi_id(client, cache, kind, id)),
+            );
+            let include_linked = !bgm.fields.is_empty();
+            let mut sources = vec![bgm];
+            if include_linked {
+                match wiki {
+                    Ok(Some((id, entity))) => sources.extend(
+                        wikidata_and_links(client, tmdb, kind, &id, entity, language).await,
+                    ),
+                    Ok(None) => {}
+                    Err(error) => sources.push(Source::failure(
+                        "Wikidata",
+                        &wikidata::bangumi_search_url(id),
+                        error,
+                    )),
+                }
+            }
+            Ok(sources)
         }
         MediaProvider::Tvmaze if kind == MediaKind::Series => {
             let id = id
@@ -267,6 +331,36 @@ pub(crate) async fn collect(
         }
         _ => Err("该来源 ID 或作品类型无效。".into()),
     }
+}
+
+async fn wikidata_and_links(
+    client: &Client,
+    tmdb: Option<&Tmdb>,
+    kind: MediaKind,
+    id: &str,
+    entity: Arc<Value>,
+    language: &str,
+) -> Vec<Source> {
+    let maze_id = (kind == MediaKind::Series)
+        .then(|| wikidata::tvmaze_id(&entity))
+        .flatten();
+    let tmdb_id = wikidata::tmdb_id(&entity, kind);
+    let (wiki, maze, movie_db) = tokio::join!(
+        wikidata::details(client, id, entity),
+        async {
+            match maze_id {
+                Some(id) => Some(tvmaze::details(client, id).await),
+                None => None,
+            }
+        },
+        async {
+            match (tmdb, tmdb_id) {
+                (Some(tmdb), Some(id)) => Some(tmdb.details(client, kind, id, language).await),
+                _ => None,
+            }
+        },
+    );
+    std::iter::once(wiki).chain(maze).chain(movie_db).collect()
 }
 
 async fn get_json(client: &Client, url: &Url) -> Result<Value, Failure> {

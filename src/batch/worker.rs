@@ -195,6 +195,16 @@ fn unique_candidate(
             .find(|candidate| candidate.provider == MediaProvider::Tmdb)
             .map(to_choice);
     }
+    if let Some(id) = crate::providers::media::bangumi::id_query(&query) {
+        let id = crate::providers::media::bangumi::id(id)?;
+        return search
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.provider == MediaProvider::Bangumi && candidate.bangumi_id == Some(id)
+            })
+            .map(to_choice);
+    }
     if let Some(id) = query.strip_prefix('q')
         && !id.is_empty()
         && id.bytes().all(|byte| byte.is_ascii_digit())

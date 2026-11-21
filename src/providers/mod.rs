@@ -1,7 +1,7 @@
 pub(crate) mod av;
 pub(crate) mod media;
 
-use reqwest::{Client, StatusCode, Url, header};
+use reqwest::{Client, RequestBuilder, StatusCode, Url, header};
 use scraper::ElementRef;
 use serde_json::Value;
 
@@ -36,6 +36,17 @@ async fn request_with_auth(
     accept: &str,
     authorization: Option<&header::HeaderValue>,
 ) -> Result<String, Failure> {
+    request_text(url, |current| {
+        let mut request = client.get(current).header(header::ACCEPT, accept);
+        if let Some(value) = authorization {
+            request = request.header(header::AUTHORIZATION, value.clone());
+        }
+        request
+    })
+    .await
+}
+
+async fn request_text(url: &Url, build: impl Fn(Url) -> RequestBuilder) -> Result<String, Failure> {
     let unavailable = |error: reqwest::Error| {
         Failure::Unavailable(
             if error.is_timeout() {
@@ -49,11 +60,7 @@ async fn request_with_auth(
 
     let mut current = url.clone();
     for _ in 0..4 {
-        let mut request = client.get(current.clone()).header(header::ACCEPT, accept);
-        if let Some(value) = authorization {
-            request = request.header(header::AUTHORIZATION, value.clone());
-        }
-        let mut response = request.send().await.map_err(unavailable)?;
+        let mut response = build(current.clone()).send().await.map_err(unavailable)?;
         let status = response.status();
         match status {
             StatusCode::NOT_FOUND => return Err(Failure::NotFound),

@@ -502,15 +502,8 @@ mod tests {
             .parse::<PgConnectOptions>()
             .unwrap();
         let admin = PgPool::connect_with(options.clone()).await.unwrap();
-        // The SQL identifier consists of a fixed prefix and two integers.
-        let schema = format!(
-            "batch_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros()
-        );
+        // The identifier contains a fixed prefix and a hexadecimal UUID.
+        let schema = format!("batch_test_{}", uuid::Uuid::new_v4().simple());
         sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
             .execute(&admin)
             .await

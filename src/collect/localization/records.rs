@@ -138,6 +138,52 @@ fn official_catalog(record: &Value, targets: &[String]) -> (Translations, Transl
             }
         }
     }
+    if let Some(bangumi) = record["sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|source| source["provider"] == "Bangumi")
+    {
+        let subject = &bangumi["data"]["subject"];
+        let fields = &record["fields"];
+        for target in targets {
+            let title_key = if target == "zh-CN" {
+                "name_cn"
+            } else if fields["original_languages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|language| language == language_base(target) && language != "zh")
+            {
+                "name"
+            } else {
+                continue;
+            };
+            if record["field_sources"]["title"] != "Emby"
+                && let Some(title) = text(&subject[title_key])
+            {
+                insert(target, "title", title, "Bangumi");
+            }
+            if record["field_sources"]["episodes"] == "Bangumi" {
+                let key = if title_key == "name_cn" {
+                    "title_cn"
+                } else {
+                    "title_original"
+                };
+                for (index, episode) in fields["episodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    if let Some(title) = text(&episode[key]) {
+                        insert(target, &format!("episodes/{index}/title"), title, "Bangumi");
+                    }
+                }
+            }
+        }
+    }
     if let Some(wiki) = record["sources"]
         .as_array()
         .into_iter()

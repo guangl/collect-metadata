@@ -222,16 +222,32 @@ pub(super) fn documents(
     if series {
         result.insert("tvshow.nfo".to_owned(), work);
         if options.episodes {
-            for path in source_files {
-                if let Some((name, season, number)) = episode_path(path)
-                    && let Some(episode) = fields["episodes"]
+            let paths = source_files
+                .iter()
+                .filter_map(|path| episode_path(path))
+                .collect::<Vec<_>>();
+            let regular_seasons = paths
+                .iter()
+                .map(|&(_, season, _)| season)
+                .filter(|&season| season > 0)
+                .collect::<HashSet<_>>();
+            let bangumi_episodes = record["field_sources"]["episodes"] == "Bangumi";
+            let subject_episodes = bangumi_episodes && regular_seasons.len() == 1;
+            for (name, season, number) in paths {
+                let mut matching =
+                    fields["episodes"]
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .find(|episode| {
-                            episode["season"].as_u64() == Some(season)
-                                && episode["number"].as_u64() == Some(number)
-                        })
+                        .filter(|episode| {
+                            episode["number"].as_u64() == Some(number)
+                                && (episode["season"].as_u64() == Some(season)
+                                    || (subject_episodes
+                                        && season > 0
+                                        && episode["season"].is_null()))
+                        });
+                if let Some(episode) = matching.next()
+                    && (!bangumi_episodes || matching.next().is_none())
                 {
                     result.insert(
                         format!("{name}.nfo"),
@@ -475,6 +491,31 @@ mod tests {
         ] {
             assert!(!docs["movie.nfo"].contains(&format!("<{field}>")));
         }
+    }
+
+    #[test]
+    fn exports_bangumi_subject_episodes_only_for_one_numbered_season() {
+        let record = json!({
+            "media_type": "series",
+            "field_sources": {"episodes": "Bangumi"},
+            "fields": {
+                "title": "动画",
+                "bangumi_id": "253",
+                "episodes": [{"season": null, "number": 2, "title": "本季第二集"}],
+            },
+        });
+        let mut options = OutputOptions::default();
+        options.episodes = true;
+        let mut paths = vec!["Season 02/S02E02.mkv".to_owned()];
+        let docs = documents(&record, &options, &paths, &[]);
+        assert!(docs["tvshow.nfo"].contains("<uniqueid type=\"bangumi\">253</uniqueid>"));
+        assert!(docs["S02E02.nfo"].contains("<title>本季第二集</title>"));
+        assert!(docs["S02E02.nfo"].contains("<season>2</season>"));
+
+        paths.push("Season 01/S01E02.mkv".to_owned());
+        let docs = documents(&record, &options, &paths, &[]);
+        assert_eq!(docs.len(), 1);
+        assert!(docs.contains_key("tvshow.nfo"));
     }
 
     #[test]

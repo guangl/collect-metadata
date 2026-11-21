@@ -29,6 +29,7 @@ pub(super) async fn search(client: &Client, query: &str) -> Result<Vec<Candidate
                 cover_url: show["image"]["medium"].as_str().map(str::to_owned),
                 tvmaze_id: Some(id),
                 tmdb_id: None,
+                bangumi_id: None,
             })
         })
         .collect())

@@ -190,6 +190,44 @@ describe("海报与详情", () => {
     }
   });
 
+  it("显示 Bangumi 正片、特别篇和角色配音", () => {
+    const snapshot = { record: {
+      schema_version: 2, media_type: "series" as const, query: "动画",
+      fields: { title: "动画", bangumi_id: "253", episodes: [
+        { id: 1, season: null, number: 1, title: "正片第一集", date: null, url: null, runtime_minutes: null },
+        { id: 2, season: 0, number: null, title: "额外故事", date: null, url: null, runtime_minutes: null },
+      ] },
+      field_sources: { episodes: "Bangumi" },
+      sources: [{
+        provider: "Bangumi", status: "ok" as const, note: null, url: "https://bgm.tv/subject/253", fields: {},
+        data: {
+          subject: { type: 2 },
+          characters: [{ name: "主角", actors: [{ name: "配音演员", images: { medium: "https://lain.bgm.tv/pic/crt/actor.jpg" } }] }],
+          persons: [{ type: 1, name: "编剧甲", relation: "脚本" }],
+        },
+      }],
+    }, saved: null, storage_error: null };
+    const noop = () => {};
+    render(<Movie response={snapshot} onNotice={noop} onError={noop} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "季与分集" }));
+    const episodes = screen.getByText("分集列表").closest("details")!;
+    episodes.open = true;
+    fireEvent(episodes, new Event("toggle"));
+    expect(screen.getByText("正片第一集")).toBeTruthy();
+    expect(screen.queryByText("额外故事")).toBeNull();
+    setLabel("分集类别", "0");
+    expect(screen.getByText("额外故事")).toBeTruthy();
+    expect(screen.queryByText("正片第一集")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "演职员" }));
+    const voice = within(screen.getByRole("region", { name: "声优" }));
+    expect(voice.getByText("主角")).toBeTruthy();
+    expect(voice.getByText("配音演员").closest("li")?.querySelector("img")?.src)
+      .toBe("https://lain.bgm.tv/pic/crt/actor.jpg");
+    expect(within(screen.getByRole("region", { name: "编剧" })).getByText("编剧甲")).toBeTruthy();
+  });
+
   it("默认打开刮削工作台，导航不提供独立作品采集页", async () => {
     harness();
     render(<App />);

@@ -13,6 +13,7 @@ fn offer(provider: MediaProvider, id: &str, title: &str, year: u16) -> Candidate
         cover_url: None,
         tvmaze_id: None,
         tmdb_id: None,
+        bangumi_id: None,
     }
 }
 
@@ -38,6 +39,14 @@ fn only_automatically_selects_unambiguous_matches() {
     );
     assert_eq!(unique_candidate("q2", None, &search).unwrap().id, "Q2");
     assert!(unique_candidate("Q3", None, &search).is_none());
+    let mut bangumi = offer(MediaProvider::Bangumi, "253", "星际牛仔", 1998);
+    bangumi.bangumi_id = Some(253);
+    search.candidates.push(bangumi);
+    assert_eq!(
+        unique_candidate("Bangumi：253", None, &search).unwrap().id,
+        "253"
+    );
+    assert!(unique_candidate("bangumi:254", None, &search).is_none());
     search.notes.push("一个来源暂时不可用".to_owned());
     assert!(unique_candidate("远方", None, &search).is_none());
     assert_eq!(

@@ -66,7 +66,11 @@ impl Collector {
 
     fn new(database: Option<PgConnectOptions>) -> Result<Self, reqwest::Error> {
         let client = Client::builder()
-            .user_agent(concat!("collect-metadata/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!(
+                "guangl/collect-metadata/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/guangl/collect-metadata)"
+            ))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
@@ -146,6 +150,20 @@ impl Collector {
         let targets = self.languages.targets(None);
         let is_episode = query.starts_with(media::emby::EPISODE_QUERY_PREFIX);
         let mut sources = vec![emby_source];
+        if !is_episode
+            && kind != MediaKind::Av
+            && let Some(bangumi_id) = sources[0]
+                .fields
+                .get("bangumi_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(media::bangumi::id)
+        {
+            let enrichment =
+                media::bangumi::details(&self.client, &self.entities, kind, bangumi_id).await;
+            if !enrichment.fields.is_empty() {
+                sources.push(enrichment);
+            }
+        }
         if is_episode && let Some(tmdb) = self.tmdb.provider() {
             let episode = &sources[0].data["item"];
             if let Some(enrichment) = tmdb
@@ -321,6 +339,10 @@ impl Collector {
             MediaProvider::Wikidata => format!("Wikidata-{id}"),
             MediaProvider::Tvmaze => format!("TVmaze-{id}"),
             MediaProvider::Tmdb => format!("TMDB-{}-{id}", kind.code()),
+            MediaProvider::Bangumi => format!(
+                "Bangumi-{}",
+                media::bangumi::id(id).ok_or("Bangumi ID 无效。")?
+            ),
         };
         let query = sources
             .iter()

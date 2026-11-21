@@ -12,6 +12,7 @@ services:
       PGDATABASE: collect_metadata
       PGUSER: collect_metadata
       PGPASSWORD: "${POSTGRES_PASSWORD:?在 .env 中设置 POSTGRES_PASSWORD}"
+      BANGUMI_ACCESS_TOKEN: "${BANGUMI_ACCESS_TOKEN:-}"
       TMDB_READ_ACCESS_TOKEN: "${TMDB_READ_ACCESS_TOKEN:-}"
       EMBY_URL: "${EMBY_URL:-}"
       EMBY_API_KEY: "${EMBY_API_KEY:-}"
