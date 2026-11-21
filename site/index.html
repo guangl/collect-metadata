@@ -22,7 +22,7 @@
       <h1 id="title">批量补齐媒体库的元数据</h1>
       <p class="intro">从本地文件夹、服务器挂载目录或 Emby 导入作品。先预览，再交给后台采集。整个过程不移动、不改写原视频。</p>
       <div class="links">
-        <a class="button" href="#install">Docker 快速上手</a>
+        <a class="button" href="#install">下载桌面版</a>
         <a class="button secondary" href="https://github.com/guangl/collect-metadata#readme">查看完整文档</a>
       </div>
     </section>
@@ -37,18 +37,14 @@
     <section id="install" class="install" aria-labelledby="install-title">
       <div>
         <p class="eyebrow">GET STARTED</p>
-        <h2 id="install-title">本地部署 Web 版</h2>
-        <p>需要 Docker 和 Compose v2.24.4 或以上版本。复制示例配置后，先设置一个新的 <code>POSTGRES_PASSWORD</code>，再启动容器。</p>
-        <p>启动后在运行 Docker 的电脑上打开 <code>http://127.0.0.1:8080</code>。此站点仅提供说明，不托管你的媒体库。</p>
-        <p><a href="https://github.com/guangl/collect-metadata#docker-web-版">Docker 部署文档</a> · <a href="https://github.com/guangl/collect-metadata#tauri-桌面版">macOS / Windows 桌面版</a></p>
+        <h2 id="install-title">下载桌面版</h2>
+        <p>桌面版无需 Docker 或 Linux。安装后即可预览本地文件夹；提交后台批次和查看历史需要连接 PostgreSQL。</p>
+        <a class="button" href="https://github.com/guangl/collect-metadata/releases/latest">查看最新 Release</a>
       </div>
-      <div class="commands">
-        <pre><code>git clone https://github.com/guangl/collect-metadata.git
-cd collect-metadata
-cp .env.example .env
-# 在 .env 中设置 POSTGRES_PASSWORD 后再启动
-docker compose -f compose.yaml -f compose.ghcr.yaml up -d</code></pre>
-      </div>
+      <ul class="downloads" aria-label="支持的安装包">
+        <li><strong>macOS · Apple Silicon</strong><span>下载 <code>macos-arm64.dmg</code>，将 App 拖入「应用程序」。</span></li>
+        <li><strong>Windows · x64</strong><span>下载并运行 <code>windows-x64-setup.exe</code>。</span></li>
+      </ul>
     </section>
   </main>
   <footer class="wrap">

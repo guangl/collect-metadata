@@ -1,0 +1,134 @@
+name: Desktop release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} installer
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundle: dmg
+            asset: macos-arm64.dmg
+          - platform: Windows x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            asset: windows-x64-setup.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install Rust toolchain and targets
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --target "$TARGET"
+          echo 'RUSTUP_TOOLCHAIN=1.100.0' >> "$GITHUB_ENV"
+      - name: Verify tag and desktop version agree
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const tag = process.env.GITHUB_REF_NAME;
+          const config = JSON.parse(readFileSync('tauri.conf.json', 'utf8'));
+          const npm = JSON.parse(readFileSync('package.json', 'utf8'));
+          const { packages } = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], { encoding: 'utf8' }));
+          const rust = packages.find(({ name }) => name === 'collect-metadata');
+          if (!/^v\d+\.\d+\.\d+$/.test(tag) || ![config.version, npm.version, rust?.version].every((v) => `v${v}` === tag)) {
+            throw new Error(`Tag ${tag} must match the Tauri, npm and Cargo versions`);
+          }
+          JS
+      - run: npm ci
+      - name: Build installer
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLE: ${{ matrix.bundle }}
+        run: |
+          if [[ "$TARGET" == aarch64-apple-darwin ]]; then
+            export APPLE_SIGNING_IDENTITY=-
+          fi
+          npm run tauri -- build --target "$TARGET" --bundles "$BUNDLE" --ci
+      - name: Stage release asset
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLE: ${{ matrix.bundle }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          shopt -s nullglob
+          artifacts=(target/"$TARGET"/release/bundle/"$BUNDLE"/*."${ASSET##*.}")
+          if [[ ${#artifacts[@]} != 1 ]]; then
+            echo "Expected one $BUNDLE installer; found ${#artifacts[@]}" >&2
+            exit 1
+          fi
+          if [[ "$TARGET" == aarch64-apple-darwin ]]; then
+            [[ "$(lipo -archs "target/$TARGET/release/collect-metadata")" == arm64 ]]
+            hdiutil verify "${artifacts[0]}"
+          fi
+          mkdir release-assets
+          cp "${artifacts[0]}" "release-assets/collect-metadata-${GITHUB_REF_NAME#v}-$ASSET"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-${{ matrix.bundle }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish Windows and macOS installers
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: release-assets
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: release-assets
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          dmg="collect-metadata-$version-macos-arm64.dmg"
+          exe="collect-metadata-$version-windows-x64-setup.exe"
+          test -s "$dmg" && test -s "$exe"
+          sha256sum "$dmg" "$exe" > SHA256SUMS
+          cat > notes.md <<'EOF'
+          ## 桌面安装包
+
+          - **macOS（Apple Silicon）**：下载 `macos-arm64.dmg`，将 App 拖入「应用程序」。未经过 Apple 公证。
+          - **Windows**：下载 `windows-x64-setup.exe` 并按提示安装。安装器未使用商业证书签名。
+          - 下载后可使用 `SHA256SUMS` 校验文件。只从本仓库的 Release 下载。
+
+          预览本地文件夹无需 Docker 或数据库；提交后台批次和查看采集历史需要连接 PostgreSQL。
+          EOF
+          gh release create "$GITHUB_REF_NAME" "$dmg" "$exe" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --latest \
+            --title "Collect Metadata $GITHUB_REF_NAME" --notes-file notes.md
