@@ -129,7 +129,18 @@
            sm:min-h-10 sm:text-sm;
   }
 
-  select.field { @apply truncate; }
+  select.field {
+    @apply appearance-none truncate bg-no-repeat pe-8 enabled:cursor-pointer enabled:hover:border-muted;
+    background-image:
+      linear-gradient(45deg, transparent 50%, rgb(var(--color-muted)) 50%),
+      linear-gradient(135deg, rgb(var(--color-muted)) 50%, transparent 50%);
+    background-position: right calc(0.75rem + 5px) center, right 0.75rem center;
+    background-size: 5px 5px;
+  }
+
+  @media (forced-colors: active) {
+    select.field { @apply appearance-auto pe-3; background-image: none; }
+  }
 
   .filter {
     @apply inline-flex min-w-0 max-w-full flex-wrap items-center gap-2 text-sm text-muted;
@@ -203,9 +214,9 @@
   .work-preview-close { @apply absolute end-2 top-2 z-10 size-11 p-0 text-2xl leading-none sm:end-3 sm:top-3 sm:size-10; }
 
 
-  .theme-control { @apply relative inline-flex items-center rounded-lg border border-line bg-canvas text-xs text-muted; }
+  .theme-control { @apply relative inline-flex items-center text-muted; }
   .theme-control svg { @apply pointer-events-none absolute start-2 hidden sm:block; }
-  .theme-control select { @apply min-h-11 max-w-full cursor-pointer rounded-lg bg-transparent px-2 sm:min-h-10 sm:ps-7; }
+  .theme-control select { @apply ps-2.5 font-semibold text-muted enabled:hover:text-ink sm:ps-7 sm:text-xs; }
 
   .detail-dialog {
     @apply fixed inset-0 m-auto w-[calc(100%-1rem)] max-w-[55rem] overflow-auto overscroll-contain

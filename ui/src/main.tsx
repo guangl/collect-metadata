@@ -39,7 +39,7 @@ function WorkspaceHeader({ view, setView, storage, openStorage, theme, setTheme 
         </button>
         <nav className="col-span-full row-start-2 grid grid-cols-4 gap-1 lg:col-auto lg:row-auto" aria-label="工作区">
           {entries.map(({ name, label, icon }) => (
-            <button type="button" className="nav-button px-1.5 sm:px-3" aria-current={view === name ? "page" : undefined}
+            <button type="button" className="nav-button px-1.5 text-[13px] sm:px-3 sm:text-sm" aria-current={view === name ? "page" : undefined}
               key={name} onClick={() => setView(name)}>
               <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65"
                 strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg>{label}
@@ -59,7 +59,7 @@ function WorkspaceHeader({ view, setView, storage, openStorage, theme, setTheme 
               <path d={theme === "light" ? "M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" :
                 theme === "dark" ? "M20.8 14.2A9 9 0 0 1 9.8 3.2a9 9 0 1 0 11 11Z" : "M3 5h18v12H3zM12 17v3m-4 0h8"} />
             </svg>
-            <select aria-label="外观主题" value={theme} onChange={(event) => setTheme(event.target.value as Theme)}>
+            <select className="field" aria-label="外观主题" value={theme} onChange={(event) => setTheme(event.target.value as Theme)}>
               {themeChoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>

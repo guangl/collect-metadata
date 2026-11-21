@@ -44,16 +44,18 @@ export function LanguageSettings() {
     {languages && <form className="panel batch-form" onSubmit={save}>
       <fieldset className="output-naming" disabled={busy}>
         <legend>目标语言</legend>
-        {[...new Set([...choices, ...languages])].map((code) => {
-          const index = languages.indexOf(code);
-          return <label className="check-option" key={code}>
-            <input type="checkbox" checked={index !== -1} disabled={index === -1 && languages.length >= 8}
-              onChange={(event) => {
-                setLanguages(event.target.checked ? [...languages, code] : languages.filter((value) => value !== code));
-                setMessage(null);
-              }} />{languageName(code)}{index === 0 && "（首选）"}
-          </label>;
-        })}
+        <div className="grid gap-x-2 gap-y-1 min-[375px]:grid-cols-2 sm:gap-x-4 xl:grid-cols-3">
+          {[...new Set([...choices, ...languages])].map((code) => {
+            const index = languages.indexOf(code);
+            return <label className="check-option" key={code}>
+              <input type="checkbox" checked={index !== -1} disabled={index === -1 && languages.length >= 8}
+                onChange={(event) => {
+                  setLanguages(event.target.checked ? [...languages, code] : languages.filter((value) => value !== code));
+                  setMessage(null);
+                }} />{languageName(code)}{index === 0 && "（首选）"}
+            </label>;
+          })}
+        </div>
       </fieldset>
       {languages.length > 1 && <label className="batch-input">首选语言
         <select className="field" value={languages[0]} disabled={busy} onChange={(event) => {
@@ -65,7 +67,9 @@ export function LanguageSettings() {
         </select>
       </label>}
       <p className="muted">{configured ? "已配置「元数据翻译」：缺少目标语言时尝试翻译。" : "未配置「元数据翻译」：缺少目标语言时保留原文。"}</p>
-      <button type="submit" disabled={busy}>保存语言</button>
+      <button className="primary" type="submit" disabled={busy}>
+        {busy ? "正在保存…" : "保存语言"}
+      </button>
     </form>}
     {message && <p role={message.error ? "alert" : "status"}>{message.text}</p>}
   </section>;
