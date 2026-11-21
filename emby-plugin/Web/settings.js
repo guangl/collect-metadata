@@ -1,4 +1,4 @@
-define(["emby-button", "emby-input", "emby-select", "emby-textarea", "emby-toggle", "emby-checkbox"], function () {
+define([], function () {
     "use strict";
     var pluginId = "0d06e6df-6aa6-4c32-94b3-ad9da31fa348";
     var defaults = { MovieFolder: "{original}", SeriesFolder: "{work}", SeasonFolder: "Season {season}", MovieFile: "{original}", EpisodeFile: "{original}" };
@@ -154,9 +154,9 @@ define(["emby-button", "emby-input", "emby-select", "emby-textarea", "emby-toggl
             host.replaceChildren();
             scopes[target].split(" ").forEach(function (key) {
                 var token = key === "season:00" ? "${seasonFormat}" : key === "episode:00" ? "${episodeFormat}" : "{" + key + "}";
-                var button = document.createElement("button", { is: "emby-button" });
+                var button = document.createElement("button");
                 button.type = "button";
-                button.className = "raised raised-mini";
+                button.className = "cm-button";
                 button.textContent = token;
                 button.addEventListener("click", function () {
                     var field = fields[target];
