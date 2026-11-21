@@ -90,7 +90,7 @@ public sealed class SyncLibraryTask : IScheduledTask
         }) { EnableImages = true, EnableUserData = false };
         var ids = library.GetInternalItemIds(new InternalItemsQuery
         {
-            IncludeItemTypes = new[] { "Movie", "Series", "Season", "Episode" },
+            IncludeItemTypes = new[] { "Movie", "Series", "Season", "Episode", "Video" },
             Recursive = true,
             IsVirtualItem = false,
         }, cancellationToken);

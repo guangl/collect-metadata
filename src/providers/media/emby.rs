@@ -261,7 +261,7 @@ impl Emby {
                     &[
                         ("ParentId", id),
                         ("Recursive", "true"),
-                        ("IncludeItemTypes", "Movie,Series"),
+                        ("IncludeItemTypes", "Movie,Series,Video"),
                         ("Limit", "100"),
                         ("StartIndex", &offset.to_string()),
                     ],
@@ -272,11 +272,7 @@ impl Emby {
                 .ok_or("Emby 返回的媒体库格式无效。")?;
             result.extend(items.iter().filter_map(|item| {
                 let id = valid_id(&item["Id"])?;
-                let kind = match item["Type"].as_str()? {
-                    "Series" => MediaKind::Series,
-                    "Movie" => MediaKind::Movie,
-                    _ => return None,
-                };
+                let kind = work_kind(item)?;
                 let title = item["Name"]
                     .as_str()
                     .filter(|value| !value.trim().is_empty())
@@ -325,14 +321,14 @@ impl Emby {
                 .await
                 .map(|source| (id.to_owned(), source));
         }
-        let item_type = if kind == MediaKind::Series {
-            "Series"
-        } else {
-            "Movie"
+        let item_types = match kind {
+            MediaKind::Series => "Series",
+            MediaKind::Movie => "Movie,Video",
+            MediaKind::Av => "Movie",
         };
         let mut params = vec![
             ("Recursive", "true"),
-            ("IncludeItemTypes", item_type),
+            ("IncludeItemTypes", item_types),
             ("Limit", "60"),
             ("Fields", "Path,ProviderIds,OriginalTitle,SortName"),
         ];
@@ -346,7 +342,7 @@ impl Emby {
         let candidates = self.items(client, &params).await.ok()?;
         let name = normalize(query);
         let mut exact = list(&candidates["Items"]).filter(|item| {
-            if item["Type"] != item_type
+            if !matches_kind(item, kind)
                 || year.is_some_and(|year| item["ProductionYear"].as_u64() != Some(u64::from(year)))
             {
                 return false;
@@ -374,13 +370,8 @@ impl Emby {
             .await
             .ok()?;
         let item = item["Items"].as_array()?.first()?.clone();
-        let item_type = if kind == MediaKind::Series {
-            "Series"
-        } else {
-            "Movie"
-        };
         if valid_id(&item["Id"]) != Some(id)
-            || item["Type"] != item_type
+            || !matches_kind(&item, kind)
             || item["Name"].as_str()?.trim().is_empty()
         {
             return None;
@@ -542,6 +533,28 @@ impl Emby {
 
 pub(crate) fn list(value: &Value) -> impl Iterator<Item = &Value> {
     value.as_array().into_iter().flatten()
+}
+
+fn work_kind(item: &Value) -> Option<MediaKind> {
+    match item["Type"].as_str()? {
+        "Series" => Some(MediaKind::Series),
+        "Movie" => Some(MediaKind::Movie),
+        "Video"
+            if item["IsFolder"] != true
+                && item["ExtraType"].is_null()
+                && item["LocationType"] != "Virtual" =>
+        {
+            Some(MediaKind::Movie)
+        }
+        _ => None,
+    }
+}
+
+fn matches_kind(item: &Value, kind: MediaKind) -> bool {
+    let Some(actual) = work_kind(item) else {
+        return false;
+    };
+    actual == kind || (kind == MediaKind::Av && item["Type"] == "Movie")
 }
 
 fn valid_id(value: &Value) -> Option<&str> {

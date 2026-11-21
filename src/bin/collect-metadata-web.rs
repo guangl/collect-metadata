@@ -294,7 +294,7 @@ async fn sync_emby_item(
         || id.parse::<u64>().ok().filter(|n| *n > 0).is_none()
         || !matches!(
             doc["Type"].as_str(),
-            Some("Movie" | "Series" | "Season" | "Episode")
+            Some("Movie" | "Series" | "Season" | "Episode" | "Video")
         )
     {
         return Err(api_error(

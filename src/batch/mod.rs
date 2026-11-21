@@ -219,7 +219,7 @@ impl Collector {
             })
             .collect::<Vec<_>>();
         if items.is_empty() {
-            return Err("此媒体库没有电影或剧集。".into());
+            return Err("此媒体库没有可刮削的电影、剧集或私人影片。".into());
         }
         let settings = self.output_settings().ok_or("后台输出配置不可用。")?;
         let owner = settings.durable_owner()?;

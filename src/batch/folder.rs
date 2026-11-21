@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
 
 use regex::Regex;
 use serde::Serialize;
@@ -146,10 +146,15 @@ static NUMBERED_AV: LazyLock<Regex> = LazyLock::new(|| {
 static COMPACT_AV: LazyLock<Regex> =
     LazyLock::new(|| pattern(r"^([A-Z]{2,8})([0-9]{3,6})(?:$|[^A-Za-z0-9])"));
 static LEADING_TAG: LazyLock<Regex> =
-    LazyLock::new(|| pattern(r"^\s*(?:\[[^\]]+\]\s*|【[^】]+】\s*)+"));
+    LazyLock::new(|| pattern(r"^\s*(?:\[([^\]]+)\]|【([^】]+)】)\s*"));
+static RELEASE_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    pattern(
+        r"(?i)^(?:bd|dvd|web|chs|cht|sc|tc|jp|jpn|eng|multi|简体|繁体|简繁|简中|繁中|中文字幕|简繁内封)$",
+    )
+});
 static RELEASING: LazyLock<Regex> = LazyLock::new(|| {
     pattern(
-        r"(?i)(?:^|[ ._\[\](\)-])(?:[248]k|(?:480|576|720|1080|1440|2160|4320)[pi]|web[ ._-]?(?:dl|rip)|blu[ ._-]?ray|b[dr]rip|hdrip|remux|hdtv|dvdrip|x26[45]|h[ .]?26[45]|hevc|av1|hdr10|hdr|dolby[ .]?vision|10bit|[57][.]1|aac|dts|atmos|proper|repack|sample|trailer|cd[0-9]|disc[0-9])(?:$|[^a-z0-9])",
+        r"(?i)(?:^|[ ._\[\](\)【】-])(?:[248]k|(?:480|576|720|1080|1440|2160|4320)[pi]|web[ ._-]?(?:dl|rip)|blu[ ._-]?ray|b[dr]rip|hdrip|remux|hdtv|dvdrip|x26[45]|h[ .]?26[45]|hevc|av1|hdr10|hdr|dolby[ .]?vision|10bit|[57][.]1|aac|dts|atmos|proper|repack|sample|trailer|cd[0-9]|disc[0-9])(?:$|[^a-z0-9])",
     )
 });
 
@@ -277,7 +282,7 @@ fn extra(value: &str) -> bool {
 
 fn identify(dirs: &[&str], stem: &str) -> Option<(MediaKind, String)> {
     let raw_stem = stem;
-    let stem = LEADING_TAG.replace(stem, "");
+    let stem = release_title(stem);
     let episode = EPISODE.find(&stem);
     let season_dir = dirs.iter().rposition(|part| SEASON.is_match(part));
     let series = episode.is_some() || season_dir.is_some();
@@ -295,13 +300,14 @@ fn identify(dirs: &[&str], stem: &str) -> Option<(MediaKind, String)> {
     }
     // Season and episode markers take precedence over a release code inside the show name.
     if !series
-        && let Some(code) = av_code(&stem).or_else(|| dirs.last().and_then(|dir| av_code(dir)))
+        && let Some(code) =
+            av_code(&stem).or_else(|| dirs.last().and_then(|dir| av_code(&release_title(dir))))
     {
         return Some((MediaKind::Av, code));
     }
     let name = clean_title(title_stem).filter(|(name, _)| !generic_file(name));
     let directory = work_dir
-        .and_then(clean_title)
+        .and_then(|dir| clean_title(&release_title(dir)))
         .filter(|(name, _)| !generic_file(name));
     let title = if season_dir.is_some() && directory.is_some() {
         directory?
@@ -343,6 +349,7 @@ fn generic_file(value: &str) -> bool {
                 | "bdmv"
                 | "媒体目录"
                 | "电影"
+                | "动画电影"
                 | "剧集"
                 | "电视剧"
                 | "动漫"
@@ -350,8 +357,7 @@ fn generic_file(value: &str) -> bool {
 }
 
 fn av_code(stem: &str) -> Option<String> {
-    let stem = LEADING_TAG.replace(stem, "");
-    if let Some(found) = NUMBERED_AV.captures(&stem) {
+    if let Some(found) = NUMBERED_AV.captures(stem) {
         if let Some(fc) = found.get(2) {
             return Some(format!("FC2-PPV-{}", fc.as_str()));
         }
@@ -360,7 +366,7 @@ fn av_code(stem: &str) -> Option<String> {
             return Some(format!("{}-{digits}", found[3].to_ascii_uppercase()));
         }
     }
-    let found = COMPACT_AV.captures(&stem)?;
+    let found = COMPACT_AV.captures(stem)?;
     let digits = &found[2];
     (!year_digits(digits)).then(|| format!("{}-{digits}", &found[1]))
 }
@@ -373,11 +379,56 @@ fn tmdb_id(stem: &str) -> Option<i32> {
     ID.captures(stem)?.get(1)?.as_str().parse().ok()
 }
 
+fn release_title(stem: &str) -> Cow<'_, str> {
+    let mut tail = stem;
+    let mut title = None;
+    let mut year = None;
+    let mut has_release_tags = false;
+    while let Some(tag) = LEADING_TAG.captures(tail) {
+        tail = &tail[tag.get(0).expect("matched tag").end()..];
+        let value = tag
+            .get(1)
+            .or_else(|| tag.get(2))
+            .expect("tag content")
+            .as_str()
+            .trim();
+        if year_digits(value) {
+            year = Some(value);
+        } else if RELEASE_TAG.is_match(value)
+            || RELEASING
+                .find(value)
+                .is_some_and(|marker| marker.start() == 0)
+            || tmdb_id(value).is_some()
+        {
+            has_release_tags |= title.is_some();
+        } else if !has_release_tags && !generic_file(value) {
+            // In an all-bracket release, the title usually follows the group name.
+            title = Some(value);
+            year = None;
+        }
+    }
+    let Some(title) = title else {
+        return Cow::Borrowed(tail);
+    };
+    let suffix = before_release_info(tail)
+        .trim_matches([' ', '.', '_', '-', '[', ']', '【', '】', '(', ')']);
+    let suffix_year = year_digits(suffix).then_some(suffix);
+    if suffix.is_empty() || suffix_year.is_some() {
+        return suffix_year.or(year).map_or(Cow::Borrowed(title), |year| {
+            format!("{title} ({year})").into()
+        });
+    }
+    Cow::Borrowed(tail)
+}
+
+fn before_release_info(stem: &str) -> &str {
+    RELEASING
+        .find(stem)
+        .map_or(stem, |marker| &stem[..marker.start()])
+}
+
 fn clean_title(stem: &str) -> Option<(String, Option<u16>)> {
-    let stem = LEADING_TAG.replace(stem, "");
-    let stem = RELEASING
-        .find(&stem)
-        .map_or(stem.as_ref(), |marker| &stem[..marker.start()]);
+    let stem = before_release_info(stem);
     let candidate_year = YEAR
         .captures_iter(stem)
         .filter_map(|found| found.get(2))
@@ -397,7 +448,7 @@ fn clean_title(stem: &str) -> Option<(String, Option<u16>)> {
         (&stem[..found.start()], found.as_str().parse().ok())
     });
     let name = stem
-        .trim_matches([' ', '.', '_', '-', '[', ']', '(', ')', '{', '}'])
+        .trim_matches([' ', '.', '_', '-', '[', ']', '【', '】', '(', ')', '{', '}'])
         .replace(['.', '_'], " ")
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -460,6 +511,34 @@ mod tests {
             "Media/../movie.mkv",
         ] {
             assert!(classify_paths(vec![path.into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn keeps_the_title_in_bracketed_animated_movie_releases() {
+        let paths = [
+            "动画电影/[字幕组][你的名字。][2016][1080p][HEVC][简繁内封].mkv",
+            "动画电影/【字幕组】你的名字。 (2016)【1080p】.mp4",
+            "动画电影/[天气之子] (2019) [BDRip].mkv",
+            "动画电影/[红辣椒].mkv",
+            "动画电影/[字幕组] 2001 A Space Odyssey (1968) [1080p].mkv",
+            "动画电影/[HEVC][1080p].mkv",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let (items, info) = classify_paths(paths).unwrap();
+        assert_eq!(info.unrecognized, ["动画电影/[HEVC][1080p].mkv"]);
+        assert_eq!(info.works, 4);
+        assert_eq!(info.files, 5);
+        for (query, files) in [
+            ("你的名字。 (2016)", 2),
+            ("天气之子 (2019)", 1),
+            ("红辣椒", 1),
+            ("2001 A Space Odyssey (1968)", 1),
+        ] {
+            let item = items.iter().find(|item| item.query == query).unwrap();
+            assert_eq!(item.kind, MediaKind::Movie);
+            assert_eq!(item.source_files.len(), files);
         }
     }
 }

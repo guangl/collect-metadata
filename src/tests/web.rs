@@ -125,26 +125,48 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
         "Id":"31","Type":"Series","Name":"资料剧集","OriginalTitle":"Poster Series","ProductionYear":2017,
         "Overview":"这是简介","ProviderIds":{"Tmdb":"70523"},"ImageTags":{"Primary":"3"}
     });
-    let data = match (
+    let video = json!({
+        "Id":"35","Type":"Video","Name":"家庭旅行","Path":"/media/2024旅行.mov",
+        "Overview":"自己的旅行记录","ImageTags":{"Primary":"5"},
+        "MediaStreams":[{"Type":"Video","Width":1920,"Height":1080}]
+    });
+    let mut data = match (
         args.get("Ids").map(String::as_str),
         args.get("ParentId").map(String::as_str),
     ) {
         (Some("30"), _) => vec![film],
         (Some("31"), _) => vec![show],
+        (Some("35"), _) => vec![video],
         (_, Some("31")) => vec![
             json!({"Id":"32","Type":"Season","Name":"一季"}),
             json!({"Id":"34","Type":"Episode","Name":"第一集","Overview":"已有中文译文","IndexNumber":1,"ParentIndexNumber":1,
                 "Path":"/media/资料剧集/S01E01.mkv","ImageTags":{"Primary":"3"}}),
         ],
-        (_, Some("7")) => vec![film, show],
+        (_, Some("7")) => vec![
+            film,
+            show,
+            video,
+            json!({"Id":"36","Type":"Video","Name":"花絮","ExtraType":"BehindTheScenes"}),
+            json!({"Id":"37","Type":"Video","Name":"虚拟条目","LocationType":"Virtual"}),
+            json!({"Id":"38","Type":"Photo","Name":"旅行照片"}),
+        ],
         _ if args
             .get("AnyProviderIdEquals")
             .is_some_and(|value| value == "Tmdb.70523") =>
         {
             vec![show]
         }
+        _ if args
+            .get("SearchTerm")
+            .is_some_and(|value| value == "家庭旅行") =>
+        {
+            vec![video]
+        }
         _ => vec![film],
     };
+    if let Some(types) = args.get("IncludeItemTypes") {
+        data.retain(|item| types.split(',').any(|kind| item["Type"] == kind));
+    }
     Json(json!({"TotalRecordCount":data.len(),"Items":data})).into_response()
 }
 
@@ -289,7 +311,7 @@ async fn verify_web_routes(test_url: Url) {
                 .status(),
             400
         );
-        let document = json!({"Id":"1","Type":"Movie","Name":"Emby 同步电影"});
+        let document = json!({"Id":"1","Type":"Video","Name":"Emby 同步私人影片"});
         api.success("/api/settings/languages", Some(json!(["zh-CN", "ja"])))
             .await;
         let db = PgPool::connect(test_url.as_str()).await.unwrap();
@@ -306,6 +328,7 @@ async fn verify_web_routes(test_url: Url) {
                 .fetch_one(&db).await.unwrap();
             assert_eq!(synced["_collect_metadata"]["metadata_languages"], expected);
             assert_eq!(synced["Name"], document["Name"]);
+            assert_eq!(synced["Type"], "Video");
         }
     }
     let emby_options = json!({"enabled":true, "server":mock,"api_key":"test-secret"});
@@ -404,7 +427,8 @@ async fn verify_web_routes(test_url: Url) {
         preview,
         json!([
             {"id":"30", "kind":"movie", "title":"海报电影"},
-            {"id":"31", "kind":"series", "title":"资料剧集"}
+            {"id":"31", "kind":"series", "title":"资料剧集"},
+            {"id":"35", "kind":"movie", "title":"家庭旅行"}
         ])
     );
     assert_eq!(api.success("/api/batches", None).await, before_preview);
@@ -414,14 +438,10 @@ async fn verify_web_routes(test_url: Url) {
         .as_i64()
         .unwrap();
     let view = api.finish(imported).await;
-    assert_eq!(view["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(view["rows"].as_array().unwrap().len(), 3);
     let rows = api.success(&format!("/api/batches/{imported}"), None).await;
-    let film = rows
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["kind"] == "movie")
-        .unwrap();
+    let rows = rows.as_array().unwrap();
+    let film = rows.iter().find(|row| row["query"] == "emby:30").unwrap();
     let path = film["output"]["directory"].as_str().unwrap();
     assert!(path.contains("海报电影 (2019)"));
     let files = fs::read_dir(path)
@@ -435,9 +455,21 @@ async fn verify_web_routes(test_url: Url) {
             .iter()
             .any(|file| file.to_string_lossy().starts_with("Emby-30-director-"))
     );
+    let video = rows.iter().find(|row| row["query"] == "emby:35").unwrap();
+    assert_eq!(video["stage"], "success");
+    let video_exports = std::path::Path::new(video["output"]["directory"].as_str().unwrap());
+    let nfo = fs::read_to_string(video_exports.join("2024旅行.nfo")).unwrap();
+    assert!(nfo.contains("<title>家庭旅行</title>"));
+    assert!(nfo.contains("自己的旅行记录"));
     let history = api.success("/api/history?kind=movie", None).await;
-    assert_eq!(history[0]["year"], 2019);
-    let id = history[0]["id"].as_i64().unwrap();
+    let saved_film = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["title"] == "海报电影")
+        .unwrap();
+    assert_eq!(saved_film["year"], 2019);
+    let id = saved_film["id"].as_i64().unwrap();
     assert_eq!(
         api.success(&format!("/api/history/{id}"), None).await["record"]["fields"]["title"],
         "海报电影"
@@ -453,6 +485,14 @@ async fn verify_web_routes(test_url: Url) {
         .await;
 
     api.success("/api/settings/emby", Some(emby_options)).await;
+    let video_batch = api
+        .success("/api/folder-batches", Some(json!(["library/家庭旅行.mov"])))
+        .await["id"]
+        .as_i64()
+        .unwrap();
+    let video_view = api.finish(video_batch).await;
+    assert_eq!(video_view["rows"][0]["stage"], "success");
+    assert_eq!(video_view["rows"][0]["title"], "家庭旅行");
     let folder = api
         .success(
             "/api/folder-batches",

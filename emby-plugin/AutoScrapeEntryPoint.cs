@@ -1,3 +1,4 @@
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
@@ -30,7 +31,7 @@ public sealed class AutoScrapeEntryPoint : IServerEntryPoint
     public void Run()
     {
         libraryManager.ItemAdded += OnItemAdded;
-        logger.Info("Listening for new movies and TV items.");
+        logger.Info("Listening for new movies, TV items, and home videos.");
     }
 
     public void Dispose() => libraryManager.ItemAdded -= OnItemAdded;
@@ -38,7 +39,7 @@ public sealed class AutoScrapeEntryPoint : IServerEntryPoint
     private void OnItemAdded(object? sender, ItemChangeEventArgs args)
     {
         var item = args.Item;
-        if (item is not (Movie or Series or Season or Episode)
+        if ((item is not (Movie or Series or Season or Episode) && item.GetType() != typeof(Video))
             || item.InternalId <= 0 || item.IsVirtualItem || item.IsLocked || item.ExtraType.HasValue)
         {
             return;

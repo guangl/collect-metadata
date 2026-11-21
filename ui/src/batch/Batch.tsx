@@ -478,7 +478,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
               </div>
             </li>)}
           </ul>
-        </> : <p className="catalog-empty">{preview ? "未识别到可刮削的作品。请更换文件夹。" : "此媒体库没有电影或剧集。"}</p>}
+        </> : <p className="catalog-empty">{preview ? "未识别到可刮削的作品。请更换文件夹。" : "此媒体库没有可刮削的电影、剧集或私人影片。"}</p>}
       </section>}
       <details className="manual-intake">
       <summary>手动输入作品</summary>

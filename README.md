@@ -84,6 +84,7 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 | 文件路径 | 识别结果 |
 | --- | --- |
 | `电影/寄生虫 (2019)/寄生虫.2019.2160p.mkv` | 电影《寄生虫》，年份 2019 |
+| `动画电影/[字幕组][你的名字。][2016][1080p].mkv` | 电影《你的名字。》，年份 2016 |
 | `暗黑 (2017)/Season 01/S01E02.mkv` | 剧集《暗黑》，年份 2017 |
 | `AV/SSIS-001.1080p.mp4` | 番号 `SSIS-001` |
 | `电影/[tmdb-496243].mkv` | 使用指定的 TMDB ID |
@@ -117,7 +118,7 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 
 在「设置 → 家庭 Emby」填写服务地址和 API 密钥，测试后启用「优先读取 Emby 媒体库」。文件夹刮削会按片名、年份或明确的 TMDB ID 查找已有作品。读取 Emby 返回的完整作品资料与季集记录，依照输出设置写出海报、剧照和人物头像。启用原始来源 JSON 后，输出中会包含 Emby 返回的源记录。
 
-也可以在刮削首页选择「Emby Server」，读取媒体库列表，选中一个库并点「预览所选媒体库」。预览读取片名用于占位海报；确认开始后才提交后台任务，并逐项读取电影、剧集和季集资料，适用相同的输出选项。即使关闭「优先读取 Emby 媒体库」，只要已配置连接，仍可手动选择 Emby Server。
+也可以在刮削首页选择「Emby Server」，读取媒体库列表，选中一个库并点「预览所选媒体库」。预览读取片名用于占位海报；确认开始后才提交后台任务，并逐项读取电影、剧集、季集和私人影片的资料，适用相同的输出选项。私人影片可直接使用 Emby 已有的标题、简介、图片等资料，无需 TMDB ID。即使关闭「优先读取 Emby 媒体库」，只要已配置连接，仍可手动选择 Emby Server。
 
 家庭「元数据翻译」的旧定时任务在 NAS 处理作品简介和分集标题，并写回 Emby。采集会读取 Emby 已有资料；如需额外的目标语言，可配置上面的翻译适配器。Emby 是只读资料源，未匹配到作品时继续查询常规来源。
 
@@ -129,7 +130,7 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 
 ## Emby 入库自动刮削插件
 
-[`emby-plugin/`](emby-plugin/) 是独立安装在 Emby Server 里的原生插件。Emby 扫描发现新电影、剧集、季或分集后，插件会通过 Emby 的后台队列刷新该条目的元数据和图片。给已有剧集添加新分集时，只对新入库的条目提交刷新。插件不会对已有条目做批量回填，也不会请求「替换所有元数据」或「替换所有图片」；已锁定的条目会被跳过。
+[`emby-plugin/`](emby-plugin/) 是独立安装在 Emby Server 里的原生插件。Emby 扫描发现新电影、剧集、季、分集或私人影片后，插件会通过 Emby 的后台队列刷新该条目的元数据和图片。给已有剧集添加新分集时，只对新入库的条目提交刷新。插件不会对已有条目做批量回填，也不会请求「替换所有元数据」或「替换所有图片」；已锁定的条目会被跳过。
 
 使用 [Emby Server 4.9.1.90 的 SDK](https://www.nuget.org/packages/MediaBrowser.Server.Core/4.9.1.90) 构建，已在 4.10.2.0 Docker 镜像中验证同步。其他版本请先验证兼容性。构建需要 .NET 8 SDK 或更新版本：
 
@@ -149,7 +150,7 @@ dotnet build emby-plugin/CollectMetadata.Emby.csproj -c Release
 2. 在 **Emby 容器**设置 `COLLECT_METADATA_URL`（从 Emby 容器能访问的 Collect Metadata 服务根地址）和相同的 `EMBY_SYNC_TOKEN`，重建 Emby 容器使环境变量生效。两个容器在同一个 Docker 网络时，可用 `http://app:8080`（Compose 默认服务名）；不要用 `localhost` 指向另一个容器。如果经过 NAS 发布端口，需将 `APP_HOST` 绑定到 Emby 能访问的主机接口。跨不可信网络请使用 HTTPS。非 Docker 安装也可在重启前设置同名环境变量，或在 Emby 的 `plugins/configurations/CollectMetadata.Emby.xml` 中配置 `<SyncConfiguration><CollectMetadataUrl>服务地址</CollectMetadataUrl><SyncToken>同步令牌</SyncToken></SyncConfiguration>`。
 3. 初次配置后，在 Emby 控制台「计划任务」中运行 **Sync library to Collect Metadata**。之后默认每 30 分钟同步一次；也可在该任务里调整频率。服务不可用时，下一次运行会重新推送，不需要手工补单。
 
-任务同步已有和新增的电影、剧集、季及分集（不含虚拟占位项和花絮）；Emby 内更新的简介、标题等会在下次同步时更新。PostgreSQL 的 `collect_metadata_emby_items` 按 `(server_id, item_id)` 保存最新的元数据 JSON，图片只保存 Emby 的引用，不传图片或视频文件。该表独立于手动采集的历史快照。重复同步不新增行；从 Emby 删除条目不会自动删库。
+任务同步已有和新增的电影、剧集、季、分集及私人影片（不含虚拟占位项和花絮）；Emby 内更新的简介、标题等会在下次同步时更新。PostgreSQL 的 `collect_metadata_emby_items` 按 `(server_id, item_id)` 保存最新的元数据 JSON，图片只保存 Emby 的引用，不传图片或视频文件。该表独立于手动采集的历史快照。重复同步不新增行；从 Emby 删除条目不会自动删库。
 
 ```sql
 SELECT document->>'Type' AS media_type, count(*)
