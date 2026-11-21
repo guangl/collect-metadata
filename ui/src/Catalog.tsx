@@ -38,7 +38,7 @@ export function LanguageSelect({ codes, value, onChange, disabled }: {
   return (
     <label className="filter">
       原始语言
-      <select value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
+      <select className="field" value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
         <option value="">全部语言</option>
         {options.map((code) => <option key={code} value={code}>{languageName(code)}</option>)}
         <option value="und">未知</option>
@@ -81,12 +81,12 @@ export function ExternalLink({ value, children, className, onError }: {
     onClick={isDesktop ? open : undefined}>{children}</a>;
 }
 
-export function PosterArt({ url, title }: { url?: string | null; title: string }) {
+export function PosterArt({ url }: { url?: string | null }) {
   const poster = safeUrl(url);
   const [failed, setFailed] = useState<string | null>(null);
   return (
     <span className="poster-art" aria-hidden="true">
-      <span className="poster-placeholder">{title}</span>
+      <span className="poster-placeholder">无海报</span>
       {poster && failed !== poster && <img src={poster} alt="" loading="lazy" decoding="async"
         referrerPolicy="no-referrer" onError={() => setFailed(poster)} />}
     </span>
@@ -103,7 +103,7 @@ export function PosterCard({ title, cover, caption, disabled, onOpen }: {
   return (
     <button className="poster-card" type="button" aria-haspopup="dialog" disabled={disabled}
       onClick={(event) => onOpen(event.currentTarget)}>
-      <PosterArt url={cover} title={title} />
+      <PosterArt url={cover} />
       <span className="poster-caption">
         <strong>{title}</strong>
         <span>{caption}</span>
@@ -125,7 +125,7 @@ export function Episodes({ episodes, onError }: { episodes: Episode[]; onError: 
         <>
           <label className="filter">
             按季查看
-            <select value={season} onChange={(event) => setSeason(Number(event.target.value))}>
+            <select className="field" value={season} onChange={(event) => setSeason(Number(event.target.value))}>
               {seasons.map((value) => <option key={value} value={value}>{value ? "第 " + value + " 季" : "特别篇"}</option>)}
             </select>
           </label>

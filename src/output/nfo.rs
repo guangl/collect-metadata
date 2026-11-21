@@ -17,8 +17,9 @@ pub(super) fn documents(
     files: &[OutputFile],
 ) -> BTreeMap<String, String> {
     let fields = &record["fields"];
-    let series = record["media_type"] == "series";
-    let root = if series { "tvshow" } else { "movie" };
+    let episode = record["scope"] == "episode";
+    let series = record["media_type"] == "series" && !episode;
+    let root = if episode { "episodedetails" } else if series { "tvshow" } else { "movie" };
     let mut body = String::new();
     let av = record["media_type"] == "av";
     let original_title = field(fields, &["title_original", "title_ja"]);
@@ -62,6 +63,13 @@ pub(super) fn documents(
                 .filter(|year| year.bytes().all(|byte| byte.is_ascii_digit()))
         }),
     );
+    if episode {
+        tag(&mut body, "showtitle", present(&fields["series"]));
+        tag(&mut body, "aired", release);
+        number_tag(&mut body, "season", fields["season_number"].as_u64());
+        number_tag(&mut body, "episode", fields["episode_number"].as_u64());
+        number_tag(&mut body, "episodenumberend", fields["episode_last_number"].as_u64());
+    }
     number_tag(&mut body, "runtime", fields["runtime_minutes"].as_u64());
     for (kind, key) in [
         ("tmdb", "tmdb_id"),
@@ -105,7 +113,7 @@ pub(super) fn documents(
     tag(&mut body, "publisher", label);
     tag(&mut body, "label", label);
     tag(&mut body, "series", present(&fields["series"]));
-    if !series && let Some(collection) = collection {
+    if !series && !episode && let Some(collection) = collection {
         let _ = writeln!(body, "  <set><name>{}</name></set>", escape(collection));
     }
     tag(&mut body, "num", dvd_id);
@@ -165,7 +173,8 @@ pub(super) fn documents(
             .map(|file| file.path.as_str())
             .or_else(|| keys.iter().find_map(|key| media::web_url(&fields[*key])))
     };
-    let poster = image("poster", &["poster_url", "cover_url"]);
+    let poster = image("poster", &["poster_url", "cover_url"])
+        .or_else(|| if episode { image("still", &[]) } else { None });
     let cover = image(
         "backdrop",
         if av {
@@ -246,7 +255,7 @@ pub(super) fn documents(
             let name = fields["file_name"]
                 .as_str()
                 .and_then(filename)
-                .unwrap_or("movie");
+                .unwrap_or(if episode { "episode" } else { "movie" });
             result.insert(format!("{name}.nfo"), work);
         }
     }

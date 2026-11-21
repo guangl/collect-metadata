@@ -18,6 +18,64 @@ fn accepts_compact_and_multi_part_codes_without_merging_distinct_ids() {
     assert!(Identifier::parse("../../ABC-123").is_err());
 }
 
+#[test]
+fn normalizes_special_ids_for_exact_matching() {
+    for (input, expected, alias, different) in [
+        ("有码番号：ａｂｃ－００１", "ABC-001", "ABC - 001", "ABC-01"),
+        (
+            "无码番号：1pondo_010124_123",
+            "1PONDO-010124-123",
+            "1PONDO 010124-123",
+            "CARIB-010124-123",
+        ),
+        (
+            "素人番号：300mium001",
+            "300MIUM-001",
+            "300MIUM_001",
+            "MIUM-001",
+        ),
+        (
+            "ｆｃ２番号：fc2 ppv 1234567",
+            "FC2-PPV-1234567",
+            "FC2-1234567",
+            "1234567",
+        ),
+        (
+            "欧美番号：Naughty.America.24.01.31",
+            "NAUGHTYAMERICA-24-01-31",
+            "Naughty America 24.01.31",
+            "Naughty America 24.01.30",
+        ),
+        ("国产番号：mdx0123", "MDX-0123", "MDX-0123", "MDX-123"),
+        ("动漫里番：rj123456", "RJ-123456", "RJ123456", "VJ123456"),
+        (
+            "mywife：My Wife 0123",
+            "MYWIFE-0123",
+            "Mywife-0123",
+            "Mywife-123",
+        ),
+        ("Tokyo-Hot n1234", "N1234", "N-1234", "N-12345"),
+    ] {
+        let id = Identifier::parse(input).unwrap();
+        assert_eq!(id.formatted, expected, "{input}");
+        assert_eq!(id.dvd_candidate(), expected);
+        assert!(id.matches(alias), "{input} should match {alias}");
+        assert!(
+            !id.matches(different),
+            "{input} should not match {different}"
+        );
+    }
+    assert_eq!(
+        Identifier::parse("Brazzers.24.01.31")
+            .unwrap()
+            .search_candidate(),
+        "BRAZZERS 24.01.31"
+    );
+    for input in ["../../ABC-123", "FC2/123", "番号：", "Mywife-0123?x=1"] {
+        assert!(Identifier::parse(input).is_err(), "{input}");
+    }
+}
+
 #[tokio::test]
 #[ignore = "访问公开的影片资料站点"]
 async fn live_sources() {

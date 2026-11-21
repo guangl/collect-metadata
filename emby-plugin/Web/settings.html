@@ -1,0 +1,133 @@
+<div is="emby-scroller" class="view flex flex-direction-column scrollFrameY flex-grow cm-organizer"
+     data-horizontal="false" data-focusscroll="true" data-bindheader="true"
+     data-title="Collect Metadata · 自动整理" data-controller="__plugin/collectmetadata-config.js"
+     data-require="emby-button,emby-input,emby-select,emby-textarea,emby-toggle,emby-checkbox">
+    <style>
+        .cm-organizer fieldset, .cm-organizer .cm-naming-grid > *, .cm-organizer .cm-picker > * { min-width: 0; }
+        .cm-organizer .cm-picker, .cm-organizer .cm-naming-grid { display: grid; gap: 1em; }
+        .cm-organizer .cm-picker button { margin-inline: 0; }
+        .cm-organizer .cm-token-buttons { display: flex; flex-wrap: wrap; gap: .35em; margin-block-start: .5em; }
+        .cm-organizer .cm-token-buttons button { margin: 0; }
+        .cm-organizer .cm-preview code { display: block; margin-block-start: .5em; white-space: pre-wrap; }
+        .cm-organizer .fieldDescription, .cm-organizer code { overflow-wrap: anywhere; }
+        @media (min-width: 40em) {
+            .cm-organizer .cm-picker { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+        }
+        @media (min-width: 58em) {
+            .cm-organizer .cm-naming-grid { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start; }
+        }
+    </style>
+    <div class="scrollSlider flex-grow flex-direction-column padded-left padded-left-page padded-right padded-top-page padded-bottom-page">
+        <div class="readOnlyContent auto-center">
+            <form class="organizerSettings fieldsets">
+                <fieldset class="organizer-fields" disabled>
+                    <legend>入库与自动整理</legend>
+                    <div class="fieldset-fields">
+                        <div class="toggleContainer fieldset-field">
+                            <label><input is="emby-toggle" name="AutoRefreshEnabled" type="checkbox"><span class="toggleLabel">新条目入库后请求 Emby 刷新元数据和图片</span></label>
+                        </div>
+                        <div class="toggleContainer fieldset-field">
+                            <label><input is="emby-toggle" name="OrganizeEnabled" type="checkbox"><span class="toggleLabel">允许自动整理所选媒体库的根目录</span></label>
+                            <div class="fieldDescription toggleFieldDescription">仅整理直接放在库根目录的散文件，不改动已有子目录里的视频，不覆盖目标文件。电影和剧集库须开启 NFO 保存器和“将图片保存到媒体文件夹”，并对 Emby 可写。<a is="emby-linkbutton" class="button-link" href="#!/librarysetup">打开媒体库设置</a></div>
+                        </div>
+                        <div class="cm-picker fieldset-field">
+                            <div class="selectContainer">
+                                <select is="emby-select" name="RootPicker" label="从 Emby 媒体库添加根路径" aria-label="从 Emby 媒体库添加根路径"><option value="">选择路径…</option></select>
+                            </div>
+                            <button is="emby-button" class="raised" type="button" name="AddRoot"><span>添加</span></button>
+                        </div>
+                        <div class="textareaContainer fieldset-field">
+                            <label><textarea is="emby-textarea" class="textarea-mono" name="OrganizeRoots" rows="4" spellcheck="false" label="允许整理的根路径（每行一个）" aria-label="允许整理的根路径（每行一个）" placeholder="/media/.private-video"></textarea></label>
+                            <div class="fieldDescription root-override" hidden></div>
+                        </div>
+                        <div class="inputContainer fieldset-field">
+                            <input is="emby-input" type="number" name="StableSeconds" min="60" max="3600" label="文件稳定等待时间（秒）" aria-label="文件稳定等待时间（秒）" required>
+                            <div class="fieldDescription">至少两次检查确认大小和修改时间不变。检查频率在 Emby 的 <a is="emby-linkbutton" class="button-link" href="#!/scheduledtasks">计划任务</a> 中配置（任务：Organize loose library videos，默认每 2 分钟）。</div>
+                        </div>
+                        <div class="checkboxContainer fieldset-field">
+                            <label><input is="emby-checkbox" name="MoveNfo" type="checkbox"><span>移动同名 NFO</span></label>
+                        </div>
+                        <div class="checkboxContainer fieldset-field">
+                            <label><input is="emby-checkbox" name="MoveSubtitles" type="checkbox"><span>移动并同步重命名匹配的字幕</span></label>
+                        </div>
+                        <div class="checkboxContainer fieldset-field">
+                            <label><input is="emby-checkbox" name="MoveImages" type="checkbox"><span>移动并同步重命名匹配的图片</span></label>
+                        </div>
+                    </div>
+                </fieldset>
+                <fieldset class="organizer-fields" disabled>
+                    <legend>作品目录与视频命名</legend>
+                    <div class="fieldset-fields">
+                        <div class="cm-picker fieldset-field">
+                            <div class="selectContainer">
+                                <select is="emby-select" name="NamingPreset" label="命名预设" aria-label="命名预设">
+                                    <option value="original">保留原名</option>
+                                    <option value="ani">ani-rss · 标题和季集号（NAS）</option>
+                                    <option value="ani-group">ani-rss · 保留字幕组</option>
+                                    <option value="emby">Emby · 片名年份与 TMDB 标记</option>
+                                </select>
+                            </div>
+                            <button is="emby-button" class="raised" type="button" name="ApplyPreset"><span>应用预设</span></button>
+                        </div>
+                        <div class="cm-naming-grid fieldset-field">
+                            <div>
+                                <div class="checkboxContainer fieldset-field"><label><input is="emby-checkbox" name="RenameMovies" type="checkbox"><span>整理时重命名电影文件</span></label></div>
+                                <div class="checkboxContainer fieldset-field"><label><input is="emby-checkbox" name="RenameEpisodes" type="checkbox"><span>整理时重命名分集文件</span></label></div>
+                                <div class="inputContainer fieldset-field"><input is="emby-input" name="MovieFolder" label="电影目录模板" aria-label="电影目录模板" maxlength="200" required></div>
+                                <div class="inputContainer fieldset-field"><input is="emby-input" name="MovieFile" label="电影文件名模板" aria-label="电影文件名模板" maxlength="200" required></div>
+                                <div class="inputContainer fieldset-field"><input is="emby-input" name="SeriesFolder" label="剧集目录模板" aria-label="剧集目录模板" maxlength="200" required></div>
+                                <div class="inputContainer fieldset-field"><input is="emby-input" name="SeasonFolder" label="季目录模板" aria-label="季目录模板" maxlength="200" required></div>
+                                <div class="inputContainer fieldset-field"><input is="emby-input" name="EpisodeFile" label="分集文件名模板" aria-label="分集文件名模板" maxlength="200" required></div>
+                                <div class="selectContainer fieldset-field">
+                                    <select is="emby-select" name="TokenTarget" label="向模板插入变量" aria-label="向模板插入变量">
+                                        <option value="EpisodeFile">分集文件名</option>
+                                        <option value="MovieFile">电影文件名</option>
+                                        <option value="MovieFolder">电影目录</option>
+                                        <option value="SeriesFolder">剧集目录</option>
+                                        <option value="SeasonFolder">季目录</option>
+                                    </select>
+                                    <div class="cm-token-buttons" aria-label="可插入变量"></div>
+                                </div>
+                                <div class="checkboxContainer fieldset-field"><label><input is="emby-checkbox" name="RemoveYearFromFiles" type="checkbox"><span>从新文件名去掉括号年份</span></label></div>
+                                <div class="checkboxContainer fieldset-field"><label><input is="emby-checkbox" name="RemoveTmdbIdFromFiles" type="checkbox"><span>从新文件名去掉 TMDB 标记</span></label></div>
+                            </div>
+                            <section class="cm-preview" aria-labelledby="cm-preview-title">
+                                <div class="sectionTitleContainer"><h2 class="sectionTitle" id="cm-preview-title">命名预览</h2></div>
+                                <p class="fieldDescription">可输入自己的文件名测试。不读取磁盘，也不修改视频。</p>
+                                <div class="inputContainer fieldset-field">
+                                    <input is="emby-input" name="SampleMovie" label="电影样例" aria-label="电影样例" value="电影示例 (2025) [tmdbid=123].mkv" maxlength="240" spellcheck="false">
+                                    <code class="movie-example"></code>
+                                </div>
+                                <div class="inputContainer fieldset-field">
+                                    <input is="emby-input" name="SampleEpisode" label="分集样例" aria-label="分集样例" value="剧集示例 (2024) S02E03.1080p.mkv" maxlength="240" spellcheck="false">
+                                    <code class="series-example"></code>
+                                </div>
+                            </section>
+                        </div>
+                        <details class="fieldset-field"><summary>模板说明</summary>
+                            <div class="fieldDescription">
+                                <p>每个模板只生成一级名称，文件模板不填扩展名。年份、TMDB ID 从文件名读取，不会为命名先联网刮削。保留 <code>{original}</code> 就不会重命名视频。<code>{original}</code> 或 <code>${itemTitle}</code> 是不含扩展名的原文件名，<code>{work}</code> 是原作品名，<code>{title}</code> 是从文件名提取的标题。<code>{year_suffix}</code> 和 <code>{tmdb_suffix}</code> 只在文件名里存在对应信息时生成标记。</p>
+                                <p>支持 ani-rss 的 <code>${title} S${seasonFormat}E${episodeFormat}</code>、<code>${subgroup}</code> 和 <code>${resolution}</code>。缺少字幕组时会省略 <code>[${subgroup}]</code>。分集可用 <code>{episode_code}</code> 保留合集范围。</p>
+                            </div>
+                        </details>
+                        <div class="fieldset-field"><button is="emby-button" class="raised" type="button" name="Defaults"><span>恢复默认命名模板</span></button></div>
+                    </div>
+                </fieldset>
+                <fieldset class="organizer-fields" disabled>
+                    <legend>同步到 Collect Metadata</legend>
+                    <div class="fieldset-fields">
+                        <div class="toggleContainer fieldset-field"><label><input is="emby-toggle" name="SyncEnabled" type="checkbox"><span class="toggleLabel">允许按 Emby 计划任务同步元数据</span></label></div>
+                        <div class="inputContainer fieldset-field"><input is="emby-input" name="CollectMetadataUrl" type="url" label="Collect Metadata 服务地址" aria-label="Collect Metadata 服务地址" placeholder="http://服务器:8080"></div>
+                        <div class="inputContainer fieldset-field"><input is="emby-input" name="SyncToken" type="password" label="同步令牌" aria-label="同步令牌" autocomplete="new-password" placeholder="已保存的令牌留空沿用"></div>
+                        <div class="checkboxContainer fieldset-field"><label><input is="emby-checkbox" name="ClearToken" type="checkbox"><span>清除已保存的同步令牌</span></label></div>
+                        <div class="fieldDescription sync-override" hidden></div>
+                    </div>
+                </fieldset>
+                <div>
+                    <p class="organizer-feedback fieldDescription" role="status" aria-live="polite"></p>
+                    <button is="emby-button" class="raised button-submit block" type="submit" name="Save" disabled><span>保存设置</span></button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>

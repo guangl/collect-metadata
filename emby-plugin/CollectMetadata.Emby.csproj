@@ -3,11 +3,14 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
-    <Version>0.2.0</Version>
-    <Description>Refresh metadata when movies and TV items are added to Emby.</Description>
+    <Version>0.4.0</Version>
+    <Description>Refresh metadata and optionally organize loose movies and episodes in Emby.</Description>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="MediaBrowser.Server.Core" Version="4.9.1.90" PrivateAssets="all" />
     <PackageReference Include="System.Memory" Version="4.6.3" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Web/settings.html;Web/settings.js" />
   </ItemGroup>
 </Project>

@@ -1,3 +1,4 @@
+export type EmbyScrapeScope = "series" | "episode";
 export type MediaType = "movie" | "series" | "av";
 export type MediaProvider = "wikidata" | "tvmaze" | "tmdb";
 export const providerLabels: Record<MediaProvider, string> = {
@@ -51,13 +52,54 @@ export interface EmbyInput {
 
 export interface EmbyWorkPreview {
   id: string;
-  kind: MediaType;
+  kind: "movie" | "series";
   title: string;
+  year: number | null;
+  original_title: string | null;
+  overview: string | null;
+  genres: string[];
+  rating: number | null;
+  runtime_minutes: number | null;
+  poster: string | null;
+  backdrop: string | null;
 }
 
-export interface EmbyLibrary {
+export interface EmbyLibraryPreview {
   id: string;
   name: string;
+  works: EmbyWorkPreview[];
+}
+
+export interface EmbyCredit {
+  id: string | null;
+  name: string;
+  role: "voice" | "actor" | "director" | "writer" | "producer" | "crew";
+  detail: string | null;
+  portrait: string | null;
+}
+
+export interface EmbySeriesPreview {
+  seasons: EmbySeasonPreview[];
+  partial: boolean;
+}
+
+export interface EmbySeasonPreview {
+  number: number | null;
+  title: string | null;
+  episodes: EmbyEpisodePreview[];
+}
+
+export interface EmbyEpisodePreview {
+  id: string;
+  number: number | null;
+  last_number: number | null;
+  title: string;
+  original_title: string | null;
+  overview: string | null;
+  date: string | null;
+  runtime_minutes: number | null;
+  rating: number | null;
+  image: string | null;
 }
 
 export interface OutputSettingsView {
@@ -96,6 +138,7 @@ export interface Fields {
   episodes?: Episode[];
   cover_url?: string;
   poster_url?: string;
+  backdrop_url?: string;
   description?: string;
   [name: string]: unknown;
 }
@@ -113,6 +156,7 @@ export interface LookupRecord {
   schema_version: number;
   query: string;
   media_type?: MediaType;
+  scope?: "episode";
   work_id?: string;
   fields: Fields;
   field_sources: Record<string, string | undefined>;
@@ -126,6 +170,7 @@ export interface Snapshot {
   code: string;
   title: string | null;
   media_type: MediaType;
+  scope?: "episode";
   original_languages: string[];
   collected_at: string;
   cover_url?: string | null;

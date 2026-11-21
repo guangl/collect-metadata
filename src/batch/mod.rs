@@ -3,12 +3,17 @@ mod folder;
 mod mounted;
 mod worker;
 
+use std::collections::HashSet;
+
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Collector, LookupResponse, MediaKind, MediaProvider, OutputReport,
+    Collector, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview, EmbyWorkPreview,
+    LookupResponse, MediaKind, MediaProvider, OutputReport,
     output::{ExportPlan, PreparedExport},
+    providers::media::emby::{EPISODE_QUERY_PREFIX, Emby},
 };
 
 pub use folder::{
@@ -26,6 +31,13 @@ pub struct BatchItemInput {
     pub query: String,
     #[serde(skip)]
     pub source_files: Vec<String>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbyScrapeScope {
+    Series,
+    Episode,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -172,10 +184,16 @@ impl Outcome {
     }
 }
 
+fn emby_batch_items(works: impl IntoIterator<Item = EmbyWorkPreview>) -> Vec<BatchItemInput> {
+    works.into_iter().map(|work| BatchItemInput {
+        kind: work.kind,
+        query: format!("emby:{}", work.id),
+        source_files: Vec::new(),
+    }).collect()
+}
+
 impl Collector {
-    fn emby_connection(
-        &self,
-    ) -> Result<std::sync::Arc<crate::providers::media::emby::Emby>, String> {
+    fn emby_connection(&self) -> Result<std::sync::Arc<Emby>, String> {
         self.emby_settings()
             .and_then(|settings| settings.connection())
             .ok_or_else(|| "请先在「设置 → 家庭 Emby」配置服务地址和 API 密钥。".into())
@@ -207,26 +225,94 @@ impl Collector {
         self.read_emby_library(id).await.map(|(_, works)| works)
     }
 
-    pub async fn import_emby_library(&self, id: &str) -> Result<i64, String> {
-        let store = self.require_store().await?;
-        let (library, works) = self.read_emby_library(id).await?;
-        let items = works
+    async fn read_emby_catalog(&self, emby: &Emby) -> Result<Vec<EmbyLibraryPreview>, String> {
+        let libraries = emby.libraries(&self.client).await?;
+        stream::iter(libraries.into_iter().map(|library| async move {
+            let works = emby
+                .library_entries(&self.client, &library.id)
+                .await
+                .map_err(|error| format!("{}：{error}", library.name))?;
+            Ok(EmbyLibraryPreview { library, works })
+        }))
+        .buffered(4)
+        .try_collect()
+        .await
+    }
+
+    pub async fn emby_catalog(&self) -> Result<Option<Vec<EmbyLibraryPreview>>, String> {
+        let Some(emby) = self
+            .emby_settings()
+            .and_then(|settings| settings.connection())
+        else {
+            return Ok(None);
+        };
+        self.read_emby_catalog(&emby).await.map(Some)
+    }
+
+    pub async fn emby_preview_image(
+        &self,
+        id: &str,
+        image: EmbyPreviewImage,
+    ) -> Option<(Vec<u8>, &'static str)> {
+        self.emby_connection()
+            .ok()?
+            .preview_image(&self.client, id, image)
+            .await
+    }
+
+    pub async fn emby_credits(&self, id: &str) -> Result<Vec<crate::EmbyCredit>, String> {
+        self.emby_connection()?.credits(&self.client, id).await
+    }
+
+    pub async fn emby_series_preview(&self, id: &str) -> Result<EmbySeriesPreview, String> {
+        self.emby_connection()?
+            .series_preview(&self.client, id)
+            .await
+    }
+
+    pub async fn import_emby_catalog(&self) -> Result<i64, String> {
+        let emby = self.emby_connection()?;
+        let libraries = self.read_emby_catalog(&emby).await?;
+        let mut seen = HashSet::new();
+        let works = libraries
             .into_iter()
-            .map(|work| BatchItemInput {
-                kind: work.kind,
-                query: format!("emby:{}", work.id),
+            .flat_map(|library| library.works)
+            .filter(|work| seen.insert(work.id.clone()));
+        self.save_emby_batch("Emby · 全部媒体库", emby_batch_items(works)).await
+    }
+
+    pub async fn import_emby_library(&self, id: &str) -> Result<i64, String> {
+        let (library, works) = self.read_emby_library(id).await?;
+        self.save_emby_batch(&format!("Emby · {}", library.name), emby_batch_items(works))
+            .await
+    }
+
+    pub async fn import_emby_item(&self, id: &str, scope: EmbyScrapeScope) -> Result<i64, String> {
+        let (item_type, prefix) = match scope {
+            EmbyScrapeScope::Series => ("Series", "emby:"),
+            EmbyScrapeScope::Episode => ("Episode", EPISODE_QUERY_PREFIX),
+        };
+        let title = self.emby_connection()?.scrape_title(&self.client, id, item_type).await?;
+        self.save_emby_batch(
+            &format!("Emby · {title}"),
+            vec![BatchItemInput {
+                kind: MediaKind::Series,
+                query: format!("{prefix}{id}"),
                 source_files: Vec::new(),
-            })
-            .collect::<Vec<_>>();
+            }],
+        ).await
+    }
+
+    async fn save_emby_batch(&self, name: &str, items: Vec<BatchItemInput>) -> Result<i64, String> {
+        let store = self.require_store().await?;
         if items.is_empty() {
             return Err("此媒体库没有可刮削的电影、剧集或私人影片。".into());
         }
         let settings = self.output_settings().ok_or("后台输出配置不可用。")?;
         let owner = settings.durable_owner()?;
         let export = settings.plan()?;
-        let name = format!("Emby · {}", library.name);
         store
-            .create_batch(items, false, Some(&name), export.as_ref(), Some(&owner))
+            .create_batch(items, false, Some(name), export.as_ref(), Some(&owner))
             .await
             .map_err(|_| "无法保存 Emby 导入批次。".into())
     }

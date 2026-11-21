@@ -8,3 +8,5 @@
 /coverage
 /emby-plugin/bin/
 /emby-plugin/obj/
+/emby-plugin-tests/bin/
+/emby-plugin-tests/obj/

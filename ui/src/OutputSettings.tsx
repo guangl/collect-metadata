@@ -85,15 +85,15 @@ export function OutputSettings() {
 
   const options = settings?.options;
   return (
-    <section className="settings-output" aria-labelledby="output-title">
+    <section className="space-y-3" aria-labelledby="output-title">
       <div className="section-heading"><h2 id="output-title">刮削输出</h2></div>
       {settings && options ? (
-        <form className="batch-form settings-form output-form" onSubmit={save}>
+        <form className="panel batch-form" onSubmit={save}>
           <label className="check-option"><input type="checkbox" checked={options.enabled}
             disabled={busy !== null} onChange={(event) => change("enabled", event.target.checked)} />写出刮削文件</label>
           <label className="batch-input" htmlFor="output-directory">输出路径</label>
-          <div className="output-directory">
-            <input id="output-directory" value={options.directory} readOnly={settings.root === null}
+          <div className="grid w-full gap-2 sm:flex sm:[&>button]:shrink-0">
+            <input className="field w-full" id="output-directory" value={options.directory} readOnly={settings.root === null}
               disabled={busy !== null} placeholder={settings.root === null ? "选择一个目录" : "留空写到挂载目录根部"}
               onChange={(event) => change("directory", event.target.value)} />
             {settings.root === null && <button className="secondary" type="button" disabled={busy !== null}
@@ -103,10 +103,10 @@ export function OutputSettings() {
           <fieldset className="output-naming" disabled={busy !== null}>
             <legend>输出命名</legend>
             <label className="batch-input" htmlFor="directory-name">作品目录名</label>
-            <input id="directory-name" value={options.directory_template} maxLength={160}
+            <input className="field w-full" id="directory-name" value={options.directory_template} maxLength={160}
               placeholder="work-{row}" onChange={(event) => change("directory_template", event.target.value)} />
             <label className="batch-input" htmlFor="filename-prefix">资料文件名前缀</label>
-            <input id="filename-prefix" value={options.filename_prefix} maxLength={160}
+            <input className="field w-full" id="filename-prefix" value={options.filename_prefix} maxLength={160}
               placeholder="例如 {title}" onChange={(event) => change("filename_prefix", event.target.value)} />
             <p className="muted">可用 <code>{"{title} {year} {id} {type} {row}"}</code>。Emby NFO 按视频名生成。</p>
             <output className="naming-preview">
@@ -115,7 +115,7 @@ export function OutputSettings() {
                 ? exampleName(options.directory_template) + "-7" : "work-7"}/{exampleName(options.filename_prefix) ? exampleName(options.filename_prefix) + "-" : ""}metadata.json</code>
             </output>
           </fieldset>
-          <div className="output-groups">
+          <div className="output-groups grid w-full gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <fieldset disabled={busy !== null}>
               <legend>元数据</legend>
               <label className="check-option"><input type="checkbox" checked={options.metadata}
@@ -158,7 +158,7 @@ export function OutputSettings() {
           </button>
         </form>
       ) : !message && <p className="muted" role="status">正在读取输出设置…</p>}
-      {message && <p className={message.error ? "batch-error output-feedback" : "muted output-feedback"}
+      {message && <p className={message.error ? "batch-error mt-2" : "muted mt-2"}
         role={message.error ? "alert" : "status"}>{message.text}</p>}
     </section>
   );

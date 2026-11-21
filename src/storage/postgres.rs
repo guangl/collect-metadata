@@ -19,6 +19,8 @@ pub struct HistoryItem {
     code: String,
     title: Option<String>,
     media_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
     original_languages: Vec<String>,
     cover_url: Option<String>,
     year: Option<i16>,
@@ -28,6 +30,7 @@ pub struct HistoryItem {
 // Only this fixed projection is interpolated into SQL. Values use bind parameters.
 const HISTORY_FIELDS: &str = "id, code, title,
     coalesce(document->>'media_type', 'av') as media_type,
+    document->>'scope' as scope,
     coalesce(document->'fields'->'original_languages', '[]'::jsonb) as original_languages,
     coalesce(nullif(document->'fields'->>'poster_url',''), nullif(document->'fields'->>'cover_url','')) as cover_url,
     CASE WHEN document->'fields'->>'release_date' ~ '^[0-9]{4}(-|$)'
@@ -206,6 +209,7 @@ fn history_item(row: &PgRow) -> HistoryItem {
         code: row.get("code"),
         title: row.get("title"),
         media_type: row.get("media_type"),
+        scope: row.get("scope"),
         original_languages: row
             .get::<sqlx::types::Json<Vec<String>>, _>("original_languages")
             .0,

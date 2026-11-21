@@ -71,7 +71,7 @@ impl Collector {
         } else {
             (claim.query.as_str(), None)
         };
-        let import = query.starts_with("emby:");
+        let import = query.starts_with("emby:") || query.starts_with(super::EPISODE_QUERY_PREFIX);
         let emby = self.emby_settings().and_then(|settings| {
             if import {
                 settings.connection()

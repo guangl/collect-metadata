@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
-import { chooseBatchCandidate, chooseMediaFolder, controlBatch, createBatch, createFolderBatch, getBatchFiles, getBatchResult, getBatchView, importEmby, isDesktop, listBatches, listEmbyLibraries, previewEmby, previewMountedFolder, retryBatchRow } from "../api";
+import { chooseBatchCandidate, chooseMediaFolder, controlBatch, createBatch, createFolderBatch, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, isDesktop, listBatches, previewMountedFolder, retryBatchRow } from "../api";
 import { languageText, PosterArt } from "../Catalog";
 import { DetailDialog } from "../DetailDialog";
 import { formatDate } from "../Movie";
 import { errorText, mediaLabels, providerLabels } from "../types";
-import type { Candidate, EmbyLibrary, EmbyWorkPreview, LookupResponse, MediaType, StorageStatus } from "../types";
+import type { Candidate, EmbyLibraryPreview, EmbyScrapeScope, LookupResponse, MediaType, StorageStatus } from "../types";
+import { EmbyCatalog } from "./EmbyCatalog";
 import { MountedFolderPicker } from "./MountedFolderPicker";
-import { MAX_FOLDER_FILES, MAX_ITEMS, parseBatch, terminal } from "./engine";
+import { AV_PREFIXES, MAX_FOLDER_FILES, MAX_ITEMS, parseBatch, terminal } from "./engine";
 import type { BatchAction, BatchRow, BatchStage, BatchStatus, BatchSummary, BatchView, FolderBatchResult, FolderSelection } from "./engine";
 
 const labels: Record<BatchStage, string> = {
@@ -38,10 +39,10 @@ function CandidateChoice({ candidates, busy, onChoose }: {
   const candidate = selected ? candidates[Number(selected)] : undefined;
   return (
     <>
-      <div className="batch-choice">
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
         <label className="filter">
           候选作品
-          <select value={selected} onChange={(event) => setSelected(event.target.value)}>
+          <select className="field" value={selected} onChange={(event) => setSelected(event.target.value)}>
             <option value="">请选择作品</option>
             {candidates.map((item, index) => (
               <option value={index} key={item.provider + item.id}>
@@ -76,7 +77,7 @@ function LinkedFiles({ batch, row }: { batch: number; row: BatchRow }) {
     }
   }
 
-  return <details className="linked-files" onToggle={(event) => {
+  return <details className="min-w-0 text-sm text-muted [&_ul]:my-2 [&_ul]:list-disc [&_ul]:ps-5 [&_ul]:font-mono [&_ul]:text-xs [overflow-wrap:anywhere]" onToggle={(event) => {
     if (event.currentTarget.open) void load();
   }}>
     <summary>{row.file_count} 个关联文件</summary>
@@ -88,12 +89,13 @@ function LinkedFiles({ batch, row }: { batch: number; row: BatchRow }) {
   </details>;
 }
 
-export function Batch({ active, storage, folderSelection, setFolderSelection, onConfigure, onNotice, onError }: {
+export function Batch({ active, storage, folderSelection, setFolderSelection, onConfigure, onConfigureEmby, onNotice, onError }: {
   active: boolean;
   storage: StorageStatus;
   folderSelection: FolderSelection | null;
   setFolderSelection: (selection: FolderSelection | null) => void;
   onConfigure?: () => void;
+  onConfigureEmby: () => void;
   onNotice: (message: string) => void;
   onError: (message: string) => void;
 }) {
@@ -114,27 +116,37 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const [folderResult, setFolderResult] = useState<FolderBatchResult | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
   const folderInput = useRef<HTMLInputElement>(null);
-  const [source, setSource] = useState<"folder" | "emby">("folder");
-  const [embyLibraries, setEmbyLibraries] = useState<EmbyLibrary[]>([]);
-  const [embyLibrary, setEmbyLibrary] = useState("");
-  const [embySelection, setEmbySelection] = useState<{ library: EmbyLibrary; works: EmbyWorkPreview[] } | null>(null);
-  const [embySubmitted, setEmbySubmitted] = useState(false);
-  const [loadingEmby, setLoadingEmby] = useState(false);
+  const [selectedSource, setSelectedSource] = useState<"folder" | "emby">();
+  const [embyResult, setEmbyResult] = useState<{ libraries: EmbyLibraryPreview[] | null } | { error: string }>();
+  const [embyRefresh, setEmbyRefresh] = useState(0);
+  const [embyImportError, setEmbyImportError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
 
-  async function refreshList(before: number | null = null) {
+  const refreshList = useCallback(async (before: number | null = null) => {
     const batches = await listBatches(before);
     setSummaries((previous) => before === null ? batches : [...previous, ...batches]);
     setOlder(batches.length === 50);
     setSelected((current) => current ?? batches[0]?.id ?? null);
     setListLoaded(true);
-  }
+  }, []);
 
   useEffect(() => {
     if (!active || storage !== "ready") return;
     refreshList().catch((error) => setError(errorText(error)));
-  }, [active, storage]);
+  }, [active, storage, refreshList]);
+
+  useEffect(() => {
+    if (!active || selectedSource === "folder") return;
+    let stopped = false;
+    setEmbyResult(undefined);
+    setEmbyImportError(null);
+    getEmbyCatalog().then(
+      (libraries) => { if (!stopped) setEmbyResult({ libraries }); },
+      (error) => { if (!stopped) setEmbyResult({ error: errorText(error) }); },
+    );
+    return () => { stopped = true; };
+  }, [active, selectedSource, embyRefresh]);
 
   useEffect(() => {
     setOpened(null);
@@ -174,10 +186,14 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const view = batch?.id === selected ? batch?.view : undefined;
   const rows = view?.rows ?? [];
   const openedRow = opened && rows.find((row) => row.id === opened.id);
+  const libraries = embyResult && "libraries" in embyResult ? embyResult.libraries : null;
+  const embyError = embyResult && "error" in embyResult ? embyResult.error : null;
+  const defaultSource = libraries || embyError ? "emby" : "folder";
+  const source = selectedSource ?? (embyResult && defaultSource);
   const preview = source === "folder" ? folderSelection?.preview : undefined;
-  const embyPreview = source === "emby" ? embySelection?.works : undefined;
-  const hasPreview = preview !== undefined || embyPreview !== undefined;
-  const previewCount = preview?.works.length ?? embyPreview?.length ?? 0;
+  const embyCount = useMemo(() => libraries ? new Set(
+    libraries.flatMap((library) => library.works.map((work) => work.id))
+  ).size : 0, [libraries]);
   const unrecognized = preview?.unrecognized ?? folderResult?.unrecognized ?? [];
   const failed = rows.filter((row) => row.stage === "failed").length;
   const ended = rows.filter(({ stage }) => terminal(stage)).length;
@@ -188,8 +204,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const unfinished = ended < rows.length;
   const canCancel = status !== "cancelled" && unfinished;
   const busy = action !== null || changing !== null;
-  const sourceBusy = scanning || loadingEmby || submitting;
-  const folderStep = hasPreview ? 2 : (source === "folder" ? folderResult?.id != null : embySubmitted) ? 3 : 1;
+  const sourceBusy = scanning || submitting;
 
   useEffect(() => {
     if (!active) setOpened(null);
@@ -308,56 +323,35 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     }
   }
 
-  async function loadEmby() {
-    if (sourceBusy) return;
-    setLoadingEmby(true);
-    setFolderError(null);
-    try {
-      const libraries = await listEmbyLibraries();
-      setEmbyLibraries(libraries);
-      setEmbyLibrary("");
-      setEmbySelection(null);
-      if (libraries.length === 0) setFolderError("Emby 没有返回可导入的媒体库。");
-    } catch (error) {
-      setFolderError(errorText(error));
-    } finally {
-      setLoadingEmby(false);
-    }
-  }
-
-  async function scanEmby() {
-    const library = embyLibraries.find((item) => item.id === embyLibrary);
-    if (!library || sourceBusy) return;
-    setScanning(true);
-    setFolderError(null);
-    try {
-      setEmbySelection({ library, works: await previewEmby(library.id) });
-      setEmbySubmitted(false);
-    } catch (error) {
-      setFolderError(errorText(error));
-    } finally {
-      setScanning(false);
-    }
-  }
-
-  async function submitEmby() {
-    if (!embySelection?.works.length || sourceBusy || storage !== "ready") return;
+  const queueEmby = useCallback(async (request: () => Promise<number>, notice: string) => {
+    if (sourceBusy || storage !== "ready") throw new Error("后台任务当前不可用。");
     setSubmitting(true);
-    setFolderError(null);
     setError(null);
     try {
-      const id = await importEmby(embySelection.library.id);
+      const id = await request();
       setSelected(id);
-      setEmbySelection(null);
-      setEmbySubmitted(true);
-      onNotice("已提交 Emby 媒体库，后台将逐项读取。");
+      onNotice(notice);
       await refreshList().catch((error) => setError(errorText(error)));
-    } catch (error) {
-      setFolderError(errorText(error));
+      return id;
     } finally {
       setSubmitting(false);
     }
+  }, [onNotice, refreshList, sourceBusy, storage]);
+
+  async function submitEmby() {
+    if (!embyCount || sourceBusy || storage !== "ready") return;
+    setEmbyImportError(null);
+    try {
+      await queueEmby(importEmbyCatalog, "已将 Emby 的全部媒体库提交到后台任务。");
+    } catch (error) {
+      setEmbyImportError(errorText(error));
+    }
   }
+
+  const submitEmbyItem = useCallback((id: string, scope: EmbyScrapeScope) => {
+    const label = scope === "episode" ? "分集" : "剧集";
+    return queueEmby(() => importEmbyItem(id, scope), `已将所选${label}提交到后台任务。`);
+  }, [queueEmby]);
 
   async function open(row: BatchRow, opener: HTMLButtonElement) {
     if (selected === null || busy) return;
@@ -373,35 +367,26 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   }
 
   return (
-    <section className="batch" aria-labelledby="batch-title">
-      <div className="page-heading">
-        <p className="eyebrow">媒体元数据</p>
+    <section aria-labelledby="batch-title">
+      <div className="page-heading flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
         <h1 id="batch-title">刮削工作台</h1>
-        <p>从文件夹或 Emby 媒体库导入作品，确认预览后交给后台刮削。</p>
+        <a className="text-sm" href="#queue-title">后台任务 <span aria-hidden="true">↓</span></a>
       </div>
-      {storage !== "ready" && <div className="batch-db-notice">
+      {storage !== "ready" && <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-dashed border-line p-3 text-sm text-muted">
         <p>{storage === "pending" ? "正在检查 PostgreSQL…" : "连接 PostgreSQL 后即可提交后台批次。"}</p>
         {onConfigure && <button className="secondary" type="button" onClick={onConfigure}>打开设置</button>}
       </div>}
-      <section className="batch-form folder-intake" aria-labelledby="intake-title">
-        <h2 id="intake-title">导入媒体</h2>
-        <ol className="folder-steps" role="list" aria-label="刮削步骤">
-          {["选择来源", "预览作品", "后台刮削"].map((label, index) =>
-            <li key={label} aria-current={folderStep === index + 1 ? "step" : undefined}>
-              <span className="step-number" aria-hidden="true">{index + 1}</span>{label}
-            </li>)}
-        </ol>
-        <fieldset className="media-source" disabled={sourceBusy}>
-          <legend>媒体来源</legend>
-          <label><input name="media-source" type="radio" checked={source === "folder"}
-            onChange={() => { setSource("folder"); setFolderError(null); }} />文件夹</label>
-          <label><input name="media-source" type="radio" checked={source === "emby"}
-            onChange={() => { setSource("emby"); setFolderError(null); }} />Emby Server</label>
-        </fieldset>
-        {source === "folder" ? <>
+      <fieldset className="media-source" aria-label="媒体来源" disabled={sourceBusy}>
+        <label><input name="media-source" type="radio" checked={source === "emby"}
+          onChange={() => setSelectedSource("emby")} /><span>Emby Server</span></label>
+        <label><input name="media-source" type="radio" checked={source === "folder"}
+          onChange={() => { setSelectedSource("folder"); setFolderError(null); }} /><span>文件夹</span></label>
+      </fieldset>
+      {source === undefined && <p className="catalog-empty" role="status">正在读取 Emby 媒体库…</p>}
+      {source === "folder" && <section className="panel batch-form" aria-label="文件夹导入">
           {!isDesktop && <input ref={folderInput} type="file" hidden multiple
             {...{ webkitdirectory: "" }} onChange={readFolder} />}
-          <div className="folder-buttons">
+          <div className="flex flex-wrap gap-2">
             <button className={preview ? "secondary" : "primary"} type="button" disabled={sourceBusy}
               onClick={chooseFolder}>{scanning ? "正在扫描…" : preview ? "更换媒体文件夹" : "选择媒体文件夹"}</button>
           </div>
@@ -409,100 +394,88 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
             <p className="muted">浏览器只提交文件名和相对路径。也可直接浏览服务端已挂载的网络共享。</p>
             <MountedFolderPicker busy={sourceBusy} onSelect={(path) => scan(() => previewMountedFolder(path))} />
           </>}
-          {folderSelection && <p className="folder-path muted">已选文件夹：<code>{folderSelection.folder}</code></p>}
-        </> : <>
-          <p className="muted">从「设置 → 家庭 Emby」已配置的服务器选择一个媒体库。</p>
-          <div className="folder-buttons">
-            <button type="button" className="secondary" disabled={sourceBusy}
-              onClick={loadEmby}>{loadingEmby ? "正在读取…" : "读取媒体库"}</button>
-            {embyLibraries.length > 0 && <>
-              <label className="filter">Emby 媒体库
-                <select value={embyLibrary} onChange={(event) => {
-                  setEmbyLibrary(event.target.value);
-                  setEmbySelection(null);
-                  setEmbySubmitted(false);
-                  setFolderError(null);
-                }} disabled={sourceBusy}>
-                  <option value="">选择媒体库</option>
-                  {embyLibraries.map((library) => <option key={library.id} value={library.id}>{library.name}</option>)}
-                </select>
-              </label>
-              <button type="button" className="secondary" disabled={!embyLibrary || sourceBusy}
-                onClick={scanEmby}>{scanning ? "正在预览…" : "预览所选媒体库"}</button>
-            </>}
-          </div>
-          {embySelection && <p className="muted">已选媒体库：{embySelection.library.name}</p>}
-        </>}
-        {hasPreview && <button className="secondary" type="button" disabled={sourceBusy}
-          onClick={() => {
-            if (source === "folder") setFolderSelection(null);
-            else setEmbySelection(null);
-            setFolderError(null);
-          }}>取消预览</button>}
-        {folderError && !hasPreview && <p className="batch-error" role="alert">{folderError}</p>}
-        {source === "folder" && folderResult && <p className="muted" role="status">
+          {folderSelection && <p className="muted">已选文件夹：<code>{folderSelection.folder}</code></p>}
+        {preview && <button className="secondary" type="button" disabled={sourceBusy}
+          onClick={() => { setFolderSelection(null); setFolderError(null); }}>取消预览</button>}
+        {folderError && !preview && <p className="batch-error" role="alert">{folderError}</p>}
+        {folderResult && <p className="muted" role="status">
           {folderResult.id === null
             ? "未识别到可刮削的作品。跳过 " + folderResult.skipped + " 个文件。"
             : "已提交 " + folderResult.works + " 部作品，关联 " + folderResult.files + " 个文件，跳过 " + folderResult.skipped + " 个文件。"}
         </p>}
-        {source === "folder" && unrecognized.length > 0 && <details className="linked-files">
+        {unrecognized.length > 0 && <details className="min-w-0 text-sm text-muted [&_ul]:my-2 [&_ul]:list-disc [&_ul]:ps-5 [&_ul]:font-mono [&_ul]:text-xs [overflow-wrap:anywhere]">
           <summary>查看未识别的视频</summary>
           <ul>{unrecognized.map((path) => <li key={path}>{path}</li>)}</ul>
         </details>}
-      </section>
-      {hasPreview && <section className="folder-preview" aria-labelledby="folder-preview-heading">
-        <div className="section-heading folder-preview-heading">
+      </section>}
+      {source === "emby" && <section className="min-w-0 space-y-3" aria-labelledby="emby-catalog-title" aria-busy={!embyResult}>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4">
+          <div>
+            <h2 id="emby-catalog-title" className="text-xl sm:text-2xl">Emby 媒体库</h2>
+            {libraries && <p className="muted mt-1" role="status">{libraries.length} 个媒体库 · {embyCount} 部作品</p>}
+          </div>
+          {embyResult && <div className="flex flex-wrap gap-2">
+            {!libraries && !embyError
+              ? <button className="secondary" type="button" onClick={onConfigureEmby}>配置 Emby</button>
+              : <button className="secondary" type="button" disabled={sourceBusy} onClick={() => {
+                setSelectedSource("emby");
+                setEmbyRefresh((value) => value + 1);
+              }}>刷新媒体库</button>}
+            {embyCount > 0 && <button className="primary" type="button" disabled={sourceBusy || storage !== "ready"}
+              onClick={submitEmby}>{submitting ? "正在提交…" : "开始刮削元数据"}</button>}
+          </div>}
+        </div>
+        {!embyResult && <p className="catalog-empty" role="status">正在读取 Emby 媒体库…</p>}
+        {embyError && <p className="batch-error" role="alert">{embyError}</p>}
+        {embyImportError && <p className="batch-error" role="alert">{embyImportError}</p>}
+        {embyResult && !libraries && !embyError && <p className="catalog-empty">连接 Emby 后会自动显示全部媒体库。</p>}
+        {libraries && (libraries.length > 0
+          ? <EmbyCatalog libraries={libraries} canScrape={!sourceBusy && storage === "ready"} onScrape={submitEmbyItem} />
+          : <p className="catalog-empty">Emby 尚无媒体库。</p>)}
+      </section>}
+      {preview && <section className="mt-5 min-w-0" aria-labelledby="folder-preview-heading">
+        <div className="section-heading items-center">
           <h2 id="folder-preview-heading">媒体海报预览</h2>
-          <button className="primary" type="button" disabled={previewCount === 0 || sourceBusy || storage !== "ready"}
-            onClick={source === "folder" ? startFolderBatch : submitEmby}>{submitting ? "正在提交…" : "开始刮削元数据"}</button>
+          <button className="primary" type="button" disabled={preview.works.length === 0 || sourceBusy || storage !== "ready"}
+            onClick={startFolderBatch}>{submitting ? "正在提交…" : "开始刮削元数据"}</button>
         </div>
         {folderError && <p className="batch-error" role="alert">{folderError}</p>}
-        <p className="muted" role="status">{preview ?
-          `识别到 ${previewCount} 部作品，关联 ${preview.files} 个文件，跳过 ${preview.skipped} 个文件。` :
-          `Emby 媒体库中有 ${previewCount} 部作品。`}</p>
-        {previewCount > 0 ? <>
-          <p className="muted">{preview ? "当前仅按文件名整理。" : "当前仅从 Emby 读取片名。"}开始刮削后会填入封面和元数据。</p>
-          <ul className="poster-grid folder-posters" role="list" aria-label="待刮削作品">
-            {preview?.works.map((work) => <li className="poster-card" key={work.kind + ":" + work.query}>
-              <PosterArt title={work.query} />
+        <p className="muted" role="status">{`识别到 ${preview.works.length} 部作品，关联 ${preview.files} 个文件，跳过 ${preview.skipped} 个文件。`}</p>
+        {preview.works.length > 0 ?
+          <ul className="poster-grid" role="list" aria-label="待刮削作品">
+            {preview.works.map((work) => <li className="poster-card" key={work.kind + ":" + work.query}>
+              <PosterArt />
               <div className="poster-caption">
                 <strong title={work.query}>{work.query}</strong>
                 <span>{mediaLabels[work.kind]} · {work.file_count} 个文件</span>
               </div>
             </li>)}
-            {embyPreview?.map((work) => <li className="poster-card" key={work.id}>
-              <PosterArt title={work.title} />
-              <div className="poster-caption">
-                <strong title={work.title}>{work.title}</strong>
-                <span>{mediaLabels[work.kind]} · Emby</span>
-              </div>
-            </li>)}
           </ul>
-        </> : <p className="catalog-empty">{preview ? "未识别到可刮削的作品。请更换文件夹。" : "此媒体库没有可刮削的电影、剧集或私人影片。"}</p>}
+        : <p className="catalog-empty">未识别到可刮削的作品。请更换文件夹。</p>}
       </section>}
-      <details className="manual-intake">
+      <details className="mt-4 text-sm [&>summary]:text-muted">
       <summary>手动输入作品</summary>
-      <form className="batch-form" onSubmit={submit}>
+      <form className="panel batch-form mt-2" onSubmit={submit}>
         <label className="filter">默认类型
-          <select value={kind} onChange={(event) => setKind(event.target.value as MediaType)}>
+          <select className="field" value={kind} onChange={(event) => setKind(event.target.value as MediaType)}>
             {(Object.keys(mediaLabels) as MediaType[]).map((type) => (
               <option key={type} value={type}>{mediaLabels[type]}</option>
             ))}
           </select>
         </label>
         <label className="batch-input" htmlFor="batch-input">作品清单</label>
-        <textarea id="batch-input" value={input} onChange={(event) => setInput(event.target.value)}
-          placeholder={"电影：寄生虫\n剧集：Dark\n番号：ABC-123"} rows={5}
+        <textarea className="field" id="batch-input" value={input} onChange={(event) => setInput(event.target.value)}
+          placeholder={"电影：寄生虫\n剧集：Dark\n有码番号：ABC-123\nFC2番号：FC2-PPV-1234567"} rows={5}
           aria-describedby="batch-guide" spellCheck={false} />
-        <p id="batch-guide" className="muted">每行一条，最多 {MAX_ITEMS} 条。添加「电影：」「剧集：」或「番号：」可混合采集。提交后可关闭页面。</p>
+        <p id="batch-guide" className="muted">每行一条，最多 {MAX_ITEMS} 条。可用「电影：」「剧集：」「番号：」前缀混合采集。AV 也可用 {AV_PREFIXES.join("、")} 作前缀，冒号后填写完整番号。</p>
         <button className="primary" type="submit" disabled={submitting || scanning || !input.trim() || storage !== "ready"}>
           {submitting ? "正在提交…" : "提交后台采集"}
         </button>
       </form>
       </details>
-      <section className="batch-queue" aria-labelledby="queue-title">
+      <section className="panel mt-6" aria-labelledby="queue-title">
       <div className="section-heading">
-        <h2 id="queue-title">后台任务</h2>
+        <h2 id="queue-title" className="scroll-mt-5">后台任务</h2>
         {storage === "ready" && <button className="secondary" type="button" onClick={() => {
           setError(null);
           refreshList().catch((error) => setError(errorText(error)));
@@ -514,9 +487,9 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
         storage === "pending" || (storage === "ready" && !listLoaded) ? "正在读取后台批次…" :
           storage === "ready" ? "暂无后台任务。提交刮削后，可以在这里查看进度。" : "连接 PostgreSQL 后可查看后台任务。"
       }</p>}
-      {summaries.length > 0 && <div className="batch-jobs">
+      {summaries.length > 0 && <div className="my-3 flex flex-wrap items-center gap-x-3 gap-y-2">
         <label className="filter">已提交批次
-          <select value={selected ?? ""} onChange={(event) => setSelected(Number(event.target.value))}>
+          <select className="field" value={selected ?? ""} onChange={(event) => setSelected(Number(event.target.value))}>
             {summaries.map((batch) => (
               <option key={batch.id} value={batch.id}>#{batch.id}{batch.folder_name && " · " + batch.folder_name} · {formatDate(batch.created_at)} · {batch.total} 条{batch.status !== "running" && " · " + batchLabels[batch.status]}</option>
             ))}
@@ -526,7 +499,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
           onClick={() => refreshList(summaries.at(-1)?.id).catch((error) => setError(errorText(error)))}>更早批次</button>}
       </div>}
       {view && rows.length > 0 && <>
-        <div className="batch-actions">
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
           <strong className="batch-state" data-status={view.status}>
             {view.status === "running" && !unfinished ? "已结束" : batchLabels[view.status]}
           </strong>
@@ -539,14 +512,14 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
           {view.status !== "cancelled" && <button className="secondary" type="button" disabled={busy || failed === 0}
             onClick={() => updateBatch("retry_failed")}>重试全部失败条目{failed > 0 && "（" + failed + "）"}</button>}
         </div>
-        {canCancel && confirmCancel && <div className="batch-cancel-confirm">
+        {canCancel && confirmCancel && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-canvas p-3 text-sm">
           <p>取消后会停止未完成的条目，并保留已采集的结果。</p>
           <button className="secondary batch-cancel" type="button" disabled={busy}
             onClick={() => updateBatch("cancel")}>确认取消</button>
           <button className="secondary" type="button" disabled={busy}
             onClick={() => setConfirmCancel(false)}>返回</button>
         </div>}
-        <div className="batch-progress">
+        <div className="mb-4 mt-5 [&_progress]:block [&_progress]:h-2.5 [&_progress]:w-full">
           <div className="section-heading">
             <h2>采集进度</h2>
             <span aria-live="polite">已结束 {ended} / {rows.length}
@@ -556,29 +529,29 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
           </div>
           <progress value={ended} max={rows.length} aria-label="批次采集进度" />
         </div>
-        {active && opened && openedRow && <DetailDialog response={opened.response} kind={openedRow.kind}
+        {active && opened && openedRow && <DetailDialog response={opened.response}
           opener={opened.opener} closeLabel="收起结果" onDismiss={() => setOpened(null)} />}
-        <ol className="poster-grid batch-list" role="list" aria-label="批次作品海报">
+        <ol className="poster-grid" role="list" aria-label="批次作品海报">
           {rows.map((row) => {
             const title = row.title || row.query || "缺少作品名称或番号";
             return <li className="batch-row" aria-label={row.query || "空条目"} key={row.id}>
               {row.has_result ? <button className="batch-poster" type="button"
                 aria-label={"打开 " + title + " 的详情"} aria-haspopup="dialog"
                 disabled={busy} onClick={(event) => open(row, event.currentTarget)}>
-                <PosterArt url={row.cover_url} title={title} />
-              </button> : <PosterArt url={row.cover_url} title={title} />}
-              <div className="batch-card-body">
-                <div className="batch-item-label">
+                <PosterArt url={row.cover_url} />
+              </button> : <PosterArt url={row.cover_url} />}
+              <div className="grid min-w-0 gap-2 p-2.5">
+                <div className="min-w-0 [overflow-wrap:anywhere]">
                   <h3>{title}</h3>
-                  <p className="muted batch-result-line">{mediaLabels[row.kind]}{row.title && " · " + languageText(row.original_languages)}</p>
+                  <p className="muted mt-1">{row.query.startsWith("emby-episode:") ? "分集" : mediaLabels[row.kind]}{row.title && " · " + languageText(row.original_languages)}</p>
                 </div>
-                <div className="batch-controls">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="batch-status" data-stage={row.stage}>{labels[row.stage]}</span>
                   {view.status !== "cancelled" && (row.stage === "failed" || row.stage === "not_found") && row.query &&
                     <button className="secondary" type="button" disabled={busy} onClick={() => changeRow(row)}>重试</button>}
                 </div>
-                {row.message && <p className="muted batch-item-note">{row.message}</p>}
-                {row.output && <div className="batch-output">
+                {row.message && <p className="muted">{row.message}</p>}
+                {row.output && <div className="muted">
                   {row.output.directory && <p>已写出 {row.output.written} 项资料 · <code>{row.output.directory}</code></p>}
                   {row.output.message && <p className="batch-error">{row.output.message}</p>}
                 </div>}

@@ -49,11 +49,11 @@ export function Database({ storage, onStorage, onConnected }: {
   return (
     <section aria-labelledby="database-title">
       <div className="section-heading"><h2 id="database-title">PostgreSQL</h2></div>
-      <form className="batch-form settings-form" onSubmit={save}>
+      <form className="panel batch-form" onSubmit={save}>
         <p className="muted">{storageLabels[storage]}</p>
         {isDesktop ? <>
           <label htmlFor="database-url" className="batch-input">PostgreSQL 连接地址</label>
-          <input id="database-url" type="password" autoComplete="off" spellCheck={false}
+          <input className="field w-full" id="database-url" type="password" autoComplete="off" spellCheck={false}
             placeholder="postgresql://用户名:密码@主机:端口/数据库"
             value={url} onChange={(event) => { setUrl(event.target.value); setMessage(null); }}
             disabled={action !== null} />

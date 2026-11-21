@@ -9,14 +9,15 @@ pub use collect::{
 };
 pub use output::{OutputOptions, OutputReport, OutputSettings, OutputSettingsView};
 pub use providers::media::emby::{
-    EmbyInput, EmbyLibrary, EmbySettings, EmbySettingsView, EmbyWorkPreview,
+    EmbyCredit, EmbyInput, EmbyLibrary, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview, EmbySettings,
+    EmbySettingsView, EmbyWorkPreview,
 };
 pub use providers::media::{MediaKind, MediaProvider, SearchResult};
 pub use storage::HistoryItem;
 
 pub use batch::{
     BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice,
-    FolderBatchResult, FolderPreview, FolderSelection, FolderWorkPreview, MAX_FOLDER_FILES,
+    EmbyScrapeScope, FolderBatchResult, FolderPreview, FolderSelection, FolderWorkPreview, MAX_FOLDER_FILES,
     preview_folder,
 };
 #[cfg(feature = "web")]

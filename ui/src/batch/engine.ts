@@ -1,7 +1,9 @@
 import type { Candidate, MediaType, OutputReport } from "../types";
 
 export const MAX_ITEMS = 100;
-const types = { "电影": "movie", "剧集": "series", "番号": "av", "av": "av" } as const;
+export const AV_PREFIXES = ["有码番号", "无码番号", "素人番号", "FC2番号", "欧美番号", "国产番号", "动漫里番", "mywife"];
+const types = new Map<string, MediaType>([["电影", "movie"], ["剧集", "series"]]);
+for (const label of ["番号", "av", ...AV_PREFIXES]) types.set(label.toLowerCase(), "av");
 
 export interface BatchInput {
   kind: MediaType;
@@ -70,11 +72,11 @@ export function parseBatch(input: string, defaultType: MediaType): BatchInput[] 
   if (lines.length > MAX_ITEMS) throw new Error("每批最多 " + MAX_ITEMS + " 条，请分批输入。");
 
   return lines.map((line) => {
-    const prefix = /^(电影|剧集|番号|av)\s*[:：]\s*/i.exec(line);
-    return {
-      kind: prefix ? types[prefix[1].toLowerCase() as keyof typeof types] : defaultType,
-      query: prefix ? line.slice(prefix[0].length).trim() : line,
-    };
+    const prefix = /^([^:：]+)[:：]/.exec(line);
+    const kind = prefix && types.get(prefix[1].normalize("NFKC").trim().toLowerCase());
+    return kind && prefix
+      ? { kind, query: line.slice(prefix[0].length).trim() }
+      : { kind: defaultType, query: line };
   });
 }
 

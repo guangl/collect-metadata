@@ -2,8 +2,10 @@ import type { BatchAction, BatchInput, BatchSummary, BatchView, FolderBatchResul
 import type {
   Candidate,
   EmbyInput,
-  EmbyLibrary,
-  EmbyWorkPreview,
+  EmbyLibraryPreview,
+  EmbyScrapeScope,
+  EmbySeriesPreview,
+  EmbyCredit,
   EmbySettingsView,
   LookupResponse,
   MediaType,
@@ -140,16 +142,34 @@ export function saveEmby(input: EmbyInput): Promise<EmbySettingsView> {
   return invoke ? invoke("save_emby", { input }) : post("/api/settings/emby", input);
 }
 
-export function listEmbyLibraries(): Promise<EmbyLibrary[]> {
-  return invoke ? invoke("emby_libraries") : request("/api/emby/libraries", { cache: "no-store" });
+export function getEmbyCatalog(): Promise<EmbyLibraryPreview[] | null> {
+  return invoke ? invoke("emby_catalog") : request("/api/emby/catalog", { cache: "no-store" });
 }
 
-export function previewEmby(library: string): Promise<EmbyWorkPreview[]> {
-  return invoke ? invoke("preview_emby", { library }) : post("/api/emby/preview", library);
+export function importEmbyCatalog(): Promise<number> {
+  return invoke ? invoke("import_emby_catalog") : post("/api/emby/import-all", null);
 }
 
-export function importEmby(library: string): Promise<number> {
-  return invoke ? invoke("import_emby", { library }) : post("/api/emby/import", library);
+export function importEmbyItem(id: string, scope: EmbyScrapeScope): Promise<number> {
+  return invoke ? invoke("import_emby_item", { id, scope }) :
+    post(`/api/emby/items/${encodeURIComponent(id)}/scrape`, scope);
+}
+
+export function getEmbySeries(id: string): Promise<EmbySeriesPreview> {
+  return invoke ? invoke("emby_series_preview", { id }) :
+    request("/api/emby/series/" + encodeURIComponent(id), { cache: "no-store" });
+}
+
+export function getEmbyCredits(id: string): Promise<EmbyCredit[]> {
+  return invoke ? invoke("emby_credits", { id }) : request(`/api/emby/credits/${encodeURIComponent(id)}`, { cache: "no-store" });
+}
+
+export type EmbyImage = "poster" | "backdrop" | "episode" | "portrait";
+
+export async function loadEmbyImage(id: string, image: EmbyImage): Promise<string> {
+  if (!invoke) throw new Error("Emby 图片暂不可用。");
+  const bytes = await invoke<ArrayBuffer | number[]>("emby_preview_image", { id, image });
+  return URL.createObjectURL(new Blob([Array.isArray(bytes) ? Uint8Array.from(bytes) : bytes]));
 }
 
 export function saveOutputSettings(options: OutputOptions): Promise<OutputSettingsView> {

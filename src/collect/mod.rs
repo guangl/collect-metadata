@@ -143,7 +143,10 @@ impl Collector {
         year: Option<u16>,
     ) -> Option<LookupResponse> {
         let (id, source) = source.find(&self.client, kind, query, year).await?;
-        let lookup = make_lookup(kind, query, Some(&format!("Emby-{id}")), vec![source]).ok()?;
+        let mut lookup = make_lookup(kind, query, Some(&format!("Emby-{id}")), vec![source]).ok()?;
+        if query.starts_with(media::emby::EPISODE_QUERY_PREFIX) {
+            lookup.record["scope"] = serde_json::json!("episode");
+        }
         Some(
             self.localize_lookup(lookup, self.languages.targets(None))
                 .await,

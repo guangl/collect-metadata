@@ -4,6 +4,7 @@ import { App } from "../src/main";
 import { configureDatabase, getBatchView } from "../src/api";
 import { parseBatch, terminal } from "../src/batch/engine";
 import type { BatchRow } from "../src/batch/engine";
+import type { EmbyEpisodePreview, EmbyLibraryPreview } from "../src/types";
 import { safeUrl, languageName } from "../src/Catalog";
 
 const title = "寄生虫";
@@ -29,9 +30,8 @@ function response(data: unknown, status = 200) {
   return new Response(status === 204 ? null : JSON.stringify(data), { status });
 }
 
-function harness(initialRows: BatchRow[] = [], hasStorage = true) {
+function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: EmbyLibraryPreview[] | null = null) {
   const handle = vi.fn<(route: string, options?: RequestInit) => Promise<Response>>();
-  let libraries = 0;
   let storage = storageOptions;
   let rows = initialRows;
   let status = "running";
@@ -53,9 +53,10 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true) {
     if (route === "/api/history/languages") return response(["ko"]);
     if (route.startsWith("/api/history?")) return response(route.includes("before=") ? [] :
       route.includes("kind=series") ? [] : Array.from({ length: 50 }, (_, n) => n ? { ...saved, id: n + 9, title: "影片 " + n } : saved));
-    if (route === "/api/emby/libraries") {
-      libraries += 1;
-      return response(libraries === 1 ? [] : [{ id: "12", name: "测试库" }]);
+    if (route === "/api/emby/catalog") return response(libraries);
+    if (/^\/api\/emby\/items\/\d+\/scrape$/.test(route) && options?.method === "POST") {
+      id = 9;
+      return response(id, 201);
     }
     if (route.startsWith("/api/media-folders?")) {
       const path = new URL(route, "http://fixture.test").searchParams.get("path");
@@ -64,12 +65,11 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true) {
     if (route === "/api/media-folders") return response({ folder: `服务器共享目录 / ${body}`,
       paths: [`${body}/Movie.mkv`], preview: { works: [{ kind: "movie", query: "NAS 作品", file_count: 1 }],
         files: 1, skipped: 0, unrecognized: [] } });
-    if (route === "/api/emby/preview") return response([{ id: "30", kind: "movie", title: "Emby 电影" }]);
     if (route === "/api/folder-preview") {
       return response({ works: [{ kind: "movie", query: "文件夹中的电影", file_count: 1 }], files: 1,
         skipped: 1, unrecognized: ["媒体/未知.mkv"] });
     }
-    if (["/api/emby/import", "/api/folder-batches"].includes(route) || (route === "/api/batches" && body)) {
+    if (["/api/emby/import-all", "/api/folder-batches"].includes(route) || (route === "/api/batches" && body)) {
       id = 9;
       status = "running";
       return response(route === "/api/folder-batches"
@@ -123,7 +123,7 @@ beforeEach(() => {
   // jsdom doesn't implement the native dialog top layer.
   Object.defineProperties(HTMLDialogElement.prototype, {
     showModal: { configurable: true, value(this: HTMLDialogElement) { this.open = true; } },
-    close: { configurable: true, value(this: HTMLDialogElement) { this.open = false; } },
+    close: { configurable: true, value(this: HTMLDialogElement) { this.open = false; this.dispatchEvent(new Event("close")); } },
   });
 });
 afterEach(() => {
@@ -188,17 +188,21 @@ describe("海报与详情", () => {
     expect(screen.getByText("剧情简介")).toBeTruthy();
     expect(screen.getByText("132 分钟")).toBeTruthy();
     expect(screen.getByText("8 / 10 · 20 人评价")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "季与分集" }));
     const episodes = screen.getByText("分集列表", { exact: false }).closest("details")!;
     episodes.open = true;
     fireEvent(episodes, new Event("toggle"));
     await screen.findByText("第一集");
     setLabel("元数据语言", "ja");
     await screen.findByRole("heading", { name: "パラサイト" });
-    expect(screen.getByText("剧情简介")).toBeTruthy();
     await screen.findByText("第1話");
+    fireEvent.click(screen.getByRole("tab", { name: "简介与资料" }));
+    expect(screen.getByText("剧情简介")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "季与分集" }));
     setLabel("元数据语言", "zh-CN");
     setLabel("按季查看", "0");
     await screen.findByRole("link", { name: "额外内容" });
+    fireEvent.click(screen.getByRole("tab", { name: "数据来源" }));
     const source = screen.getByRole("heading", { name: "TMDB", exact: true }).closest("details")!;
     source.open = true;
     details("查看来源 JSON");
@@ -296,6 +300,8 @@ describe("设置", () => {
     await screen.findByText("Emby 媒体库读取成功。");
     click("保存 Emby 设置");
     await screen.findByText("已保存 Emby 设置。");
+    expect(screen.getByRole("link", { name: "打开 Emby 自动整理设置" }).getAttribute("href"))
+      .toBe("https://emby.example.test/web/index.html#!/configurationpage?name=collectmetadata");
     click(/打开设置，PostgreSQL/);
     click("测试当前数据库");
     await screen.findByText("PostgreSQL 连接测试成功。");
@@ -356,7 +362,7 @@ describe("后台批次", () => {
   it("浏览服务器挂载目录，预览后才提交共享文件", async () => {
     const calls = harness();
     render(<App />);
-    click("浏览服务器挂载目录");
+    fireEvent.click(await screen.findByRole("button", { name: "浏览服务器挂载目录" }));
     await screen.findByLabelText("子目录");
     setLabel("子目录", "NAS 电影");
     click("打开子目录");
@@ -376,7 +382,7 @@ describe("后台批次", () => {
     expect(JSON.parse(String(submission?.[1]?.body))).toEqual(["NAS 电影/Movie.mkv"]);
   });
 
-  it("提交文件夹、手动列表和 Emby，并处理暂停、继续、取消", async () => {
+  it("提交文件夹和手动列表，并处理暂停、继续、取消", async () => {
     const calls = harness([{ ...item, stage: "queued", has_result: false, file_count: 0, output: null }]);
     const { container } = render(<App />);
     await screen.findByRole("button", { name: "暂停批次" });
@@ -415,19 +421,93 @@ describe("后台批次", () => {
     setLabel("默认类型", "av");
     click("提交后台采集");
     await waitFor(() => expect(calls.mock.calls.some(([route, options]) => route === "/api/batches" && options?.method === "POST")).toBe(true));
-    fireEvent.click(screen.getByRole("radio", { name: "Emby Server" }));
-    expect(screen.queryByRole("button", { name: "选择媒体文件夹" })).toBeNull();
-    click("读取媒体库");
-    await screen.findByText("Emby 没有返回可导入的媒体库。");
-    click("读取媒体库");
-    await screen.findByLabelText("Emby 媒体库");
-    setLabel("Emby 媒体库", "12");
-    click("预览所选媒体库");
-    const embyPosters = await screen.findByRole("list", { name: "待刮削作品" });
-    expect(within(embyPosters).getByTitle("Emby 电影")).toBeTruthy();
-    expect(calls.mock.calls.some(([route]) => route === "/api/emby/import")).toBe(false);
+  });
+
+  it("切换 Emby 媒体库和详情标签，读取演职员头像并锁定背景滚动",  async () => {
+    const film = { id: "30", kind: "movie" as const, title: "Emby 电影", year: 2019,
+      original_title: "Poster Movie", overview: "Emby 已有剧情简介", genres: ["悬疑"], rating: 8.5,
+      runtime_minutes: 120, poster: "fixture", backdrop: "wide" };
+    const calls = harness([], true, [
+      { id: "12", name: "电影馆", works: [film] },
+      { id: "13", name: "剧集馆", works: [{ ...film, id: "31", title: "Emby 剧集", kind: "series", poster: null }] },
+      { id: "14", name: "空媒体库", works: [] },
+    ]);
+    const episode: EmbyEpisodePreview = { id: "34", number: 1, last_number: null, title: "第一集",
+      original_title: "First Episode", overview: "这是第一集的简介。", date: "2017-12-01",
+      runtime_minutes: 43, rating: 9.2, image: "still" };
+    const defaultRequest = calls.getMockImplementation()!;
+    calls.mockImplementation((route, options) => route === "/api/emby/series/31"
+      ? Promise.resolve(response({ partial: false, seasons: [
+        { number: 1, title: "第一季", episodes: [episode] },
+        { number: 2, title: "第二季", episodes: [{ ...episode, id: "35", title: "回归", overview: "这是第二季第一集的简介。" }] },
+      ] }))
+      : route === "/api/emby/credits/30"
+        ? Promise.resolve(response([
+          { id: "99", name: "测试导演", role: "director", detail: null, portrait: "director" },
+          { id: "98", name: "测试声优", role: "voice", detail: "主角", portrait: "voice" },
+        ]))
+        : defaultRequest(route, options));
+    const { container } = render(<App />);
+    const filmButton = await screen.findByRole("button", { name: /^Emby 电影/ });
+    const filmPanel = screen.getByRole("tabpanel", { name: "电影馆" });
+    expect(filmPanel.hasAttribute("tabindex")).toBe(false);
+    expect(within(filmPanel).getAllByRole("button")[0]).toBe(filmButton);
+    expect(filmButton.tabIndex).toBe(0);
+    expect(screen.getByRole("radio", { name: "Emby Server" })).toHaveProperty("checked", true);
+    expect(screen.getByRole("tab", { name: "剧集馆" }).getAttribute("aria-selected")).toBe("false");
+    expect(screen.getByRole("tab", { name: "空媒体库" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "剧集馆" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Emby 剧集/ })).toBeNull();
+    expect(screen.getByText("3 个媒体库 · 2 部作品")).toBeTruthy();
+    expect(filmButton.querySelector("img")?.getAttribute("src")).toBe("/api/emby/images/30/poster?v=fixture");
+    expect(calls.mock.calls.some(([route]) => route.startsWith("/api/emby/credits/"))).toBe(false);
+    expect(calls.mock.calls.some(([route]) => route === "/api/emby/import-all")).toBe(false);
+
+    fireEvent.click(filmButton);
+    const detail = screen.getByRole("dialog", { name: "Emby 电影" });
+    expect(within(detail).getByText("Emby 已有剧情简介")).toBeTruthy();
+    expect(detail.querySelector(".work-backdrop img")?.getAttribute("src")).toBe("/api/emby/images/30/backdrop?v=wide");
+    expect(document.documentElement.style.overflow).toBe("hidden");
+    fireEvent.click(within(detail).getByRole("tab", { name: "演职员" }));
+    const director = await within(detail).findByText("测试导演");
+    expect(director.closest("li")?.querySelector("img")?.getAttribute("src")).toBe("/api/emby/images/99/portrait?v=director");
+    expect(within(detail).getByRole("heading", { name: "声优" })).toBeTruthy();
+    expect(within(detail).getByText("测试声优")).toBeTruthy();
+    expect(within(detail).queryByText("Emby 已有剧情简介")).toBeNull();
+    click("关闭详情");
+    expect(container.querySelector("dialog")).toBeNull();
+    expect(document.documentElement.style.overflow).toBe("");
+    expect(calls.mock.calls.some(([route]) => route.startsWith("/api/emby/series/"))).toBe(false);
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: "电影馆" }), { key: "ArrowRight" });
+    expect(screen.queryByRole("button", { name: /^Emby 电影/ })).toBeNull();
+    expect(button(/^Emby 剧集/).querySelector("img")).toBeNull();
+    click(/^Emby 剧集/);
+    click("刮削此剧集");
+    await screen.findByText("已提交后台任务 #9。");
+    expect(calls.mock.calls.find(([route]) => route === "/api/emby/items/31/scrape")?.[1]?.body).toBe('"series"');
+    fireEvent.click(screen.getByRole("tab", { name: "季与分集" }));
+    await screen.findByRole("heading", { name: "季与分集" });
+    fireEvent.click(await screen.findByRole("button", { name: "第 2 季" }));
+    const episodeButton = button(/回归/);
+    fireEvent.click(episodeButton);
+    const episodeDetail = screen.getByRole("dialog", { name: "回归" });
+    expect(within(episodeDetail).getByText("这是第二季第一集的简介。")).toBeTruthy();
+    expect(within(episodeDetail).getByText("2017-12-01")).toBeTruthy();
+    expect(episodeDetail.querySelector(".episode-detail img")?.getAttribute("src")).toBe("/api/emby/images/35/episode?v=still");
+    fireEvent.click(within(episodeDetail).getByRole("button", { name: "刮削此分集" }));
+    await within(episodeDetail.querySelector(".episode-detail")!).findByText("已提交后台任务 #9。");
+    expect(calls.mock.calls.find(([route]) => route === "/api/emby/items/35/scrape")?.[1]?.body).toBe('"episode"');
+    click(/返回分集/);
+    expect(button("第 2 季").getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(episodeButton);
+    click("关闭详情");
     click("开始刮削元数据");
-    await screen.findByText(/已提交 Emby 媒体库/);
+    await screen.findByText(/已将 Emby 的全部媒体库提交/);
+    expect(calls.mock.calls.filter(([route]) => route === "/api/emby/import-all")).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: "电影馆" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "空媒体库" }));
+    expect(screen.getByRole("tabpanel", { name: "空媒体库" }).tabIndex).toBe(0);
   });
 });
 

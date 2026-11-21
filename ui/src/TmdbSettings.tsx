@@ -61,10 +61,10 @@ export function TmdbSettings({ onError }: { onError: (message: string) => void }
   return (
     <section aria-labelledby="tmdb-title">
       <div className="section-heading"><h2 id="tmdb-title">TMDB</h2></div>
-      <form className="batch-form settings-form" onSubmit={save}>
+      <form className="panel batch-form" onSubmit={save}>
         <p className="muted">{status ? labels[status] : "正在读取 TMDB 配置…"}</p>
         <label htmlFor="tmdb-credential" className="batch-input">TMDB API 凭据</label>
-        <input id="tmdb-credential" type="password" autoComplete="off" spellCheck={false}
+        <input className="field w-full" id="tmdb-credential" type="password" autoComplete="off" spellCheck={false}
           placeholder="API Read Access Token 或 v3 API Key" maxLength={8192}
           value={credential} onChange={(event) => { setCredential(event.target.value); setMessage(null); }}
           disabled={action !== null} />

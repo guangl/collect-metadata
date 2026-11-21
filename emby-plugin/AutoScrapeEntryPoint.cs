@@ -38,6 +38,7 @@ public sealed class AutoScrapeEntryPoint : IServerEntryPoint
 
     private void OnItemAdded(object? sender, ItemChangeEventArgs args)
     {
+        if (Plugin.Instance?.Configuration.AutoRefreshEnabled == false) return;
         var item = args.Item;
         if ((item is not (Movie or Series or Season or Episode) && item.GetType() != typeof(Video))
             || item.InternalId <= 0 || item.IsVirtualItem || item.IsLocked || item.ExtraType.HasValue)

@@ -46,6 +46,10 @@ public sealed class SyncLibraryTask : IScheduledTask
     public string Category => Plugin.PluginName;
     public string Description => "Send movie, series, season and episode metadata to Collect Metadata.";
 
+    internal static bool ValidServiceUrl(string? value, out Uri? uri) => Uri.TryCreate(value, UriKind.Absolute, out uri)
+        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+        && uri.UserInfo.Length == 0 && uri.Query.Length == 0 && uri.Fragment.Length == 0;
+
     private string? PreferredLanguage(BaseItem item)
     {
         var options = library.GetLibraryOptions(item);
@@ -68,19 +72,18 @@ public sealed class SyncLibraryTask : IScheduledTask
     public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
     {
         var config = Plugin.Instance?.Configuration;
+        if (config?.SyncEnabled == false) return;
         var service = Environment.GetEnvironmentVariable("COLLECT_METADATA_URL") ?? config?.CollectMetadataUrl;
         var token = Environment.GetEnvironmentVariable("EMBY_SYNC_TOKEN") ?? config?.SyncToken;
         if (string.IsNullOrWhiteSpace(service) && string.IsNullOrWhiteSpace(token))
         {
             return; // Optional integration; automatic scraping works on its own.
         }
-        if (string.IsNullOrWhiteSpace(token) || !Uri.TryCreate(service, UriKind.Absolute, out var baseUri)
-            || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)
-            || baseUri.UserInfo.Length != 0 || baseUri.Query.Length != 0 || baseUri.Fragment.Length != 0)
+        if (string.IsNullOrWhiteSpace(token) || !ValidServiceUrl(service, out var baseUri))
         {
             throw new InvalidOperationException("Configure the Collect Metadata HTTP(S) service URL and sync token.");
         }
-        var endpoint = new Uri(baseUri.AbsoluteUri.TrimEnd('/') + "/api/emby/sync/" + Uri.EscapeDataString(serverId));
+        var endpoint = new Uri(baseUri!.AbsoluteUri.TrimEnd('/') + "/api/emby/sync/" + Uri.EscapeDataString(serverId));
         var options = new DtoOptions(new[]
         {
             ItemFields.Overview, ItemFields.OriginalTitle, ItemFields.ExternalUrls, ItemFields.Genres,

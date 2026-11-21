@@ -5,7 +5,7 @@ use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
 use super::BatchItemInput;
-use crate::MediaKind;
+use crate::{MediaKind, collect::Identifier};
 
 pub const MAX_FOLDER_FILES: usize = 30_000;
 const MAX_PATH_BYTES: usize = 6 * 1024 * 1024;
@@ -138,11 +138,8 @@ static TRAILING_YEAR: LazyLock<Regex> =
     LazyLock::new(|| pattern(r"^(.*?) \(((?:19[0-9]|20[0-3])[0-9])\)$"));
 static ID: LazyLock<Regex> =
     LazyLock::new(|| pattern(r"(?i)\b(?:tmdb[-_:= ]+)([1-9][0-9]{0,9})\b"));
-static NUMBERED_AV: LazyLock<Regex> = LazyLock::new(|| {
-    pattern(
-        r"(?i)^\s*(?:(fc2)[ _.-]*(?:ppv[ _.-]*)?([0-9]{4,10})|([a-z]{2,8})[-_－]([0-9]{3,6}))(?:$|[^a-z0-9])",
-    )
-});
+static NUMBERED_AV: LazyLock<Regex> =
+    LazyLock::new(|| pattern(r"(?i)^\s*([a-z]{2,8})[-_－]([0-9]{3,6})(?:$|[^a-z0-9])"));
 static COMPACT_AV: LazyLock<Regex> =
     LazyLock::new(|| pattern(r"^([A-Z]{2,8})([0-9]{3,6})(?:$|[^A-Za-z0-9])"));
 static LEADING_TAG: LazyLock<Regex> =
@@ -357,13 +354,13 @@ fn generic_file(value: &str) -> bool {
 }
 
 fn av_code(stem: &str) -> Option<String> {
+    if let Some(code) = Identifier::special_filename(stem) {
+        return Some(code);
+    }
     if let Some(found) = NUMBERED_AV.captures(stem) {
-        if let Some(fc) = found.get(2) {
-            return Some(format!("FC2-PPV-{}", fc.as_str()));
-        }
-        let digits = &found[4];
+        let digits = &found[2];
         if !year_digits(digits) {
-            return Some(format!("{}-{digits}", found[3].to_ascii_uppercase()));
+            return Some(format!("{}-{digits}", found[1].to_ascii_uppercase()));
         }
     }
     let found = COMPACT_AV.captures(stem)?;
@@ -501,6 +498,47 @@ mod tests {
         assert_eq!(get("SSIS-001").source_files.len(), 2);
         assert_eq!(get("FC2-PPV-1234567").kind, MediaKind::Av);
         assert_eq!(info.unrecognized, ["Media/films/123.mp4"]);
+    }
+
+    #[test]
+    fn recognizes_special_av_formats_in_files_and_directories() {
+        for (dir, stem, expected) in [
+            ("AV", "ABP-123.1080p", "ABP-123"),
+            ("AV", "010124_123.1080p", "010124-123"),
+            ("AV", "300mium001-1080p", "300MIUM-001"),
+            ("AV", "[Release] ＦＣ２ ＰＰＶ 1234567", "FC2-PPV-1234567"),
+            ("AV", "Brazzers.24.01.31.1080p", "BRAZZERS-24-01-31"),
+            ("AV", "md001", "MD-001"),
+            ("AV", "rj123456-1080p", "RJ-123456"),
+            ("My Wife 0123", "video", "MYWIFE-0123"),
+        ] {
+            assert_eq!(
+                identify(&[dir], stem),
+                Some((MediaKind::Av, expected.into()))
+            );
+        }
+        for stem in [
+            "2024-01-31",
+            "999999-123",
+            "FC2PPV1234567extra",
+            "Brazzers.24.99.99",
+        ] {
+            assert!(!matches!(
+                identify(&["movies"], stem),
+                Some((MediaKind::Av, _))
+            ));
+        }
+        assert_eq!(
+            identify(&["Show"], "RJ123456 S01E01"),
+            Some((MediaKind::Series, "RJ123456".into()))
+        );
+        let preview = preview_folder(vec![
+            "AV/FC2_1234567.mkv".into(),
+            "AV/FC2-PPV-1234567.mp4".into(),
+        ])
+        .unwrap();
+        assert_eq!(preview.works.len(), 1);
+        assert_eq!(preview.works[0].file_count, 2);
     }
 
     #[test]

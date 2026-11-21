@@ -1,0 +1,344 @@
+import { memo, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { MouseEvent, PointerEvent, ReactNode } from "react";
+import { getEmbyCredits, getEmbySeries, isDesktop, loadEmbyImage } from "../api";
+import { Tabs } from "../Tabs";
+import type { EmbyImage } from "../api";
+import { errorText, mediaLabels } from "../types";
+import type { EmbyCredit, EmbyEpisodePreview, EmbyLibraryPreview, EmbyScrapeScope, EmbySeasonPreview, EmbySeriesPreview, EmbyWorkPreview } from "../types";
+
+const artworkClasses: Record<EmbyImage, string> = {
+  poster: "poster-art",
+  backdrop: "work-backdrop",
+  episode: "episode-art",
+  portrait: "credit-art",
+};
+
+function EmbyArtwork({ id, tag, image, eager = false }: {
+  id: string;
+  tag: string | null;
+  image: EmbyImage;
+  eager?: boolean;
+}) {
+  const host = useRef<HTMLSpanElement>(null);
+  const [localUrl, setLocalUrl] = useState<string>();
+  const [failed, setFailed] = useState<string>();
+  const src = tag && (isDesktop ? localUrl :
+    `/api/emby/images/${encodeURIComponent(id)}/${image}?v=${encodeURIComponent(tag)}`);
+
+  useEffect(() => {
+    if (!isDesktop || !tag || !host.current) return;
+    let stopped = false;
+    let url: string | undefined;
+    async function load() {
+      try {
+        url = await loadEmbyImage(id, image);
+        if (stopped) URL.revokeObjectURL(url);
+        else setLocalUrl(url);
+      } catch {
+        if (!stopped) setLocalUrl(undefined);
+      }
+    }
+
+    let observer: IntersectionObserver | undefined;
+    if (eager || typeof IntersectionObserver === "undefined") {
+      void load();
+    } else {
+      observer = new IntersectionObserver(([entry]) => {
+        if (entry.isIntersecting) {
+          observer?.disconnect();
+          void load();
+        }
+      }, { rootMargin: "160px" });
+      observer.observe(host.current);
+    }
+    return () => {
+      stopped = true;
+      observer?.disconnect();
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [id, image, tag, eager]);
+
+  return <span ref={host} className={artworkClasses[image]} aria-hidden="true">
+    {image !== "backdrop" && <span className="poster-placeholder">{image === "poster" ? "无海报" : image === "portrait" ? "无头像" : "无剧照"}</span>}
+    {src && failed !== src && <img src={src} alt="" loading={eager ? "eager" : "lazy"} decoding="async"
+      onError={() => setFailed(src)} />}
+  </span>;
+}
+
+function seasonLabel(season: EmbySeasonPreview) {
+  if (season.number === 0) return "特别篇";
+  if (season.number === null) return "未分季";
+  return `第 ${season.number} 季`;
+}
+
+function episodeLabel(episode: EmbyEpisodePreview) {
+  const { number, last_number } = episode;
+  if (number === null) return "未编号";
+  return last_number != null && last_number > number ? `第 ${number}–${last_number} 集` : `第 ${number} 集`;
+}
+
+function SeriesEpisodes({ id, onOpen }: {
+  id: string;
+  onOpen: (episode: EmbyEpisodePreview, season: EmbySeasonPreview, button: HTMLButtonElement) => void;
+}) {
+  const heading = useId();
+  const [result, setResult] = useState<EmbySeriesPreview>();
+  const [selectedSeason, setSelectedSeason] = useState<number>();
+  const [attempt, setAttempt] = useState(0);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    let active = true;
+    setError(undefined);
+    setResult(undefined);
+    getEmbySeries(id).then(
+      (series) => { if (active) setResult(series); },
+      (error) => { if (active) setError(errorText(error)); },
+    );
+    return () => { active = false; };
+  }, [id, attempt]);
+
+  const seasons = result?.seasons ?? [];
+  const firstRegular = seasons.findIndex((season) => (season.number ?? 0) > 0 && season.episodes.length > 0);
+  const firstAvailable = seasons.findIndex((season) => season.episodes.length > 0);
+  const index = selectedSeason ?? (firstRegular >= 0 ? firstRegular : Math.max(firstAvailable, 0));
+  const season = seasons[index];
+  const episodeCount = seasons.reduce((count, item) => count + item.episodes.length, 0);
+
+  return <section className="series-episodes" aria-labelledby={heading}>
+    <div className="section-heading justify-start">
+      <h3 id={heading}>季与分集</h3>
+      {episodeCount > 0 && <span>{episodeCount} 集</span>}
+    </div>
+    {error && <p className="batch-error" role="alert">{error}</p>}
+    {result?.partial && <p className="muted" role="status">部分分集暂未读取。</p>}
+    {(error || result?.partial) && <button className="secondary" type="button" onClick={() => {
+      setSelectedSeason(undefined);
+      setAttempt((value) => value + 1);
+    }}>重新读取分集</button>}
+    {!result && !error && <p className="muted" role="status">正在读取 Emby 分集…</p>}
+    {result && !seasons.length && <p className="muted">Emby 暂无分集。</p>}
+    {season && <>
+      <div className="my-3 flex flex-wrap gap-2" role="group" aria-label="按季查看">
+        {seasons.map((item, position) => <button type="button" className="season-button"
+          key={item.number ?? "unassigned"} aria-pressed={position === index}
+          title={item.title ?? undefined} onClick={() => setSelectedSeason(position)}>{seasonLabel(item)}</button>)}
+      </div>
+      {season.episodes.length ? <ol className="grid gap-1">
+        {season.episodes.map((episode) => <li key={episode.id}>
+          <button type="button" className="episode-preview"
+            onClick={(event) => onOpen(episode, season, event.currentTarget)}>
+            <EmbyArtwork id={episode.id} tag={episode.image} image="episode" />
+            <span className="episode-preview-caption">
+              <span className="episode-meta">{[episodeLabel(episode), episode.runtime_minutes && `${episode.runtime_minutes} 分钟`].filter(Boolean).join(" · ")}</span>
+              <strong>{episode.title}</strong>
+            </span>
+            <span className="episode-chevron" aria-hidden="true">›</span>
+          </button>
+        </li>)}
+      </ol> : <p className="muted">这季暂时没有分集。</p>}
+    </>}
+  </section>;
+}
+
+const creditRoles: [EmbyCredit["role"], string][] = [
+  ["voice", "声优"], ["actor", "演员"], ["director", "导演"], ["writer", "编剧"], ["producer", "制片人"], ["crew", "其他幕后人员"],
+];
+
+export function EmbyCredits({ id, fallback }: { id: string; fallback?: ReactNode }) {
+  const [people, setPeople] = useState<EmbyCredit[]>();
+  const [error, setError] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setError(undefined);
+    setPeople(undefined);
+    getEmbyCredits(id).then((credits) => { if (active) setPeople(credits); }, (reason) => { if (active) setError(errorText(reason)); });
+    return () => { active = false; };
+  }, [id, attempt]);
+  if (error) return <><div className="work-panel"><p className="batch-error" role="alert">{error}</p>
+    <button className="secondary" type="button" onClick={() => setAttempt((count) => count + 1)}>重新读取演职员</button></div>{fallback}</>;
+  if (!people) return <p className="work-panel muted" role="status">正在读取演职员…</p>;
+  if (!people.length) return fallback ?? <p className="work-panel muted">Emby 未提供该条目的演职员资料。</p>;
+  return <div className="work-panel grid gap-5">
+    {creditRoles.map(([role, label]) => {
+      const group = people.filter((person) => person.role === role);
+      return group.length > 0 && <section key={role} aria-label={label}>
+        <h3 className="mb-2 text-base">{label}</h3>
+        <ul className="credit-grid grid grid-cols-credits gap-2.5 sm:grid-cols-credits-wide sm:gap-3" role="list">{group.map((person, index) => <li key={`${person.id ?? person.name}-${index}`}>
+          <EmbyArtwork id={person.id ?? ""} tag={person.id ? person.portrait : null} image="portrait" />
+          <strong>{person.name}</strong>{person.detail && <span>{person.detail}</span>}
+        </li>)}</ul>
+      </section>;
+    })}
+  </div>;
+}
+
+type ScrapeControls = {
+  canScrape: boolean;
+  onScrape: (id: string, scope: EmbyScrapeScope) => Promise<number>;
+};
+
+function ScrapeItem({ id, scope, canScrape, onScrape }: ScrapeControls & {
+  id: string;
+  scope: EmbyScrapeScope;
+}) {
+  const [pending, setPending] = useState(false);
+  const [feedback, setFeedback] = useState<{ message: string; error?: boolean }>();
+  const label = scope === "episode" ? "刮削此分集" : "刮削此剧集";
+
+  async function scrape() {
+    if (pending || !canScrape) return;
+    setPending(true);
+    setFeedback(undefined);
+    try {
+      const batch = await onScrape(id, scope);
+      setFeedback({ message: `已提交后台任务 #${batch}。` });
+    } catch (error) {
+      setFeedback({ message: errorText(error), error: true });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return <div className="mt-3 space-y-2">
+    <button className="primary" type="button" onClick={scrape} disabled={pending || !canScrape}>
+      {pending ? "正在提交…" : label}
+    </button>
+    {feedback && <p className={feedback.error ? "batch-error" : "muted"} role={feedback.error ? "alert" : "status"}>
+      {feedback.message}
+    </p>}
+  </div>;
+}
+
+function clickedBackdrop(event: MouseEvent<HTMLDialogElement> | PointerEvent<HTMLDialogElement>) {
+  if (event.target !== event.currentTarget) return false;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  return event.clientX < bounds.left || event.clientX >= bounds.right
+    || event.clientY < bounds.top || event.clientY >= bounds.bottom;
+}
+
+function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeControls & {
+  work: EmbyWorkPreview;
+  library: string;
+  onClose: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const pressedBackdrop = useRef(false);
+  const title = useId();
+  const episodeTitle = useId();
+  const back = useRef<HTMLButtonElement>(null);
+  const origin = useRef<{ button: HTMLButtonElement; scroll: number }>(null);
+  const [selected, setSelected] = useState<{ episode: EmbyEpisodePreview; season: EmbySeasonPreview }>();
+  useLayoutEffect(() => {
+    const frame = dialog.current;
+    if (!frame) return;
+    const page = document.documentElement;
+    const overflow = page.style.overflow;
+    frame.showModal();
+    page.style.overflow = "hidden";
+    return () => { page.style.overflow = overflow; if (frame.open) frame.close(); };
+  }, []);
+  useLayoutEffect(() => {
+    if (!dialog.current) return;
+    if (selected) {
+      dialog.current.scrollTop = 0;
+      back.current?.focus({ preventScroll: true });
+    } else if (origin.current) {
+      dialog.current.scrollTop = origin.current.scroll;
+      origin.current.button.focus({ preventScroll: true });
+      origin.current = null;
+    }
+  }, [selected]);
+  const facts = [mediaLabels[work.kind], work.year, work.runtime_minutes && `${work.runtime_minutes} 分钟`]
+    .filter(Boolean).join(" · ");
+
+  function close() {
+    dialog.current?.close();
+    onClose();
+  }
+
+  return <dialog className="work-preview" aria-labelledby={selected ? episodeTitle : title} ref={dialog}
+    onCancel={(event) => { event.preventDefault(); close(); }}
+    onPointerDown={(event) => { pressedBackdrop.current = clickedBackdrop(event); }}
+    onClick={(event) => {
+      const dismiss = pressedBackdrop.current && clickedBackdrop(event);
+      pressedBackdrop.current = false;
+      if (dismiss) close();
+    }}>
+    <div className="sticky top-0 z-10 h-0">
+      <button type="button" className="work-preview-close" aria-label="关闭详情" onClick={close}>×</button>
+    </div>
+    <div hidden={!!selected}>
+      <div className="work-hero">
+        {work.backdrop && <EmbyArtwork id={work.id} tag={work.backdrop} image="backdrop" eager />}
+        <div className="detail-poster"><EmbyArtwork id={work.id} tag={work.poster} image="poster" eager /></div>
+        <div className="movie-intro">
+          <p className="work-context">{library}</p>
+          <h2 id={title}>{work.title}</h2>
+          {work.original_title && work.original_title !== work.title && <p className="work-original">{work.original_title}</p>}
+          <div className="work-meta">
+            <span>{facts}</span>
+            {work.rating != null && <span className="work-rating" aria-label={`评分 ${work.rating}，满分 10`}>★ {work.rating.toFixed(1)}</span>}
+          </div>
+          {!!work.genres.length && <p className="work-genres">{work.genres.join(" / ")}</p>}
+          {work.kind === "series" && <ScrapeItem id={work.id} scope="series" canScrape={canScrape} onScrape={onScrape} />}
+        </div>
+      </div>
+      <Tabs label="作品资料" className="work-tabs" tabs={[
+        { id: "overview", label: "简介", content: <div className="work-panel"><p className="movie-description">{work.overview || "Emby 暂无剧情简介。"}</p></div> },
+        ...(work.kind === "series" ? [{ id: "episodes", label: "季与分集", retain: true, content: <SeriesEpisodes id={work.id} onOpen={(episode, season, button) => {
+          origin.current = { button, scroll: dialog.current?.scrollTop ?? 0 };
+          setSelected({ episode, season });
+        }} /> }] : []),
+        { id: "credits", label: "演职员", retain: true, content: <EmbyCredits id={work.id} /> },
+      ]} />
+    </div>
+    {selected && <section className="episode-detail px-4 pb-8 pt-4 sm:px-7 sm:pt-6" aria-labelledby={episodeTitle}>
+      <button className="episode-back mb-3 me-12" type="button" ref={back} onClick={() => setSelected(undefined)}>← 返回分集</button>
+      <p className="work-context">{[work.title, seasonLabel(selected.season), episodeLabel(selected.episode)].join(" · ")}</p>
+      <h2 id={episodeTitle}>{selected.episode.title}</h2>
+      {selected.episode.original_title && selected.episode.original_title !== selected.episode.title &&
+        <p className="work-original">{selected.episode.original_title}</p>}
+      <ScrapeItem key={selected.episode.id} id={selected.episode.id} scope="episode" canScrape={canScrape} onScrape={onScrape} />
+      <Tabs label="分集资料" className="mt-4" tabs={[{ id: "details", label: "分集简介", content: <div className="mt-4 grid items-start gap-4 sm:grid-cols-[minmax(0,45fr)_minmax(0,55fr)] sm:gap-5">
+        <EmbyArtwork id={selected.episode.id} tag={selected.episode.image} image="episode" eager />
+        <div>
+          <dl className="episode-facts">
+            {selected.episode.date && <div><dt>首播</dt><dd><time dateTime={selected.episode.date}>{selected.episode.date}</time></dd></div>}
+            {selected.episode.runtime_minutes != null && <div><dt>时长</dt><dd>{selected.episode.runtime_minutes} 分钟</dd></div>}
+            {selected.episode.rating != null && <div><dt>评分</dt><dd className="work-rating">{selected.episode.rating.toFixed(1)} / 10</dd></div>}
+          </dl>
+          <p className="movie-description">{selected.episode.overview || "Emby 暂无本集简介。"}</p>
+        </div>
+      </div> }, { id: "credits", label: "本集演职员", retain: true, content: <EmbyCredits id={selected.episode.id} /> }]} />
+    </section>}
+  </dialog>;
+}
+
+export const EmbyCatalog = memo(function EmbyCatalog({ libraries, canScrape, onScrape }: ScrapeControls & { libraries: EmbyLibraryPreview[] }) {
+  const [selected, setSelected] = useState<{ work: EmbyWorkPreview; library: string }>();
+
+  return <div className="min-w-0">
+    <Tabs label="Emby 媒体库" className="mt-3" tabs={libraries.map((library) => ({ id: library.id, label: library.name,
+      panelFocusable: library.works.length === 0,
+      content: <section className="py-4 sm:py-6" aria-labelledby={`emby-library-${library.id}`}>
+      <div className="section-heading justify-start [overflow-wrap:anywhere]">
+        <h3 id={`emby-library-${library.id}`}>{library.name}</h3>
+        <span>{library.works.length} 部</span>
+      </div>
+      {library.works.length ? <ul className="grid grid-cols-library gap-x-3 gap-y-4 sm:grid-cols-library-wide sm:gap-4" role="list">
+        {library.works.map((work) => <li className="min-w-0" key={work.id}>
+          <button type="button" className="emby-tile" onClick={() => setSelected({ work, library: library.name })}>
+            <EmbyArtwork key={work.poster} id={work.id} tag={work.poster} image="poster" />
+            <span className="emby-tile-caption">
+              <strong title={work.title}>{work.title}</strong>
+              <span>{[work.year, mediaLabels[work.kind]].filter(Boolean).join(" · ")}</span>
+            </span>
+          </button>
+        </li>)}
+      </ul> : <p className="muted">这个媒体库没有可刮削的电影、剧集或私人影片。</p>}
+    </section> }))} />
+    {selected && <WorkPreview {...selected} canScrape={canScrape} onScrape={onScrape} onClose={() => setSelected(undefined)} />}
+  </div>;
+});

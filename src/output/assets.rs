@@ -4,7 +4,7 @@ use reqwest::{Client, Response, Url, header};
 use serde_json::Value;
 
 use super::settings::{OutputOptions, PortraitRole as Role};
-use crate::providers::media::emby::Emby;
+use crate::providers::media::emby::{Emby, credit_role};
 
 pub(super) struct Asset {
     pub(super) url: Url,
@@ -152,8 +152,12 @@ fn emby_assets(emby: &Emby, data: &Value, options: &OutputOptions) -> Vec<Asset>
         }
     };
     let item = &data["item"];
-    if options.poster && item["ImageTags"]["Primary"].is_string() {
-        insert(&item["Id"], "Primary", "poster", None);
+    if item["ImageTags"]["Primary"].is_string() {
+        if item["Type"] == "Episode" && options.stills {
+            insert(&item["Id"], "Primary", "still", None);
+        } else if options.poster {
+            insert(&item["Id"], "Primary", "poster", None);
+        }
     }
     if options.backdrop && entries(&item["BackdropImageTags"]).next().is_some() {
         insert(&item["Id"], "Backdrop", "backdrop", None);
@@ -167,11 +171,12 @@ fn emby_assets(emby: &Emby, data: &Value, options: &OutputOptions) -> Vec<Asset>
         }
     }
     let roles = entries(&item["People"]).filter_map(|credit| {
-        let role = match credit["Type"].as_str()? {
-            "Actor" if voice_character(&credit["Role"]) => Role::Voice,
-            "Actor" => Role::Actor,
-            "VoiceActor" | "Voice" => Role::Voice,
-            job => crew_role(job),
+        let role = match credit_role(item, credit) {
+            "voice" => Role::Voice,
+            "actor" => Role::Actor,
+            "director" => Role::Director,
+            "writer" => Role::Writer,
+            _ => Role::Crew,
         };
         (options.portraits.contains(&role) && credit["PrimaryImageTag"].is_string())
             .then_some((credit, role))
@@ -345,7 +350,7 @@ pub(super) async fn public_response(
     None
 }
 
-async fn image_bytes(mut response: Response) -> Option<(Vec<u8>, &'static str)> {
+pub(crate) async fn image_bytes(mut response: Response) -> Option<(Vec<u8>, &'static str)> {
     const LIMIT: usize = 12 * 1024 * 1024;
     let mut data = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {

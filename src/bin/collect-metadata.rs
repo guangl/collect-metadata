@@ -15,10 +15,11 @@ use std::{
 use collect_metadata::scan_folder_paths;
 use collect_metadata::{
     BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice, Collector,
-    EmbyInput, EmbyLibrary, EmbySettings, EmbySettingsView, EmbyWorkPreview, FolderBatchResult,
-    FolderSelection, HistoryItem, LanguageSettings, LanguageSettingsView, LookupResponse,
-    MediaKind, MediaProvider, OutputOptions, OutputSettings, OutputSettingsView, SearchResult,
-    TmdbSettings, TmdbStatus, scan_native_folder,
+    EmbyInput, EmbyLibrary, EmbyLibraryPreview, EmbyPreviewImage, EmbyScrapeScope, EmbySeriesPreview, EmbySettings,
+    EmbySettingsView, EmbyWorkPreview, FolderBatchResult, FolderSelection, HistoryItem,
+    LanguageSettings, LanguageSettingsView, LookupResponse, MediaKind, MediaProvider,
+    OutputOptions, OutputSettings, OutputSettingsView, SearchResult, TmdbSettings, TmdbStatus,
+    scan_native_folder,
 };
 use serde_json::Value;
 use tauri::{
@@ -130,6 +131,54 @@ async fn preview_emby(
 #[tauri::command]
 async fn import_emby(state: State<'_, DesktopState>, library: String) -> Result<i64, String> {
     state.collector().import_emby_library(&library).await
+}
+
+#[tauri::command]
+async fn emby_catalog(
+    state: State<'_, DesktopState>,
+) -> Result<Option<Vec<EmbyLibraryPreview>>, String> {
+    state.collector().emby_catalog().await
+}
+
+#[tauri::command]
+async fn import_emby_catalog(state: State<'_, DesktopState>) -> Result<i64, String> {
+    state.collector().import_emby_catalog().await
+}
+
+#[tauri::command]
+async fn import_emby_item(
+    state: State<'_, DesktopState>,
+    id: String,
+    scope: EmbyScrapeScope,
+) -> Result<i64, String> {
+    state.collector().import_emby_item(&id, scope).await
+}
+
+#[tauri::command]
+async fn emby_preview_image(
+    state: State<'_, DesktopState>,
+    id: String,
+    image: EmbyPreviewImage,
+) -> Result<tauri::ipc::Response, String> {
+    let (bytes, _) = state
+        .collector()
+        .emby_preview_image(&id, image)
+        .await
+        .ok_or("Emby 图片暂不可用。")?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+async fn emby_credits(state: State<'_, DesktopState>, id: String) -> Result<Vec<collect_metadata::EmbyCredit>, String> {
+    state.collector().emby_credits(&id).await
+}
+
+#[tauri::command]
+async fn emby_series_preview(
+    state: State<'_, DesktopState>,
+    id: String,
+) -> Result<EmbySeriesPreview, String> {
+    state.collector().emby_series_preview(&id).await
 }
 
 #[tauri::command]
@@ -482,6 +531,12 @@ fn main() {
             emby_libraries,
             preview_emby,
             import_emby,
+            emby_catalog,
+            import_emby_catalog,
+            import_emby_item,
+            emby_preview_image,
+            emby_series_preview,
+            emby_credits,
             test_emby,
             save_emby,
             save_output_settings,

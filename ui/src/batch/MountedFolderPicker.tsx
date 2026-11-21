@@ -24,17 +24,17 @@ export function MountedFolderPicker({ busy, onSelect }: { busy: boolean; onSelec
   }
 
   const disabled = busy || loading;
-  return <div className="mounted-folders">
+  return <div className="grid w-full min-w-0 grid-cols-1 justify-items-start gap-2">
     {!folder ? <button className="secondary" type="button" disabled={disabled} onClick={() => browse("")}>
       {loading ? "正在读取挂载目录…" : "浏览服务器挂载目录"}
     </button> : <>
-      <p className="folder-path muted">挂载目录：<code>共享目录{folder.path && " / " + folder.path}</code></p>
-      <div className="folder-buttons">
+      <p className="muted">挂载目录：<code>共享目录{folder.path && " / " + folder.path}</code></p>
+      <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
         {folder.path && <button className="secondary" type="button" disabled={disabled}
           onClick={() => browse(folder.path.split("/").slice(0, -1).join("/"))}>上一级</button>}
         {folder.children.length > 0 && <>
           <label className="filter">子目录
-            <select value={child} onChange={(event) => setChild(event.target.value)} disabled={disabled}>
+            <select className="field" value={child} onChange={(event) => setChild(event.target.value)} disabled={disabled}>
               <option value="">选择子目录</option>
               {folder.children.map((name) => <option key={name} value={name}>{name}</option>)}
             </select>

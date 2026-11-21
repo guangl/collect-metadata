@@ -38,10 +38,10 @@ export function LanguageSettings() {
     }
   }
 
-  return <section className="settings-output" aria-labelledby="metadata-languages-title">
+  return <section className="space-y-3" aria-labelledby="metadata-languages-title">
     <div className="section-heading"><h2 id="metadata-languages-title">元数据语言</h2></div>
     <p className="muted">按选择顺序排列，第一项用于默认显示及 NFO。可多选（最多 8 项），不选则使用简体中文。Emby 插件同步时优先使用 Emby 的元数据语言。</p>
-    {languages && <form className="batch-form settings-form output-form" onSubmit={save}>
+    {languages && <form className="panel batch-form" onSubmit={save}>
       <fieldset className="output-naming" disabled={busy}>
         <legend>目标语言</legend>
         {[...new Set([...choices, ...languages])].map((code) => {
@@ -56,7 +56,7 @@ export function LanguageSettings() {
         })}
       </fieldset>
       {languages.length > 1 && <label className="batch-input">首选语言
-        <select value={languages[0]} disabled={busy} onChange={(event) => {
+        <select className="field" value={languages[0]} disabled={busy} onChange={(event) => {
           const code = event.target.value;
           setLanguages([code, ...languages.filter((language) => language !== code)]);
           setMessage(null);

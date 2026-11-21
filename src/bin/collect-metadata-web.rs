@@ -8,9 +8,10 @@ use axum::{
     routing::{get, post},
 };
 use collect_metadata::{
-    BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput, EmbySettings, HistoryItem,
-    LanguageSettings, LookupResponse, MediaKind, MediaProvider, OutputOptions, OutputSettings,
-    TmdbSettings, browse_mounted_folders, preview_folder, scan_mounted_folder,
+    BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput, EmbyPreviewImage, EmbyScrapeScope,
+    EmbySettings, HistoryItem, LanguageSettings, LookupResponse, MediaKind, MediaProvider,
+    OutputOptions, OutputSettings, TmdbSettings, browse_mounted_folders, preview_folder,
+    scan_mounted_folder,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -165,6 +166,12 @@ fn router(collector: Arc<Collector>) -> Router {
         .route("/api/emby/libraries", get(emby_libraries))
         .route("/api/emby/import", post(import_emby))
         .route("/api/emby/preview", post(preview_emby))
+        .route("/api/emby/catalog", get(emby_catalog))
+        .route("/api/emby/import-all", post(import_emby_catalog))
+        .route("/api/emby/items/{id}/scrape", post(import_emby_item))
+        .route("/api/emby/series/{id}", get(emby_series_preview))
+        .route("/api/emby/credits/{id}", get(emby_credits))
+        .route("/api/emby/images/{id}/{image}", get(emby_preview_image))
         .route(
             "/api/emby/sync/{server}",
             post(sync_emby_item).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
@@ -320,6 +327,76 @@ async fn preview_emby(
         .preview_emby_library(&library)
         .await
         .map(|works| ([(header::CACHE_CONTROL, "no-store")], Json(works)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn emby_catalog(State(collector): AppState) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .emby_catalog()
+        .await
+        .map(|catalog| ([(header::CACHE_CONTROL, "no-store")], Json(catalog)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn import_emby_catalog(State(collector): AppState) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .import_emby_catalog()
+        .await
+        .map(|id| (StatusCode::CREATED, Json(id)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn import_emby_item(
+    State(collector): AppState,
+    Path(id): Path<String>,
+    Json(scope): Json<EmbyScrapeScope>,
+) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .import_emby_item(&id, scope)
+        .await
+        .map(|id| (StatusCode::CREATED, Json(id)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn emby_preview_image(
+    State(collector): AppState,
+    Path((id, image)): Path<(String, EmbyPreviewImage)>,
+) -> impl IntoResponse {
+    let Some((bytes, extension)) = collector.emby_preview_image(&id, image).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mime = match extension {
+        "jpg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "private, max-age=300"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+async fn emby_credits(State(collector): AppState, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
+    collector.emby_credits(&id).await
+        .map(|people| ([(header::CACHE_CONTROL, "no-store")], Json(people)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn emby_series_preview(
+    State(collector): AppState,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .emby_series_preview(&id)
+        .await
+        .map(|series| ([(header::CACHE_CONTROL, "no-store")], Json(series)))
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
 }
 

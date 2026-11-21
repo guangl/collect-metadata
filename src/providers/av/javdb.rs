@@ -6,7 +6,7 @@ pub(super) async fn lookup(client: &Client, code: &Identifier) -> Source {
     let mut search_url = Url::parse("https://javdb.com/search").unwrap();
     search_url
         .query_pairs_mut()
-        .append_pair("q", &code.dvd_candidate())
+        .append_pair("q", &code.search_candidate())
         .append_pair("f", "all");
     let pages = match request(client, &search_url, "text/html")
         .await
@@ -254,6 +254,24 @@ mod detail_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matches_provider_spellings_of_special_ids() {
+        let html = r#"<div class="movie-list">
+            <a class="box" href="/v/fc2"><div class="video-title"><strong>FC2-1234567</strong></div></a>
+            <a class="box" href="/v/wrong"><div class="video-title"><strong>FC2-12345678</strong></div></a>
+            <a class="box" href="/v/western"><div class="video-title"><strong>Naughty America 24.01.31</strong></div></a>
+        </div>"#;
+        let base = Url::parse("https://javdb.com/search").unwrap();
+        for (query, path) in [
+            ("FC2 PPV 1234567", "/v/fc2"),
+            ("NAUGHTYAMERICA-24-01-31", "/v/western"),
+        ] {
+            let code = Identifier::parse(query).unwrap();
+            let pages = exact_matches(html, &base, &code).ok().unwrap();
+            assert_eq!(pages.iter().map(Url::path).collect::<Vec<_>>(), [path]);
+        }
+    }
 
     #[test]
     fn ignores_near_matches_and_cross_origin_targets() {

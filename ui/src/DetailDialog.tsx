@@ -1,10 +1,9 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { Movie, Sources } from "./Movie";
-import type { LookupResponse, MediaType } from "./types";
+import { Movie } from "./Movie";
+import type { LookupResponse } from "./types";
 
-export function DetailDialog({ response, kind, opener, closeLabel, onDismiss }: {
+export function DetailDialog({ response, opener, closeLabel, onDismiss }: {
   response: LookupResponse;
-  kind: MediaType;
   opener: HTMLButtonElement;
   closeLabel: string;
   onDismiss: () => void;
@@ -47,7 +46,6 @@ export function DetailDialog({ response, kind, opener, closeLabel, onDismiss }: 
       <div className="detail-content">
         {notice && <p className="detail-notice" role="status" data-kind={notice.error ? "error" : undefined}>{notice.message}</p>}
         <Movie response={response} onNotice={showInfo} onError={showError} />
-        <Sources kind={kind} sources={response.record.sources} loading={false} onError={showError} />
       </div>
     </dialog>
   );

@@ -31,25 +31,27 @@ function WorkspaceHeader({ view, setView, storage, openStorage, theme, setTheme 
   theme: Theme; setTheme: (theme: Theme) => void;
 }) {
   return (
-    <header className="workspace-header">
-      <div className="workspace-header-inner">
-        <button className="brand" type="button" onClick={() => setView("batch")}>
-          <img src="./icon.png" alt="" width="34" height="34" />
+    <header className="border-b border-line bg-header">
+      <div className="mx-auto grid max-w-workspace grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-gutter py-3 lg:grid-cols-[1fr_auto_1fr] lg:gap-4">
+        <button className="inline-flex min-h-11 min-w-0 items-center gap-2 justify-self-start text-start text-sm leading-tight" type="button" onClick={() => setView("batch")}>
+          <img className="size-7 shrink-0 rounded-lg sm:size-[34px]" src="./icon.png" alt="" width="34" height="34" />
           <span>Collect <strong>Metadata</strong></span>
         </button>
-        <nav className="navigation" aria-label="工作区">
+        <nav className="col-span-full row-start-2 grid grid-cols-4 gap-1 lg:col-auto lg:row-auto" aria-label="工作区">
           {entries.map(({ name, label, icon }) => (
-            <button type="button" className="nav-button" aria-current={view === name ? "page" : undefined}
+            <button type="button" className="nav-button px-1.5 sm:px-3" aria-current={view === name ? "page" : undefined}
               key={name} onClick={() => setView(name)}>
               <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65"
                 strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg>{label}
             </button>
           ))}
         </nav>
-        <div className="header-actions">
+        <div className="flex items-center justify-self-end gap-2">
           <button type="button" className="storage" data-status={storage} title={storageLabels[storage]}
             aria-label={"打开设置，" + storageLabels[storage]} onClick={openStorage}>
-            <span className="status-dot" aria-hidden="true" /><span className="status-text">{shortStatus[storage]}</span>
+            <span className="storage-dot" aria-hidden="true" />
+            <span className="sm:hidden">{shortStatus[storage]}</span>
+            <span className="hidden sm:inline">{storageLabels[storage]}</span>
           </button>
           <label className="theme-control">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65"
@@ -74,7 +76,7 @@ function About({ onError }: { onError: (message: string) => void }) {
         <h1 id="about-title">关于 Collect Metadata</h1>
         <p>为媒体库批量采集、整理并导出元数据。</p>
       </div>
-      <div className="source-card about-source">
+      <div className="source-card max-w-2xl">
         <ExternalLink value="https://www.themoviedb.org/" onError={onError}>
           <img src="./tmdb-logo.svg" width="112" height="15" alt="TMDB" />
         </ExternalLink>
@@ -152,28 +154,28 @@ function History({ storage, onStorage, onOpen, onError }: {
     busy || storage === "pending" ? "正在读取采集历史…" : error || (!items.length ? "没有符合条件的采集记录。" : "");
 
   return (
-    <section className="history-section" aria-labelledby="history-title">
+    <section aria-labelledby="history-title">
       <div className="page-heading">
         <h1 id="history-title">采集历史</h1>
         <p>按作品类型或原始语言筛选已保存的记录，打开海报查看详情。</p>
       </div>
-      <div className="filters history-filters">
+      <div className="panel mb-4 grid gap-3 sm:flex sm:flex-wrap sm:items-center [&_.field]:flex-1">
         <label className="filter">作品类型
-          <select value={kind} onChange={(event) => setKind(event.target.value as MediaType | "")} disabled={!canRead}>
+          <select className="field" value={kind} onChange={(event) => setKind(event.target.value as MediaType | "")} disabled={!canRead}>
             <option value="">全部类型</option>
             {(Object.keys(mediaLabels) as MediaType[]).map((type) => <option key={type} value={type}>{mediaLabels[type]}</option>)}
           </select>
         </label>
         <LanguageSelect codes={codes} value={language} onChange={setLanguage} disabled={!canRead} />
-        <button type="button" className="secondary" onClick={() => refresh()} disabled={busy || !canRead}>刷新</button>
+        <button type="button" className="secondary sm:ms-auto" onClick={() => refresh()} disabled={busy || !canRead}>刷新</button>
       </div>
       {status && <p className="catalog-empty" role="status">{status}</p>}
       <div className="poster-grid">
         {items.map((item) => <PosterCard key={item.id} title={item.title || item.code}
           cover={item.cover_url} disabled={opening} onOpen={(opener) => open(item.id, opener)}
-          caption={[item.year, mediaLabels[item.media_type], languageText(item.original_languages)].filter(Boolean).join(" · ")} />)}
+          caption={[item.year, item.scope === "episode" ? "分集" : mediaLabels[item.media_type], languageText(item.original_languages)].filter(Boolean).join(" · ")} />)}
       </div>
-      {more && <button type="button" className="secondary history-more" onClick={() => refresh(items.at(-1)?.id ?? null)}
+      {more && <button type="button" className="secondary mt-3" onClick={() => refresh(items.at(-1)?.id ?? null)}
         disabled={busy}>加载更早的记录</button>}
     </section>
   );
@@ -217,13 +219,15 @@ export function App() {
   }
 
   return (
-    <div className="workspace">
+    <div className="min-h-screen">
       <WorkspaceHeader view={view} setView={navigate} storage={storage} openStorage={openStorage} theme={theme} setTheme={setTheme} />
-      <main className="main">
-        {notice && <div className="notice" role="status" data-kind={notice.kind}>{notice.message}</div>}
-        <div className="content">
+      <main className="min-w-0">
+        {notice && <div className="mx-auto max-w-workspace px-gutter pt-3 text-sm text-accent [overflow-wrap:anywhere] data-[kind=error]:text-danger" role="status" data-kind={notice.kind}>{notice.message}</div>}
+        <div className="mx-auto max-w-workspace px-gutter pb-14 pt-6 sm:pt-9 lg:pt-12">
           <div hidden={view !== "batch"}><Batch key={databaseVersion} active={view === "batch"} storage={storage}
-            folderSelection={folderSelection} setFolderSelection={setFolderSelection} onConfigure={openStorage} onNotice={showInfo} onError={showError} /></div>
+            folderSelection={folderSelection} setFolderSelection={setFolderSelection} onConfigure={openStorage}
+            onConfigureEmby={() => { setSettingsSection("emby"); navigate("settings"); }}
+            onNotice={showInfo} onError={showError} /></div>
           {view === "settings" ? (
             <Settings section={settingsSection} onSection={setSettingsSection} storage={storage}
               onStorage={setStorage} onError={showError} onConnected={() => {
@@ -232,7 +236,7 @@ export function App() {
               }} />
           ) : view === "about" ? <About onError={showError} /> : view === "history" ? <>
             <History storage={storage} onStorage={setStorage} onOpen={open} onError={showError} />
-            {current && <DetailDialog response={current.response} kind={current.response.record.media_type ?? "av"}
+            {current && <DetailDialog response={current.response}
               opener={current.opener} closeLabel="返回采集历史" onDismiss={() => setCurrent(null)} />}
           </> : null}
         </div>

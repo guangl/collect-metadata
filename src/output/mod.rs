@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use crate::{LookupResponse, providers::media::emby::Emby};
 
+pub(crate) use assets::image_bytes;
 pub(crate) use settings::ExportPlan;
 pub use settings::{OutputOptions, OutputSettings, OutputSettingsView};
 
@@ -276,6 +277,9 @@ fn metadata(record: &Value, options: &settings::OutputOptions, source_files: &[S
         "field_sources": filtered("field_sources"),
         "source_files": source_files,
     });
+    if record["scope"] == "episode" {
+        document["scope"] = record["scope"].clone();
+    }
     if record["metadata_languages"].is_array() {
         document["metadata_languages"] = record["metadata_languages"].clone();
         document["localized_metadata"] = Value::Object(localized);

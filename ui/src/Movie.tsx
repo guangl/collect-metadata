@@ -1,6 +1,9 @@
 import { useId, useState } from "react";
 import { exportJson } from "./api";
-import { Episodes, ExternalLink, languageName, languageText, PosterArt } from "./Catalog";
+import { Tabs } from "./Tabs";
+import { RecordedCredits } from "./RecordedCredits";
+import { EmbyCredits } from "./batch/EmbyCatalog";
+import { Episodes, ExternalLink, languageName, languageText, PosterArt, safeUrl } from "./Catalog";
 import { errorText, mediaLabels } from "./types";
 import type { Fields, LookupResponse, MediaType, Source } from "./types";
 
@@ -31,6 +34,9 @@ const factLabels: Record<string, string> = {
   producers: "制片人",
   network: "播出平台",
   status: "播出状态",
+  season_number: "季号",
+  episode_number: "集号",
+  episode_last_number: "结束集号",
   season_count: "季数",
   episode_count: "集数",
   imdb_id: "IMDb ID",
@@ -47,6 +53,7 @@ const factLabels: Record<string, string> = {
   label: "厂牌 / 发行",
   series: "系列",
   directors: "导演",
+  voice_actors: "声优",
   actresses: "女演员",
   actors: "男演员",
   other_cast: "其他演员",
@@ -63,8 +70,7 @@ const factLabels: Record<string, string> = {
 };
 const keyFacts = [
   "original_languages", "content_id", "release_date", "end_date", "runtime_minutes", "rating",
-  "countries", "studio", "label", "series", "directors", "cast", "actresses", "actors",
-  "other_cast", "writers", "producers", "network", "status", "season_count", "episode_count", "imdb_id", "tmdb_id",
+  "countries", "studio", "label", "series", "network", "status", "season_number", "episode_number", "episode_last_number", "season_count", "episode_count", "imdb_id", "tmdb_id",
 ];
 const additionalFacts = [
   "title_ja", "title_original", "title_en", "title_site", "genres", "tagline",
@@ -124,7 +130,7 @@ function SourceCard({ name, description, source, loading, onError }: {
   const [showRaw, setShowRaw] = useState(false);
   const heading = (
     <>
-      <div className="source-head">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3>{name}</h3>
         {(source || loading) && <span className="source-state" data-status={source?.status}>
           {source ? sourceStatus[source.status] : "采集中"}
@@ -158,12 +164,12 @@ export function Sources({ kind, sources, loading, onError }: {
     (kind === "av" ? ["R18.dev", "JAVDatabase", "JavDB"] : kind === "movie" ? ["Wikidata"] : ["Wikidata", "TVmaze"]);
   const successes = sources?.filter((item) => ["ok", "partial"].includes(item.status)).length;
   return (
-    <section className="source-area" aria-labelledby={titleId}>
+    <section aria-labelledby={titleId}>
       <div className="section-heading">
         <h2 id={titleId}>数据来源</h2>
         {sources && <span>{successes} / {sources.length} 个来源有结果</span>}
       </div>
-      <div className="source-grid">
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
         {names.map((name) => (
           <SourceCard name={name} description={providerInfo[name]} key={name}
             source={sources?.find((item) => item.provider === name)} loading={loading} onError={onError} />
@@ -199,9 +205,10 @@ export function Movie({ response, onNotice, onError }: { response: LookupRespons
   if (!Object.keys(fields).length) {
     const unavailable = sources.some((source) => source.status === "unavailable");
     return (
-      <section className="no-match" aria-label="采集结果">
+      <section className="panel no-match" aria-label="采集结果">
         <h1>暂无 {record.query} 的资料</h1>
         <p>{unavailable ? "部分来源未能访问。可展开下方来源查看详情。" : "请核对番号或商品 ID。"}</p>
+        <Sources kind={record.media_type ?? "av"} sources={sources} loading={false} onError={onError} />
       </section>
     );
   }
@@ -209,6 +216,9 @@ export function Movie({ response, onNotice, onError }: { response: LookupRespons
   const code = fields.dvd_id || fields.content_id || record.work_id || record.query;
   const title = fields.title || fields.title_ja || fields.title_original || fields.title_en || fields.title_site;
   const kind = record.media_type ?? "av";
+  const backdrop = safeUrl(fields.backdrop_url);
+  const embyItem = (sources.find(({ provider }) => provider === "Emby")?.data as { item?: { Id?: unknown } } | undefined)?.item?.Id;
+  const liveCredits = typeof embyItem === "string" && /^[a-z0-9-]{1,96}$/i.test(embyItem) ? embyItem : undefined;
   async function save() {
     setExporting(true);
     try {
@@ -222,27 +232,34 @@ export function Movie({ response, onNotice, onError }: { response: LookupRespons
 
   return (
     <article className="movie" aria-label="采集结果">
-      <div className="movie-header">
-        <div className="detail-poster"><PosterArt url={fields.poster_url || fields.cover_url} title={title ?? code} /></div>
+      <div className="work-hero">
+        {backdrop && <span className="work-backdrop" aria-hidden="true">
+          <img src={backdrop} alt="" decoding="async" referrerPolicy="no-referrer" />
+        </span>}
+        <div className="detail-poster"><PosterArt url={fields.poster_url || fields.cover_url} /></div>
         <div className="movie-intro">
-          <p className="movie-code">{kind === "av" ? code : mediaLabels[kind] + " · " + code}</p>
+          <p className="movie-code">{kind === "av" ? code : (record.scope === "episode" ? "分集" : mediaLabels[kind]) + " · " + code}</p>
+          <h1>{title ?? "影片资料"}</h1>
           {metadata_languages && metadata_languages.length > 1 && <label className="batch-input">元数据语言
-            <select value={language} onChange={(event) => setSelection({ record, language: event.target.value })}>
+            <select className="field" value={language} onChange={(event) => setSelection({ record, language: event.target.value })}>
               {metadata_languages.map((code) => <option key={code} value={code}>{languageName(code)}</option>)}
             </select>
           </label>}
           {language && language !== primary && <p className="muted">该语言缺少的字段沿用首选语言或原文。</p>}
-          <h1>{title ?? "影片资料"}</h1>
-          {fields.description && <p className="movie-description">{fields.description}</p>}
           {saved && <p className="date-note">采集于 {formatDate(saved.collected_at)}</p>}
           <button type="button" className="secondary" onClick={save} disabled={exporting}>导出 JSON</button>
         </div>
       </div>
-      <div className="movie-body">
-        <FactList fields={{ original_languages: [], ...fields }} origins={origins} keys={keyFacts} onError={onError} />
-        <FactList fields={fields} origins={origins} keys={additionalFacts} className="full-facts" onError={onError} />
-        {fields.episodes && <Episodes episodes={fields.episodes} onError={onError} />}
-      </div>
+      <Tabs label="采集资料" className="result-tabs" tabs={[
+        { id: "overview", label: "简介与资料", content: <div className="movie-body">
+          {fields.description && <p className="movie-description mb-4">{fields.description}</p>}
+          <FactList fields={{ original_languages: [], ...fields }} origins={origins} keys={keyFacts} onError={onError} />
+          <FactList fields={fields} origins={origins} keys={additionalFacts} className="full-facts" onError={onError} />
+        </div> },
+        ...(fields.episodes?.length ? [{ id: "episodes", label: "季与分集", retain: true, content: <div className="movie-body"><Episodes episodes={fields.episodes} onError={onError} /></div> }] : []),
+        { id: "credits", label: "演职员", retain: true, content: liveCredits ? <EmbyCredits id={liveCredits} fallback={<RecordedCredits sources={sources} fields={fields} />} /> : <RecordedCredits sources={sources} fields={fields} /> },
+        { id: "sources", label: "数据来源", retain: true, content: <div className="movie-body"><Sources kind={kind} sources={sources} loading={false} onError={onError} /></div> },
+      ]} />
     </article>
   );
 }

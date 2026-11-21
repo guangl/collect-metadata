@@ -28,7 +28,9 @@ export function Settings({ section, onSection, storage, onStorage, onConnected, 
   function move(event: KeyboardEvent, index: number) {
     let next = index;
     switch (event.key) {
+      case "ArrowUp":
       case "ArrowLeft": next = (index + sections.length - 1) % sections.length; break;
+      case "ArrowDown":
       case "ArrowRight": next = (index + 1) % sections.length; break;
       case "Home": next = 0; break;
       case "End": next = sections.length - 1; break;
@@ -48,18 +50,18 @@ export function Settings({ section, onSection, storage, onStorage, onConnected, 
   };
 
   return (
-    <section className="preferences" aria-labelledby="settings-title">
-      <div className="page-heading">
+    <section className="grid min-w-0 gap-x-6 lg:grid-cols-[13rem_minmax(0,1fr)] lg:items-start" aria-labelledby="settings-title">
+      <div className="page-heading lg:col-span-full">
         <h1 id="settings-title">设置</h1>
         <p>管理资料来源、数据库连接和刮削结果的输出方式。</p>
       </div>
-      <div className="settings-tabs" role="tablist" aria-label="设置分类">
-        {sections.map(([id, label], index) => <button type="button" role="tab" key={id}
+      <div className="mb-4 grid grid-cols-2 gap-1 rounded-lg border border-line bg-header p-1.5 sm:grid-cols-5 lg:sticky lg:top-3 lg:grid-cols-1" role="tablist" aria-label="设置分类">
+        {sections.map(([id, label], index) => <button className="tab-button last:col-span-2 sm:last:col-span-1 lg:justify-start lg:text-start" type="button" role="tab" key={id}
           id={"tab-" + id} aria-controls={"panel-" + id} aria-selected={section === id}
           tabIndex={section === id ? 0 : -1} ref={(button) => { buttons.current[index] = button; }}
           onKeyDown={(event) => move(event, index)} onClick={() => onSection(id)}>{label}</button>)}
       </div>
-      {sections.map(([id]) => <div className="settings-panel" key={id}
+      {sections.map(([id]) => <div className="min-w-0" key={id}
         id={"panel-" + id} role="tabpanel" aria-labelledby={"tab-" + id} hidden={section !== id}>
         {contents[id]}
       </div>)}

@@ -1,8 +1,20 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { getEmbySettings, saveEmby, testEmby } from "./api";
+import { getEmbySettings, isDesktop, openUrl, saveEmby, testEmby } from "./api";
 import { errorText } from "./types";
 import type { EmbySettingsView } from "./types";
+
+function organizerPage(server: string | undefined): string | null {
+  if (!server) return null;
+  try {
+    const url = new URL(server);
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
+    url.pathname = url.pathname.replace(/\/+$/, "") + "/web/index.html";
+    url.search = "";
+    url.hash = "!/configurationpage?name=collectmetadata";
+    return url.href;
+  } catch { return null; }
+}
 
 export function EmbySettings() {
   const [settings, setSettings] = useState<EmbySettingsView | null>(null);
@@ -45,19 +57,20 @@ export function EmbySettings() {
     void run("save");
   }
 
+  const organizer = organizerPage(settings?.server);
   return (
     <section aria-labelledby="emby-title">
       <div className="section-heading"><h2 id="emby-title">家庭 Emby</h2></div>
-      {settings ? <form className="batch-form settings-form output-form" onSubmit={submit}>
+      {settings ? <form className="panel batch-form" onSubmit={submit}>
         <label className="check-option"><input type="checkbox" checked={settings.enabled} disabled={action !== null}
           onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })} />优先读取 Emby 媒体库</label>
-        <p className="muted">此选项用于文件夹刮削。关闭后仍可在首页手动选择 Emby Server。读取 Emby 时会沿用已有资料和译文。</p>
+        <p className="muted">此选项用于文件夹刮削。保存连接后，工作台会自动浏览全部 Emby 媒体库。</p>
         <label htmlFor="emby-server" className="batch-input">Emby 服务地址</label>
-        <input id="emby-server" type="url" spellCheck={false} disabled={action !== null}
+        <input className="field w-full" id="emby-server" type="url" spellCheck={false} disabled={action !== null}
           placeholder="http://服务器:8096" value={settings.server}
           onChange={(event) => setSettings({ ...settings, server: event.target.value })} />
         <label htmlFor="emby-key" className="batch-input">Emby API 密钥</label>
-        <input id="emby-key" type="password" autoComplete="off" spellCheck={false} disabled={action !== null}
+        <input className="field w-full" id="emby-key" type="password" autoComplete="off" spellCheck={false} disabled={action !== null}
           placeholder={settings.configured ? "已保存，留空沿用" : "填写 Emby API 密钥"} value={apiKey}
           onChange={(event) => setApiKey(event.target.value)} />
         <div className="settings-actions">
@@ -68,8 +81,16 @@ export function EmbySettings() {
           </button>
         </div>
       </form> : !message && <p className="muted" role="status">正在读取 Emby 设置…</p>}
-      {message && <p className={message.error ? "batch-error output-feedback" : "muted output-feedback"}
+      {message && <p className={message.error ? "batch-error mt-2" : "muted mt-2"}
         role={message.error ? "alert" : "status"}>{message.text}</p>}
+      <div className="panel mt-4 space-y-2">
+        <h3>自动整理与重命名</h3>
+        <p className="muted">安装新版插件后，在 Emby 管理后台选择允许整理的媒体库，并设置目录和文件名模板。整理任务在 Emby 服务端运行。</p>
+        {organizer && <a className="inline-block text-sm" href={organizer} target="_blank" rel="noopener noreferrer" onClick={isDesktop ? (event) => {
+          event.preventDefault();
+          void openUrl(organizer).catch(() => setMessage({ text: "无法打开 Emby 设置，请在浏览器登录 Emby 管理后台。", error: true }));
+        } : undefined}>打开 Emby 自动整理设置</a>}
+      </div>
     </section>
   );
 }
