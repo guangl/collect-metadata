@@ -1,0 +1,17 @@
+name: 功能建议 / Feature request
+description: 提出能改善媒体整理或刮削流程的建议。
+labels: [enhancement]
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景与当前问题 / Use case and problem
+      description: 你想完成什么？现有流程在哪里受阻？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的改进 / Proposed improvement
+    validations:
+      required: true

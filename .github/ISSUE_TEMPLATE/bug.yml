@@ -1,0 +1,30 @@
+name: 报告问题 / Bug report
+description: 报告可复现的刮削、界面或部署问题。
+labels: [bug]
+body:
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境 / Environment
+      description: 请注明版本或提交、操作系统，以及 Docker Web 或 Tauri 桌面端。
+      placeholder: '例：main @ abc1234，macOS 15，Docker Web'
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      description: 请列出操作步骤，并注明使用文件夹、Emby 还是手动清单。
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 实际结果与预期 / Actual and expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏后的日志或截图 / Redacted logs or screenshots
+      description: 提交前请移除密钥、连接串、真实文件路径和私人媒体信息。

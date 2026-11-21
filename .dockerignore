@@ -2,5 +2,6 @@
 target
 gen
 .env
+.env.*
 dist
 node_modules

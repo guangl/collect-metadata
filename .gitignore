@@ -1,6 +1,8 @@
 /target
 /gen
 /.env
+/.env.*
+!/.env.example
 /dist
 /node_modules
 /coverage

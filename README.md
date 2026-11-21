@@ -1,8 +1,28 @@
 # Collect Metadata
 
-在「刮削工作台」中，从文件夹或 Emby 媒体库预览作品、提交批次并查看后台进度，也可以手动输入作品清单。工作台不按电影、剧集或 AV 番号分设页面。macOS、Windows 桌面端使用 Tauri 2，并与 Web 端共用 React + TypeScript 界面和 Rust 采集核心。
+[![CI](https://github.com/guangl/collect-metadata/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/guangl/collect-metadata/actions/workflows/ci.yml)
 
-采集结果可保存到 PostgreSQL，并从采集历史查看详情或导出为 JSON。历史记录以海报陈列，可按**作品类型**和**原始语言**筛选。语言取自来源字段，保留多种原始语言，区分普通话、粤语和未细分的中文。来源缺少语言时显示「未知」。旧版 AV 快照可以继续打开，并归入 AV 番号类别。
+**给本地文件夹和 Emby 媒体库用的自托管元数据刮削工具。** 在一个工作台里预览作品、提交后台任务、查看结果并导出资料，不移动或改写原视频。
+
+[快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md)
+
+- **导入**：选择本地文件夹、服务端挂载目录或 Emby 媒体库，也可手动输入作品清单。
+- **后台采集**：支持暂停、继续和重试；有多个匹配时可手动确认。任务与历史保存在 PostgreSQL。
+- **查看与导出**：按作品类型或原始语言筛选历史，查看海报和来源字段，导出 JSON、图片或 Emby NFO。
+
+## 快速上手
+
+有 Docker 和 Compose 时，先克隆仓库并复制配置示例：
+
+```sh
+git clone https://github.com/guangl/collect-metadata.git
+cd collect-metadata
+cp .env.example .env
+```
+
+在 `.env` 中为 `POSTGRES_PASSWORD` 设置新密码，然后运行 `docker compose up -d --build`。打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)，选择文件夹，确认预览后点「开始刮削元数据」。部署与存储选项见 [Docker Web 版](#docker-web-版)。
+
+macOS 和 Windows 也可从源码运行 [Tauri 桌面版](#tauri-桌面版)。Web 与桌面共用 React + TypeScript 界面和 Rust 采集核心。
 
 ## 采集范围
 
@@ -170,7 +190,9 @@ GROUP BY 1;
 
 ## 测试
 
-`npm run test:coverage` 运行 React 测试并检查 TypeScript 源文件的行覆盖率，门槛为 85%。Rust 的完整覆盖率检查包括桌面命令、Web 路由、PostgreSQL 集成测试及实际来源采集。运行前设置 `COLLECT_METADATA_TEST_POSTGRES`（连接账户需有建 schema 权限）和 `TMDB_READ_ACCESS_TOKEN`，并确保能连接测试使用的公开来源。
+GitHub CI 在推送 `main` 或提交 PR 时运行前端测试与构建，以及 Rust 的桌面和 Web 测试，不需要私有凭据。`npm run test:coverage` 检查 TypeScript 源文件的行覆盖率，门槛为 85%。
+
+Rust 的完整覆盖率检查还包含 PostgreSQL 集成测试及实际来源采集。运行前设置 `COLLECT_METADATA_TEST_POSTGRES`（连接账户需有建 schema 权限）和 `TMDB_READ_ACCESS_TOKEN`，并确保能连接测试使用的公开来源。
 
 ```sh
 npm run build
@@ -180,7 +202,7 @@ EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --all-features --summary-onl
 
 ## Docker Web 版
 
-在仓库根目录的 `.env` 中设置 `POSTGRES_PASSWORD`。以下命令会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
+从 [`.env.example`](.env.example) 复制本地 `.env` 并设置 `POSTGRES_PASSWORD`。以下命令会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
 
 ```sh
 docker compose up -d --build
@@ -188,7 +210,7 @@ docker compose up -d --build
 
 浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。在 `.env` 中用 `APP_HOST` 和 `APP_PORT` 调整宿主机监听地址和端口。
 
-直接运行 Web 服务器时，通过 `DATABASE_URL` 或标准 `PGHOST`、`PGPORT`、`PGDATABASE`、`PGUSER`、`PGPASSWORD` 连接已有 PostgreSQL。应用启动时会创建 `collect_metadata_snapshots` 表。每次有结果的采集写入一条 JSONB 快照，重新采集会新增记录。
+直接运行 Web 服务器时，通过 `DATABASE_URL` 或标准 `PGHOST`、`PGPORT`、`PGDATABASE`、`PGUSER`、`PGPASSWORD` 连接已有 PostgreSQL。应用启动时会创建 `collect_metadata_snapshots` 表。每次有结果的采集写入一条 JSONB 快照，重新采集会新增记录。不要将应用或数据库端口直接暴露在公网，详见 [安全说明](SECURITY.md)。
 
 ```sh
 npm ci
@@ -215,7 +237,7 @@ npm run tauri -- build --bundles app,dmg
 npm run tauri -- build --bundles nsis
 ```
 
-桌面版可以直接采集和导出 JSON。后台批量采集和历史需要 PostgreSQL。在「设置」的「PostgreSQL」中粘贴连接地址，点击「测试连接并保存」。也可在启动前设置 `DATABASE_URL`，或在下列路径写入一行连接串。环境变量优先。Web 和桌面版都可以从「设置」测试当前数据库，Web 的连接地址由服务端环境变量提供。
+桌面版无需连接数据库即可预览文件夹；提交后台批次和查看采集历史则需要 PostgreSQL。在「设置」的「PostgreSQL」中粘贴连接地址，点击「测试连接并保存」。也可在启动前设置 `DATABASE_URL`，或在下列路径写入一行连接串。环境变量优先。Web 和桌面版都可以从「设置」测试当前数据库，Web 的连接地址由服务端环境变量提供。
 
 如需桌面版和 Docker Web 版共用本机数据库，可以加上桌面用 Compose 配置。它仅在本机回环地址开放 PostgreSQL 端口。
 
