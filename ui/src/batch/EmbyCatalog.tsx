@@ -1,6 +1,7 @@
 import { memo, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent, PointerEvent, ReactNode } from "react";
 import { getEmbyCredits, getEmbySeries, isDesktop, loadEmbyImage } from "../api";
+import { LocalDate } from "../Catalog";
 import { Tabs } from "../Tabs";
 import type { EmbyImage } from "../api";
 import { errorText, mediaLabels } from "../types";
@@ -252,6 +253,7 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
   }, [selected]);
   const facts = [mediaLabels[work.kind], work.year, work.runtime_minutes && `${work.runtime_minutes} 分钟`]
     .filter(Boolean).join(" · ");
+  const premiere = selected?.episode.premiere_at || selected?.episode.date;
 
   function close() {
     dialog.current?.close();
@@ -305,7 +307,7 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
         <EmbyArtwork id={selected.episode.id} tag={selected.episode.image} image="episode" eager />
         <div>
           <dl className="episode-facts">
-            {selected.episode.date && <div><dt>首播</dt><dd><time dateTime={selected.episode.date}>{selected.episode.date}</time></dd></div>}
+            {premiere && <div><dt>首播</dt><dd><LocalDate value={premiere} /></dd></div>}
             {selected.episode.runtime_minutes != null && <div><dt>时长</dt><dd>{selected.episode.runtime_minutes} 分钟</dd></div>}
             {selected.episode.rating != null && <div><dt>评分</dt><dd className="work-rating">{selected.episode.rating.toFixed(1)} / 10</dd></div>}
           </dl>

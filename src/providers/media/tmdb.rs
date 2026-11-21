@@ -23,6 +23,13 @@ enum Credential {
     Bearer(HeaderValue),
 }
 
+struct Episode {
+    series: u32,
+    season: u64,
+    number: u64,
+    id: Option<u64>,
+}
+
 impl Tmdb {
     pub(crate) fn new(token: &str) -> Option<Self> {
         let token = token.trim();
@@ -122,6 +129,172 @@ impl Tmdb {
             Err(Failure::NotFound) => Ok(Vec::new()),
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) async fn emby_episode(
+        &self,
+        client: &Client,
+        emby: &emby::Emby,
+        item: &Value,
+        language: &str,
+    ) -> Option<Source> {
+        let number = item["IndexNumber"].as_u64();
+        if number
+            .zip(item["IndexNumberEnd"].as_u64())
+            .is_some_and(|(start, end)| end > start)
+        {
+            return None;
+        }
+        let ids = &item["ProviderIds"];
+        let expected_id = ids["Tmdb"].as_str().and_then(id).map(u64::from);
+        let episode = match self.find_episode(client, ids, language).await {
+            Ok(episode) => episode,
+            Err(error) => {
+                let fallback = match (item["ParentIndexNumber"].as_u64(), number) {
+                    (Some(season), Some(number)) if number > 0 => emby
+                        .series_tmdb_id(client, item)
+                        .await
+                        .map(|series| Episode {
+                            series,
+                            season,
+                            number,
+                            id: expected_id,
+                        }),
+                    _ => None,
+                };
+                let Some(episode) = fallback else {
+                    let page = Url::parse("https://www.themoviedb.org/").unwrap();
+                    return Some(Source::failure(NAME, &page, error));
+                };
+                episode
+            }
+        };
+        let Episode {
+            series,
+            season,
+            number,
+            id,
+        } = episode;
+        let path = format!("tv/{series}/season/{season}/episode/{number}");
+        let page = Url::parse(&format!("https://www.themoviedb.org/{path}")).unwrap();
+        let mut endpoint = self.endpoint(&path, language);
+        endpoint
+            .query_pairs_mut()
+            .append_pair("append_to_response", "external_ids");
+        let series_endpoint = self.endpoint(&format!("tv/{series}"), language);
+        let (details, show) = tokio::join!(
+            self.get(client, &endpoint),
+            self.get(client, &series_endpoint)
+        );
+        let details = match details {
+            Ok(data)
+                if data["season_number"].as_u64() == Some(season)
+                    && data["episode_number"].as_u64() == Some(number)
+                    && data["id"].as_u64().is_some_and(|actual| {
+                        actual > 0
+                            && id.is_none_or(|id| id == actual)
+                            && expected_id.is_none_or(|id| id == actual)
+                    })
+                    && ![("Imdb", "imdb_id"), ("Tvdb", "tvdb_id")].into_iter().any(
+                        |(key, field)| {
+                            let external = &data["external_ids"][field];
+                            let actual = external
+                                .as_str()
+                                .map(str::to_owned)
+                                .or_else(|| external.as_u64().map(|value| value.to_string()));
+                            ids[key]
+                                .as_str()
+                                .filter(|id| !id.is_empty())
+                                .zip(actual.as_deref())
+                                .is_some_and(|(expected, actual)| expected != actual)
+                        },
+                    ) =>
+            {
+                data
+            }
+            Ok(_) => return Some(Source::failure(NAME, &page, Failure::NotFound)),
+            Err(error) => return Some(Source::failure(NAME, &page, error)),
+        };
+        let show = show.and_then(|data| {
+            (data["id"].as_u64() == Some(u64::from(series)))
+                .then_some(data)
+                .ok_or_else(Failure::format_changed)
+        });
+        let (series_data, note) = match show {
+            Ok(data) => (data, None),
+            Err(error) => (
+                Value::Null,
+                Some(format!(
+                    "无法读取所属剧集的原始语言。{}",
+                    error.description()
+                )),
+            ),
+        };
+        let fields = field_map([
+            ("release_date", details["air_date"].clone()),
+            ("rating", rating(&details)),
+            ("original_languages", json!(languages(&series_data))),
+        ]);
+        let mut source = Source::found(
+            NAME,
+            &page,
+            fields,
+            json!({
+                "episode": details,
+                "series": series_data,
+            }),
+        );
+        if note.is_some() {
+            source.status = "partial";
+            source.note = note;
+        }
+        Some(source)
+    }
+
+    async fn find_episode(
+        &self,
+        client: &Client,
+        ids: &Value,
+        language: &str,
+    ) -> Result<Episode, Failure> {
+        let imdb = ids["Imdb"].as_str().filter(|value| {
+            value.strip_prefix("tt").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        });
+        let tvdb = ids["Tvdb"].as_str().filter(|value| id(value).is_some());
+        let mut failure = Failure::NotFound;
+        for (source, value) in [("imdb_id", imdb), ("tvdb_id", tvdb)] {
+            let Some(value) = value else { continue };
+            let mut endpoint = self.endpoint(&format!("find/{value}"), language);
+            endpoint
+                .query_pairs_mut()
+                .append_pair("external_source", source);
+            match self.get(client, &endpoint).await {
+                Ok(data) => {
+                    if let Some([item]) = data["tv_episode_results"].as_array().map(Vec::as_slice)
+                        && let Some(series) = item["show_id"]
+                            .as_u64()
+                            .and_then(|id| u32::try_from(id).ok())
+                            .filter(|id| *id > 0)
+                        && let Some(season) = item["season_number"].as_u64()
+                        && let Some(number) =
+                            item["episode_number"].as_u64().filter(|number| *number > 0)
+                        && let Some(id) = item["id"].as_u64().filter(|id| *id > 0)
+                    {
+                        return Ok(Episode {
+                            series,
+                            season,
+                            number,
+                            id: Some(id),
+                        });
+                    }
+                }
+                Err(Failure::NotFound) => {}
+                Err(error) => failure = error,
+            }
+        }
+        Err(failure)
     }
 
     pub(super) async fn details(
@@ -265,6 +438,15 @@ fn languages(data: &Value) -> Vec<&str> {
         })
         .into_iter()
         .collect()
+}
+
+fn rating(data: &Value) -> Value {
+    match (data["vote_average"].as_f64(), data["vote_count"].as_u64()) {
+        (Some(value), Some(count)) if count > 0 => {
+            json!({"value": value, "scale": 10, "count": count})
+        }
+        _ => Value::Null,
+    }
 }
 
 fn image(path: &Value, size: &str) -> Option<String> {
@@ -452,14 +634,7 @@ fn fields(kind: MediaKind, id: u32, data: &Value, language: &str) -> Fields {
         ("writers", json!(crew("Writer"))),
         ("producers", json!(crew("Producer"))),
         ("network", json!(names(&data["networks"]))),
-        (
-            "rating",
-            if data["vote_count"].as_u64().is_some_and(|count| count > 0) {
-                json!({"value": data["vote_average"], "scale": 10, "count": data["vote_count"]})
-            } else {
-                Value::Null
-            },
-        ),
+        ("rating", rating(data)),
         ("status", data["status"].clone()),
         ("season_count", data["number_of_seasons"].clone()),
         ("episode_count", data["number_of_episodes"].clone()),
@@ -553,6 +728,13 @@ mod tests {
 
         let app = Router::new().fallback(get(
             |headers: HeaderMap, uri: axum::http::Uri| async move {
+                if uri.path() == "/emby/Items" {
+                    assert_eq!(headers["x-emby-token"], "fake-emby-token");
+                    assert!(uri.query().unwrap_or_default().contains("Ids=70"));
+                    return (StatusCode::OK, Json(json!({"Items": [
+                        {"Id":"70","Type":"Series","ProviderIds":{"Tmdb":"70523"}}
+                    ]})));
+                }
                 assert_eq!(headers[AUTHORIZATION], "Bearer fake-test-token");
                 let query = uri.query().unwrap_or_default();
                 let language = match uri.path() {
@@ -573,19 +755,28 @@ mod tests {
                     }
                     "/3/movie/496243/videos" => json!({"id":496243,"results":[{"key":"trailer","type":"Trailer","site":"YouTube"}]}),
                     "/3/tv/70523" => {
-                        assert!(query.contains("aggregate_credits"));
+                        assert!(query == "language=zh-CN" || query.contains("aggregate_credits"));
                         json!({"id":70523,"name":"暗黑","original_language":"de","seasons":[{"season_number":0},{"season_number":1}]})
                     }
                     "/3/tv/70523/season/0" => json!({"season_number":0,"episodes":[{"id":1,"name":"Special","episode_number":1,"season_number":0}]}),
+                    "/3/find/tt123" => {
+                        assert!(query.contains("external_source=imdb_id"));
+                        json!({"tv_episode_results":[{"id":1,"show_id":70523,"season_number":0,"episode_number":1}]})
+                    }
+                    "/3/tv/70523/season/0/episode/1" => {
+                        assert!(query.contains("append_to_response=external_ids"));
+                        json!({"id":1,"season_number":0,"episode_number":1,"air_date":"2017-12-01",
+                            "vote_average":8.1,"vote_count":17,"external_ids":{"imdb_id":"tt123"}})
+                    }
                     _ => return (StatusCode::NOT_FOUND, Json(Value::Null)),
                 };
                 (StatusCode::OK, Json(body))
             },
         ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
         let mut tmdb = Tmdb::new("fake-test-token").unwrap();
-        tmdb.api_root =
-            Url::parse(&format!("http://{}/3/", listener.local_addr().unwrap())).unwrap();
+        tmdb.api_root = Url::parse(&format!("{address}/3/")).unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let client = Client::builder()
@@ -612,6 +803,49 @@ mod tests {
             .await;
         assert_eq!(series.status, "partial");
         assert_eq!(series.fields["episodes"][0]["season"], 0);
+
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("emby.json");
+        std::fs::write(
+            &config,
+            json!({
+                "enabled":true, "server":address, "api_key":"fake-emby-token",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let emby = emby::EmbySettings::load(config)
+            .unwrap()
+            .connection()
+            .unwrap();
+        let mut item = json!({"SeriesId":"70","ParentIndexNumber":0,"IndexNumber":1});
+        for ids in [json!({"Imdb":"tt123"}), json!({"Tmdb":"1"})] {
+            item["ProviderIds"] = ids;
+            let episode = tmdb
+                .emby_episode(&client, &emby, &item, "zh-CN")
+                .await
+                .unwrap();
+            assert_eq!(episode.status, "ok");
+            assert_eq!(episode.fields["release_date"], "2017-12-01");
+            assert_eq!(
+                episode.fields["rating"],
+                json!({"value":8.1,"scale":10,"count":17})
+            );
+            assert_eq!(episode.fields["original_languages"], json!(["de"]));
+        }
+        item["ProviderIds"] = json!({"Tmdb":"2"});
+        let mismatch = tmdb
+            .emby_episode(&client, &emby, &item, "zh-CN")
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status, "not_found");
+        assert!(mismatch.fields.is_empty());
+        item["IndexNumberEnd"] = json!(2);
+        assert!(
+            tmdb.emby_episode(&client, &emby, &item, "zh-CN")
+                .await
+                .is_none()
+        );
         server.abort();
     }
 }

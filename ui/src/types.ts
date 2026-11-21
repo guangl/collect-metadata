@@ -98,6 +98,7 @@ export interface EmbyEpisodePreview {
   original_title: string | null;
   overview: string | null;
   date: string | null;
+  premiere_at?: string | null;
   runtime_minutes: number | null;
   rating: number | null;
   image: string | null;

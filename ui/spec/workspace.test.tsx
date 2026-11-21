@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/main";
+import { Movie } from "../src/Movie";
 import { configureDatabase, getBatchView } from "../src/api";
 import { parseBatch, terminal } from "../src/batch/engine";
 import type { BatchRow } from "../src/batch/engine";
@@ -158,6 +159,37 @@ describe("外观", () => {
 });
 
 describe("海报与详情", () => {
+  it("以浏览器时区显示 Emby 原始首播时间，并保留没有时区的日期", () => {
+    const timestamp = "2015-10-04T16:00:00.0000000Z";
+    const emby = {
+      provider: "Emby", status: "ok" as const, note: null, url: "https://emby.test/",
+      fields: { release_date: "2015-10-04" }, data: { item: { PremiereDate: timestamp } },
+    };
+    const snapshot = { record: {
+      schema_version: 2, scope: "episode" as const, query: "最强的男人",
+      fields: { title: "最强的男人", release_date: "2015-10-04" },
+      field_sources: { release_date: "Emby" }, sources: [emby],
+    }, saved: null, storage_error: null };
+    const noop = () => {};
+    try {
+      vi.stubEnv("TZ", "Asia/Shanghai");
+      const { rerender } = render(<Movie response={snapshot} onNotice={noop} onError={noop} />);
+      expect(screen.getByText("2015-10-05").getAttribute("datetime")).toBe(timestamp);
+
+      vi.stubEnv("TZ", "America/Los_Angeles");
+      rerender(<Movie response={snapshot} onNotice={noop} onError={noop} />);
+      expect(screen.getByText("2015-10-04").getAttribute("datetime")).toBe(timestamp);
+
+      rerender(<Movie response={{ ...snapshot, record: {
+        ...snapshot.record, fields: { ...snapshot.record.fields, release_date: "2015-10-05" },
+        field_sources: { release_date: "TMDB" },
+      } }} onNotice={noop} onError={noop} />);
+      expect(screen.getByText("2015-10-05").getAttribute("datetime")).toBe("2015-10-05");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("默认打开刮削工作台，导航不提供独立作品采集页", async () => {
     harness();
     render(<App />);

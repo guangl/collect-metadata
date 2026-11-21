@@ -134,11 +134,23 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
         "Overview":"这是简介","Path":"/media/资料剧集","ProviderIds":{"Tmdb":"70523"},"ImageTags":{"Primary":"3"}
     });
     let extra = json!({"Id":"35","Type":"Series","Name":"本地剧集"});
-    let episode = json!({
+    let mut episode = json!({
         "Id":"34","Type":"Episode","Name":"第一集","SeriesName":"资料剧集","Overview":"已有中文译文",
         "IndexNumber":1,"ParentIndexNumber":1,"Path":"/media/资料剧集/Season 1/S01E01.mkv",
-        "ImageTags":{"Primary":"3"},"PremiereDate":"2022-02-02T00:00:00Z"
+        "ImageTags":{"Primary":"3"}
     });
+    let fields = args.get("Fields").map(String::as_str).unwrap_or_default();
+    for (requested, key, value) in [
+        ("PremiereDate", "PremiereDate", json!("2022-02-02T00:00:00Z")),
+        ("CommunityRating", "CommunityRating", json!(8.1)),
+        ("DateCreated", "DateCreated", json!("2022-03-01T00:00:00Z")),
+        ("Settings", "LockData", json!(false)),
+        ("VideoCodec", "VideoCodec", json!("hevc")),
+    ] {
+        if fields.split(',').any(|field| field == requested) {
+            episode[key] = value;
+        }
+    }
     let video = json!({
         "Id":"40","Type":"Video","Name":"家庭旅行","Path":"/media/2024旅行.mov",
         "Overview":"自己的旅行记录","ImageTags":{"Primary":"5"},
@@ -266,6 +278,8 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
     assert_eq!(seasons[0]["episodes"], json!([]));
     assert_eq!(seasons[1]["episodes"][0]["title"], "第一集");
     assert_eq!(seasons[1]["episodes"][0]["date"], "2022-02-02");
+    assert_eq!(seasons[1]["episodes"][0]["premiere_at"], "2022-02-02T00:00:00Z");
+    assert_eq!(seasons[1]["episodes"][0]["rating"], 8.1);
     assert_eq!(seasons[1]["episodes"][0]["overview"], "已有中文译文");
     assert_eq!(seasons[1]["episodes"][0]["image"], "3");
     assert_eq!(seasons[2]["episodes"][0]["id"], "37");
@@ -633,6 +647,14 @@ async fn verify_web_routes(test_url: Url) {
             assert_eq!(record["scope"], "episode");
             assert_eq!(record["fields"]["episode_number"], 1);
             assert_eq!(record["fields"]["description"], "已有中文译文");
+            assert_eq!(record["fields"]["release_date"], "2022-02-02");
+            assert_eq!(record["fields"]["rating"], json!({"value":8.1,"scale":10}));
+            assert_eq!(record["field_sources"]["rating"], "Emby");
+            let raw = &record["sources"][0]["data"]["item"];
+            assert_eq!(raw["PremiereDate"], "2022-02-02T00:00:00Z");
+            assert_eq!(raw["DateCreated"], "2022-03-01T00:00:00Z");
+            assert_eq!(raw["LockData"], false);
+            assert_eq!(raw["VideoCodec"], "hevc");
             assert!(record["sources"][0]["data"]["children"].as_array().unwrap().is_empty());
             assert_eq!(directory, season_one);
             assert!(fs::read_to_string(directory.join("S01E01.nfo")).unwrap().contains("<episodedetails>"));

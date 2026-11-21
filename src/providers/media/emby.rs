@@ -15,6 +15,16 @@ use super::MediaKind;
 use crate::{collect::Source, providers::field_map};
 
 const FIELDS: &str = "Path,Overview,People,ProviderIds,Genres,Studios,Tags,Taglines,OriginalTitle,SortName,ProductionLocations,MediaSources,MediaStreams,Chapters,ExternalUrls,HomePageUrl,RemoteTrailers";
+const EPISODE_SUMMARY_FIELDS: &str = "PremiereDate,CommunityRating";
+// Emby omits these properties from /Items unless requested, even for a single ID.
+const EPISODE_DETAIL_FIELDS: &str = concat!(
+    "ProductionYear,OfficialRating,CustomRating,CriticRating,ParentId,DateCreated,DateModified,",
+    "Settings,FileName,VideoCodec,AudioCodec,Width,Height,PrimaryImageAspectRatio,",
+    "AverageFrameRate,RealFrameRate,MimeType,PartCount,Collections,LocalTrailerCount,",
+    "SpecialFeatureCount,SeriesStudio,Prefix,Etag,PresentationUniqueKey,DisplayPreferencesId,",
+    "CanDelete,CanDownload,DisplayOrder,SortIndexNumber,SortParentIndexNumber,",
+    "PreferredMetadataLanguage,PreferredMetadataCountryCode,LocationType",
+);
 pub(crate) const EPISODE_QUERY_PREFIX: &str = "emby-episode:";
 const MAX_RESPONSE: usize = 12 * 1024 * 1024;
 
@@ -85,6 +95,7 @@ struct EmbyEpisodePreview {
     original_title: Option<String>,
     overview: Option<String>,
     date: Option<String>,
+    premiere_at: Option<String>,
     runtime_minutes: Option<u64>,
     rating: Option<f64>,
     image: Option<String>,
@@ -453,6 +464,14 @@ impl Emby {
         Ok(title)
     }
 
+    pub(super) async fn series_tmdb_id(&self, client: &Client, episode: &Value) -> Option<u32> {
+        let series = self
+            .item(client, valid_id(&episode["SeriesId"])?, "Series", "ProviderIds")
+            .await
+            .ok()?;
+        super::tmdb::id(series["ProviderIds"]["Tmdb"].as_str()?)
+    }
+
     async fn item(&self, client: &Client, id: &str, item_type: &str, fields: &str) -> Result<Value, String> {
         if !is_item_id(id) {
             return Err("Emby 条目 ID 无效。".into());
@@ -474,10 +493,18 @@ impl Emby {
     }
 
     async fn details(&self, client: &Client, id: &str, item_type: &str) -> Option<Source> {
-        let item = self.item(client, id, item_type, FIELDS).await.ok()?;
+        let (item, extended) = if item_type == "Episode" {
+            let fields = format!("{FIELDS},{EPISODE_SUMMARY_FIELDS},{EPISODE_DETAIL_FIELDS}");
+            match self.item(client, id, item_type, &fields).await {
+                Ok(item) => (item, true),
+                Err(_) => (self.item(client, id, item_type, FIELDS).await.ok()?, false),
+            }
+        } else {
+            (self.item(client, id, item_type, FIELDS).await.ok()?, true)
+        };
         nonempty_text(&item["Name"])?;
         let (children, complete) = if item_type == "Series" {
-            self.series_children(client, id, FIELDS).await.unwrap_or_default()
+            self.series_children(client, id, &format!("{FIELDS},PremiereDate")).await.unwrap_or_default()
         } else {
             (Vec::new(), true)
         };
@@ -493,7 +520,10 @@ impl Emby {
             details,
             json!({"item":item,"children":children}),
         );
-        if !complete {
+        if !extended {
+            source.status = "partial";
+            source.note = Some("已读取 Emby 分集基本资料，扩展字段暂不可用。".into());
+        } else if !complete {
             source.status = "partial";
             source.note = Some("已读取 Emby 作品资料，部分季集资料暂不可用。".into());
         }
@@ -556,7 +586,7 @@ impl Emby {
             return Err("Emby 剧集 ID 无效。".into());
         }
         let (children, complete) = self
-            .series_children(client, id, "Overview,OriginalTitle")
+            .series_children(client, id, &format!("Overview,OriginalTitle,{EPISODE_SUMMARY_FIELDS}"))
             .await?;
         let mut seasons = HashMap::<Option<u64>, EmbySeasonPreview>::new();
         let mut season_numbers = HashMap::new();
@@ -595,6 +625,7 @@ impl Emby {
                 original_title: nonempty_text(&item["OriginalTitle"]),
                 overview: nonempty_text(&item["Overview"]),
                 date: date(&item["PremiereDate"]).map(str::to_owned),
+                premiere_at: nonempty_text(&item["PremiereDate"]),
                 runtime_minutes: runtime(item),
                 rating: item["CommunityRating"].as_f64(),
                 image: nonempty_text(&item["ImageTags"]["Primary"]),

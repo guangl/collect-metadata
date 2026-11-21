@@ -3,7 +3,7 @@ import { exportJson } from "./api";
 import { Tabs } from "./Tabs";
 import { RecordedCredits } from "./RecordedCredits";
 import { EmbyCredits } from "./batch/EmbyCatalog";
-import { Episodes, ExternalLink, languageName, languageText, PosterArt, safeUrl } from "./Catalog";
+import { Episodes, ExternalLink, languageName, languageText, LocalDate, PosterArt, safeUrl } from "./Catalog";
 import { errorText, mediaLabels } from "./types";
 import type { Fields, LookupResponse, MediaType, Source } from "./types";
 
@@ -85,22 +85,24 @@ export function formatDate(value: string): string {
   }
 }
 
-function FactList({ fields, origins, keys = Object.keys(fields), className = "facts", onError }: {
+function FactList({ fields, origins, keys = Object.keys(fields), className = "facts", premiere, onError }: {
   fields: Fields;
   origins?: Record<string, string | undefined>;
   keys?: string[];
   className?: string;
+  premiere?: unknown;
   onError: Notice;
 }) {
   const presentKeys = keys.filter((key) => key !== "episodes" && fields[key] != null);
   if (!presentKeys.length) return null;
+  const releaseDate = typeof premiere === "string" && premiere ? premiere : fields.release_date;
 
   return (
     <dl className={className}>
       {presentKeys.map((key) => (
         <div className={className === "facts" ? "fact" : undefined} key={key}>
           <dt>{factLabels[key] || key}{origins?.[key] && <span>{origins[key]}</span>}</dt>
-          <dd><FactValue name={key} value={fields[key]} onError={onError} /></dd>
+          <dd><FactValue name={key} value={key === "release_date" ? releaseDate : fields[key]} onError={onError} /></dd>
         </div>
       ))}
     </dl>
@@ -108,6 +110,7 @@ function FactList({ fields, origins, keys = Object.keys(fields), className = "fa
 }
 
 function FactValue({ name, value, onError }: { name: string; value: unknown; onError: Notice }) {
+  if (name === "release_date" && typeof value === "string") return <LocalDate value={value} />;
   if (name.endsWith("_url") && typeof value === "string") {
     return <ExternalLink value={value} onError={onError}>打开链接 ↗</ExternalLink>;
   }
@@ -118,6 +121,14 @@ function FactValue({ name, value, onError }: { name: string; value: unknown; onE
   if (name === "runtime_minutes") return <>{String(value)} 分钟</>;
   if (Array.isArray(value)) return name === "original_languages" ? languageText(value) : value.join(" · ");
   return String(value);
+}
+
+type EmbyItemData = { Id?: unknown; PremiereDate?: unknown };
+
+function embyData(source?: Source) {
+  return source?.provider === "Emby"
+    ? source.data as { item?: EmbyItemData; children?: EmbyItemData[] } | null
+    : undefined;
 }
 
 function SourceCard({ name, description, source, loading, onError }: {
@@ -144,7 +155,7 @@ function SourceCard({ name, description, source, loading, onError }: {
     <details className="source-card">
       <summary>{heading}</summary>
       <ExternalLink value={source.url} className="source-link" onError={onError}>打开来源页面 ↗</ExternalLink>
-      <FactList fields={source.fields} onError={onError} />
+      <FactList fields={source.fields} premiere={embyData(source)?.item?.PremiereDate} onError={onError} />
       {source.data != null && <details onToggle={(event) => setShowRaw(event.currentTarget.open)}>
         <summary className="raw">查看来源 JSON</summary>
         {showRaw && <pre tabIndex={0}>{JSON.stringify(source.data, null, 2)}</pre>}
@@ -217,7 +228,16 @@ export function Movie({ response, onNotice, onError }: { response: LookupRespons
   const title = fields.title || fields.title_ja || fields.title_original || fields.title_en || fields.title_site;
   const kind = record.media_type ?? "av";
   const backdrop = safeUrl(fields.backdrop_url);
-  const embyItem = (sources.find(({ provider }) => provider === "Emby")?.data as { item?: { Id?: unknown } } | undefined)?.item?.Id;
+  const emby = embyData(sources.find(({ provider }) => provider === "Emby"));
+  const embyItem = emby?.item?.Id;
+  const episodePremieres = new Map<string, string>();
+  if (origins.episodes === "Emby" && Array.isArray(emby?.children)) {
+    for (const item of emby.children) {
+      if (typeof item?.Id === "string" && typeof item.PremiereDate === "string" && item.PremiereDate) {
+        episodePremieres.set(item.Id, item.PremiereDate);
+      }
+    }
+  }
   const liveCredits = typeof embyItem === "string" && /^[a-z0-9-]{1,96}$/i.test(embyItem) ? embyItem : undefined;
   async function save() {
     setExporting(true);
@@ -253,10 +273,11 @@ export function Movie({ response, onNotice, onError }: { response: LookupRespons
       <Tabs label="采集资料" className="result-tabs" tabs={[
         { id: "overview", label: "简介与资料", content: <div className="movie-body">
           {fields.description && <p className="movie-description mb-4">{fields.description}</p>}
-          <FactList fields={{ original_languages: [], ...fields }} origins={origins} keys={keyFacts} onError={onError} />
+          <FactList fields={{ original_languages: [], ...fields }} origins={origins} keys={keyFacts}
+            premiere={origins.release_date === "Emby" ? emby?.item?.PremiereDate : undefined} onError={onError} />
           <FactList fields={fields} origins={origins} keys={additionalFacts} className="full-facts" onError={onError} />
         </div> },
-        ...(fields.episodes?.length ? [{ id: "episodes", label: "季与分集", retain: true, content: <div className="movie-body"><Episodes episodes={fields.episodes} onError={onError} /></div> }] : []),
+        ...(fields.episodes?.length ? [{ id: "episodes", label: "季与分集", retain: true, content: <div className="movie-body"><Episodes episodes={fields.episodes} premiereDates={episodePremieres} onError={onError} /></div> }] : []),
         { id: "credits", label: "演职员", retain: true, content: liveCredits ? <EmbyCredits id={liveCredits} fallback={<RecordedCredits sources={sources} fields={fields} />} /> : <RecordedCredits sources={sources} fields={fields} /> },
         { id: "sources", label: "数据来源", retain: true, content: <div className="movie-body"><Sources kind={kind} sources={sources} loading={false} onError={onError} /></div> },
       ]} />

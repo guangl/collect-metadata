@@ -112,7 +112,26 @@ export function PosterCard({ title, cover, caption, disabled, onOpen }: {
   );
 }
 
-export function Episodes({ episodes, onError }: { episodes: Episode[]; onError: (message: string) => void }) {
+export function LocalDate({ value }: { value: string }) {
+  let label = value;
+  if (/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) {
+    // Emby sends fractional seconds with up to seven digits. Date only needs milliseconds.
+    const date = new Date(value.replace(/(\.\d{3})\d+/, "$1"));
+    if (Number.isFinite(date.getTime())) {
+      const year = String(date.getFullYear()).padStart(4, "0");
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      label = `${year}-${month}-${day}`;
+    }
+  }
+  return <time dateTime={value}>{label}</time>;
+}
+
+export function Episodes({ episodes, premiereDates, onError }: {
+  episodes: Episode[];
+  premiereDates?: ReadonlyMap<string, string>;
+  onError: (message: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const seasons = [...new Set(episodes.map(({ season }) => season ?? 0))].sort((a, b) => a - b);
   const [season, setSeason] = useState(seasons.find((value) => value > 0) ?? 0);
@@ -130,13 +149,14 @@ export function Episodes({ episodes, onError }: { episodes: Episode[]; onError: 
             </select>
           </label>
           <ol className="episode-list">
-            {episodes.filter((episode) => (episode.season ?? 0) === season).map((episode) => (
-              <li key={episode.id}>
+            {episodes.filter((episode) => (episode.season ?? 0) === season).map((episode) => {
+              const date = premiereDates?.get(String(episode.id)) ?? episode.date;
+              return <li key={episode.id}>
                 <span>{episode.number == null ? "特别篇" : "第 " + episode.number + " 集"}</span>
                 {episode.url ? <ExternalLink value={episode.url} onError={onError}>{episode.title}</ExternalLink> : episode.title}
-                <time>{episode.date}</time>
-              </li>
-            ))}
+                {date && <LocalDate value={date} />}
+              </li>;
+            })}
           </ol>
         </>
       )}

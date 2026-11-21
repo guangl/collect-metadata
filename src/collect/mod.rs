@@ -142,15 +142,24 @@ impl Collector {
         query: &str,
         year: Option<u16>,
     ) -> Option<LookupResponse> {
-        let (id, source) = source.find(&self.client, kind, query, year).await?;
-        let mut lookup = make_lookup(kind, query, Some(&format!("Emby-{id}")), vec![source]).ok()?;
-        if query.starts_with(media::emby::EPISODE_QUERY_PREFIX) {
+        let (id, emby_source) = source.find(&self.client, kind, query, year).await?;
+        let targets = self.languages.targets(None);
+        let is_episode = query.starts_with(media::emby::EPISODE_QUERY_PREFIX);
+        let mut sources = vec![emby_source];
+        if is_episode && let Some(tmdb) = self.tmdb.provider() {
+            let episode = &sources[0].data["item"];
+            if let Some(enrichment) = tmdb
+                .emby_episode(&self.client, source, episode, &targets[0])
+                .await
+            {
+                sources.push(enrichment);
+            }
+        }
+        let mut lookup = make_lookup(kind, query, Some(&format!("Emby-{id}")), sources).ok()?;
+        if is_episode {
             lookup.record["scope"] = serde_json::json!("episode");
         }
-        Some(
-            self.localize_lookup(lookup, self.languages.targets(None))
-                .await,
-        )
+        Some(self.localize_lookup(lookup, targets).await)
     }
 
     pub async fn upsert_emby_item(
