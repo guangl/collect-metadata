@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, panic::AssertUnwindSafe, time::Duration};
 use axum::{extract::OriginalUri, http::HeaderMap};
 use futures_util::FutureExt;
 use reqwest::{Client, Url};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 use super::*;
 
@@ -204,8 +204,9 @@ impl Api {
 async fn web_routes_persist_and_export_an_emby_batch() {
     let url = env::var("COLLECT_METADATA_TEST_POSTGRES").unwrap();
     let admin = PgPool::connect(&url).await.unwrap();
+    // The SQL identifier contains a fixed prefix and a hexadecimal UUID.
     let schema = format!("metadata_web_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&admin)
         .await
         .unwrap();
@@ -216,7 +217,7 @@ async fn web_routes_persist_and_export_an_emby_batch() {
     let outcome = AssertUnwindSafe(verify_web_routes(test_url))
         .catch_unwind()
         .await;
-    let cleanup = sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+    let cleanup = sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
         .await;
     if let Err(panic) = outcome {
