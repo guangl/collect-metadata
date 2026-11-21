@@ -27,7 +27,7 @@ test("configures a library and saves naming and sidecar options via the Emby plu
   const page = mount({ OrganizeRoots: "", SyncToken: "saved-token" });
   const picker = await page.findByRole("option", { name: "电影 · /media/.private-video" });
   expect(page.queryByRole("option", { name: /混合/ })).toBeNull();
-  fireEvent.change(page.getByLabelText("从 Emby 媒体库添加根路径"), { target: { value: (picker as HTMLOptionElement).value } });
+  fireEvent.change(page.getByRole("combobox", { name: "从媒体库添加路径" }), { target: { value: (picker as HTMLOptionElement).value } });
   fireEvent.click(page.getByRole("button", { name: "添加" }));
   const folder = page.getByLabelText<HTMLInputElement>("电影目录模板");
   const file = page.getByLabelText<HTMLInputElement>("电影文件名模板");
@@ -37,7 +37,7 @@ test("configures a library and saves naming and sidecar options via the Emby plu
   expect(folder.validity.valid).toBe(true);
   fireEvent.input(file, { target: { value: "{title} - 正片" } });
   expect(page.getByText("电影示例 (2025)/电影示例 - 正片.mkv")).toBeTruthy();
-  fireEvent.click(page.getByLabelText("移动并同步重命名匹配的图片"));
+  fireEvent.click(page.getByRole("checkbox", { name: "匹配的图片（同步重命名）" }));
   expect(page.getByLabelText<HTMLInputElement>("同步令牌").value).toBe("");
   fireEvent.submit(page.getByRole("button", { name: "保存设置" }).closest("form")!);
   await waitFor(() => expect(page.updatePluginConfiguration).toHaveBeenCalledWith(pluginId, expect.objectContaining({
@@ -57,7 +57,7 @@ test("previews ani-rss presets, user samples, ranges and rename switches", async
   expect(page.getByText("动画 (2025)/Season 1/[字幕组] 动画 S01E07.mp4")).toBeTruthy();
   fireEvent.input(episode, { target: { value: "动画 (2025) S01E07-E08.mp4" } });
   expect(page.getByText("动画 (2025)/Season 1/动画 (2025) S01E07-E08.mp4")).toBeTruthy();
-  fireEvent.click(page.getByLabelText("整理时重命名分集文件"));
+  fireEvent.click(page.getByRole("checkbox", { name: "重命名分集文件" }));
   const field = page.getByLabelText<HTMLInputElement>("分集文件名模板");
   field.setSelectionRange(0, field.value.length);
   fireEvent.click(page.getByRole("button", { name: "{original}", exact: true }));
@@ -71,11 +71,11 @@ test("previews ani-rss presets, user samples, ranges and rename switches", async
 test("shows environment-managed values without letting the form replace them", async () => {
   const page = mount({ OrganizeRoots: "/media/old", EnvironmentRoots: "/media/.private-video", SyncTokenOverridden: true });
   await page.findByText(/由容器的 EMBY_ORGANIZE_ROOTS/);
-  const roots = page.getByLabelText<HTMLTextAreaElement>("允许整理的根路径（每行一个）");
+  const roots = page.getByRole<HTMLTextAreaElement>("textbox", { name: "允许整理的根路径" });
   expect(roots.value).toBe("/media/.private-video");
   expect(roots.readOnly).toBe(true);
   expect(page.getByLabelText<HTMLInputElement>("同步令牌").disabled).toBe(true);
-  fireEvent.click(page.getByLabelText("允许自动整理所选媒体库的根目录"));
+  fireEvent.click(page.getByRole("switch", { name: "自动整理媒体库根目录" }));
   fireEvent.submit(page.getByRole("button", { name: "保存设置" }).closest("form")!);
   await waitFor(() => expect(page.updatePluginConfiguration).toHaveBeenCalledWith(pluginId, expect.objectContaining({
     OrganizeRoots: "/media/old", OrganizeEnabled: false,
