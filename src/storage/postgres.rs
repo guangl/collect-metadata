@@ -5,7 +5,7 @@ use crate::MediaKind;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{
-    PgConnection, PgPool, Postgres, Row,
+    AssertSqlSafe, PgConnection, PgPool, Postgres, Row,
     postgres::{PgConnectOptions, PgPoolOptions, PgRow},
 };
 
@@ -25,6 +25,7 @@ pub struct HistoryItem {
     collected_at: String,
 }
 
+// Only this fixed projection is interpolated into SQL. Values use bind parameters.
 const HISTORY_FIELDS: &str = "id, code, title,
     coalesce(document->>'media_type', 'av') as media_type,
     coalesce(document->'fields'->'original_languages', '[]'::jsonb) as original_languages,
@@ -137,7 +138,7 @@ impl Store {
             "INSERT INTO collect_metadata_snapshots (code, title, document) VALUES ($1, $2, $3)
              RETURNING {HISTORY_FIELDS}"
         );
-        let row = sqlx::query::<Postgres>(&statement)
+        let row = sqlx::query::<Postgres>(AssertSqlSafe(statement))
             .bind(code)
             .bind(title)
             .bind(document)
@@ -166,7 +167,7 @@ impl Store {
             MediaKind::Movie => "movie",
             MediaKind::Series => "series",
         });
-        let rows = sqlx::query(&statement)
+        let rows = sqlx::query(AssertSqlSafe(statement))
             .bind(before.unwrap_or(i64::MAX))
             .bind(kind)
             .bind(language)
@@ -189,7 +190,7 @@ impl Store {
         let statement = format!(
             "SELECT {HISTORY_FIELDS}, document FROM collect_metadata_snapshots WHERE id = $1"
         );
-        let row = sqlx::query(&statement)
+        let row = sqlx::query(AssertSqlSafe(statement))
             .bind(id)
             .fetch_optional(&self.pool)
             .await

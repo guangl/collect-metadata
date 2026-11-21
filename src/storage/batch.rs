@@ -494,7 +494,7 @@ mod tests {
     use super::*;
     use crate::{MediaKind, MediaProvider};
     use serde_json::json;
-    use sqlx::{PgPool, postgres::PgConnectOptions};
+    use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions};
 
     async fn test_database() -> (PgPool, PgConnectOptions, String) {
         let options = std::env::var("COLLECT_METADATA_TEST_POSTGRES")
@@ -502,6 +502,7 @@ mod tests {
             .parse::<PgConnectOptions>()
             .unwrap();
         let admin = PgPool::connect_with(options.clone()).await.unwrap();
+        // The SQL identifier consists of a fixed prefix and two integers.
         let schema = format!(
             "batch_test_{}_{}",
             std::process::id(),
@@ -510,7 +511,7 @@ mod tests {
                 .unwrap()
                 .as_micros()
         );
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
             .execute(&admin)
             .await
             .unwrap();
@@ -648,7 +649,7 @@ mod tests {
         third.pool.close().await;
         first.pool.close().await;
         second.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
             .execute(&admin)
             .await
             .unwrap();
@@ -800,7 +801,7 @@ mod tests {
         after_cancel.pool.close().await;
         restarted.pool.close().await;
         store.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
             .execute(&admin)
             .await
             .unwrap();
