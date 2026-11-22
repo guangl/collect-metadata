@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use super::{LanguageSettings, Texts, Translations, language_base, normalize_locale, text};
-use crate::{Collector, LookupResponse};
+use crate::{Collector, LookupResponse, providers::media::bangumi::chinese_overview};
 
 fn copy_text(fields: &mut Texts, key: &str, value: &Value) {
     if let Some(value) = text(value) {
@@ -92,9 +92,15 @@ fn official_catalog(record: &Value, targets: &[String]) -> (Translations, Transl
                 .insert(field.to_owned(), origin.to_owned());
         }
     };
+    let is_episode = record["scope"] == "episode";
+    let has_emby_chinese = is_episode
+        && record["field_sources"]["description"] == "Emby"
+        && text(&record["fields"]["description"]).is_some_and(chinese_overview);
     for source in record["sources"].as_array().into_iter().flatten() {
         if source["provider"] == "TMDB" {
-            let translations = source["data"]["translations"]["translations"].as_array();
+            let data = &source["data"];
+            let catalog = if is_episode { &data["episode"] } else { data };
+            let translations = catalog["translations"]["translations"].as_array();
             for target in targets {
                 let mut entries = translations
                     .into_iter()
@@ -131,6 +137,9 @@ fn official_catalog(record: &Value, targets: &[String]) -> (Translations, Transl
                     ("description", "overview"),
                     ("tagline", "tagline"),
                 ] {
+                    if is_episode && (field != "description" || (target == "zh-CN" && has_emby_chinese)) {
+                        continue;
+                    }
                     if let Some(value) = entries.iter().find_map(|(_, data)| text(&data[key])) {
                         insert(target, field, value, "TMDB");
                     }
@@ -147,6 +156,16 @@ fn official_catalog(record: &Value, targets: &[String]) -> (Translations, Transl
         let subject = &bangumi["data"]["subject"];
         let fields = &record["fields"];
         for target in targets {
+            if is_episode {
+                if !has_emby_chinese
+                    && target == "zh-CN"
+                    && bangumi["data"]["overview_language"] == "zh"
+                    && let Some(description) = text(&bangumi["fields"]["description"])
+                {
+                    insert(target, "description", description, "Bangumi");
+                }
+                continue;
+            }
             let title_key = if target == "zh-CN" {
                 "name_cn"
             } else if fields["original_languages"]
@@ -350,6 +369,34 @@ pub(crate) async fn sync_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn episode_overview_prefers_target_catalog_and_preserves_emby_chinese() {
+        let chinese = "菲亚前往第一骑士团报告自己已经回到岗位，随后接受了西利尔同行的邀请。";
+        let mut record = json!({
+            "media_type": "series",
+            "scope": "episode",
+            "fields": {"description": "Fia travels to Sutherland to help."},
+            "field_sources": {"description": "Emby"},
+            "sources":[
+                {"provider":"TMDB","data":{"episode":{"translations":{"translations":[
+                    {"iso_639_1":"zh","iso_3166_1":"CN","data":{"overview":""}},
+                    {"iso_639_1":"en","iso_3166_1":"US","data":{"overview":"Fia travels to Sutherland."}}
+                ]}}}},
+                {"provider":"Bangumi","data":{"overview_language":"zh"},"fields":{"description":chinese}}
+            ]
+        });
+        let targets = ["zh-CN".into(), "en-US".into()];
+        let (variants, origins) = official_catalog(&record, &targets);
+        assert_eq!(variants["zh-CN"]["description"], chinese);
+        assert_eq!(origins["zh-CN"]["description"], "Bangumi");
+        assert_eq!(origins["en-US"]["description"], "TMDB");
+
+        record["fields"]["description"] = json!(chinese);
+        let (variants, _) = official_catalog(&record, &targets);
+        assert!(!variants.contains_key("zh-CN"));
+        assert!(variants.contains_key("en-US"));
+    }
 
     #[test]
     fn ignores_blank_catalog_translation_and_preserves_exact_locale() {

@@ -5,12 +5,13 @@ import { Diagnostics } from "./Diagnostics";
 import { EmbySettings } from "./EmbySettings";
 import { LanguageSettings } from "./LanguageSettings";
 import { OutputSettings } from "./OutputSettings";
-import { TmdbSettings } from "./TmdbSettings";
+import { CredentialSettings } from "./CredentialSettings";
 import type { StorageStatus } from "./types";
 
 const sections = [
   ["output", "输出与命名"],
   ["tmdb", "TMDB"],
+  ["bangumi", "Bangumi"],
   ["emby", "家庭 Emby"],
   ["storage", "PostgreSQL"],
   ["languages", "元数据语言"],
@@ -45,7 +46,8 @@ export function Settings({ section, onSection, storage, onStorage, onConnected, 
 
   const contents = {
     output: <OutputSettings />,
-    tmdb: <TmdbSettings onError={onError} />,
+    tmdb: <CredentialSettings source="tmdb" onError={onError} />,
+    bangumi: <CredentialSettings source="bangumi" onError={onError} />,
     emby: <EmbySettings />,
     storage: <Database storage={storage} onStorage={onStorage} onConnected={onConnected} />,
     languages: section === "languages" ? <LanguageSettings /> : null,

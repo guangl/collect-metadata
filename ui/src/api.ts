@@ -1,4 +1,4 @@
-import type { BatchAction, BatchInput, BatchSummary, BatchView, FolderBatchResult, FolderPreview, FolderSelection } from "./batch/engine";
+import type { BatchAction, BatchInput, BatchSummary, BatchView, FolderBatchResult, FolderPreview, FolderSelection, FolderWorkResult } from "./batch/engine";
 import type {
   Candidate,
   EmbyInput,
@@ -15,7 +15,7 @@ import type {
   OutputSettingsView,
   Snapshot,
   StorageStatus,
-  TmdbStatus,
+  CredentialStatus,
   WritebackPreview,
 } from "./types";
 
@@ -107,7 +107,7 @@ export async function getStorageStatus(): Promise<StorageStatus> {
     if (!(await invoke<boolean>("storage_configured"))) return "none";
     await invoke("check_storage");
   } else {
-    await request("/api/settings/postgres", { cache: "no-store" });
+    return await request<"none" | undefined>("/api/settings/postgres", { cache: "no-store" }) ?? "ready";
   }
   return "ready";
 }
@@ -135,7 +135,7 @@ export function configureDatabase(url: string): Promise<void> {
   return invoke("configure_database", { url });
 }
 
-export function getTmdbStatus(): Promise<TmdbStatus> {
+export function getTmdbStatus(): Promise<CredentialStatus> {
   return invoke ? invoke("tmdb_status") : request("/api/settings/tmdb");
 }
 
@@ -143,8 +143,20 @@ export function testTmdb(credential: string | null): Promise<void> {
   return invoke ? invoke("test_tmdb", { credential }) : post("/api/settings/tmdb/test", { credential });
 }
 
-export function saveTmdb(credential: string): Promise<TmdbStatus> {
+export function saveTmdb(credential: string): Promise<CredentialStatus> {
   return invoke ? invoke("save_tmdb", { credential }) : post("/api/settings/tmdb", { credential });
+}
+
+export function getBangumiStatus(): Promise<CredentialStatus> {
+  return invoke ? invoke("bangumi_status") : request("/api/settings/bangumi");
+}
+
+export function testBangumi(credential: string | null): Promise<void> {
+  return invoke ? invoke("test_bangumi", { credential }) : post("/api/settings/bangumi/test", { credential });
+}
+
+export function saveBangumi(credential: string): Promise<CredentialStatus> {
+  return invoke ? invoke("save_bangumi", { credential }) : post("/api/settings/bangumi", { credential });
 }
 
 interface LanguageSettingsView {
@@ -221,6 +233,25 @@ export function overwriteEmby(target: EmbyScrapeTarget, replaceImages: boolean):
   return invoke ? invoke("overwrite_emby", { input }) : post("/api/emby/overwrite", input);
 }
 
+export function refreshEmbyMetadata(target: EmbyScrapeTarget): Promise<void> {
+  return invoke ? invoke("refresh_emby_metadata", { target }) : post("/api/emby/refresh", target);
+}
+
+export function getMissingEpisodeOverviews(library: string): Promise<Record<string, string[]>> {
+  return invoke ? invoke("emby_missing_episode_overviews", { library }) :
+    request(`/api/emby/libraries/${encodeURIComponent(library)}/missing-episode-overviews`, { cache: "no-store" });
+}
+
+export interface EpisodeOverview {
+  overview: string | null;
+  source: string | null;
+}
+
+export function getEmbyEpisodeOverview(id: string): Promise<EpisodeOverview> {
+  return invoke ? invoke("emby_episode_overview", { id }) :
+    request(`/api/emby/episodes/${encodeURIComponent(id)}/overview`, { cache: "no-store" });
+}
+
 export function getEmbySeries(id: string): Promise<EmbySeriesPreview> {
   return invoke ? invoke("emby_series_preview", { id }) :
     request("/api/emby/series/" + encodeURIComponent(id), { cache: "no-store" });
@@ -235,7 +266,10 @@ export type EmbyImage = "poster" | "backdrop" | "episode" | "portrait";
 export async function loadEmbyImage(id: string, image: EmbyImage): Promise<string> {
   if (!invoke) throw new Error("Emby 图片暂不可用。");
   const bytes = await invoke<ArrayBuffer | number[]>("emby_preview_image", { id, image });
-  return URL.createObjectURL(new Blob([Array.isArray(bytes) ? Uint8Array.from(bytes) : bytes]));
+  const data = Array.isArray(bytes) ? Uint8Array.from(bytes) : new Uint8Array(bytes);
+  const type = data[0] === 0xff ? "image/jpeg" : data[0] === 0x89 ? "image/png"
+    : data[0] === 0x52 ? "image/webp" : "image/gif";
+  return URL.createObjectURL(new Blob([data], { type }));
 }
 
 export function saveOutputSettings(options: OutputOptions): Promise<OutputSettingsView> {
@@ -262,6 +296,12 @@ export function browseMountedFolders(path: string): Promise<string[]> {
 
 export function previewMountedFolder(path: string): Promise<FolderSelection> {
   return post("/api/media-folders", path);
+}
+
+export function scrapeFolderWork(batch: number, row: number, paths: string[],
+  candidate: { provider: MediaProvider; id: string } | null): Promise<FolderWorkResult> {
+  if (!invoke) return Promise.reject(new Error("本地刮削仅在桌面版可用。"));
+  return invoke("scrape_folder_work", { batch, row, paths, candidate });
 }
 
 export function createFolderBatch(paths: string[]): Promise<FolderBatchResult> {

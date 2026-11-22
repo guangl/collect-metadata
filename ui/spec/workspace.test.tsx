@@ -49,6 +49,8 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: Emb
     if (route === "/api/settings/languages") return response({ languages: body ?? ["zh-CN"], translation_configured: false });
     if (route === "/api/settings/tmdb") return response(body ? "saved" : "environment");
     if (route === "/api/settings/tmdb/test") return response(null, 204);
+    if (route === "/api/settings/bangumi") return response(body ? "saved" : "unconfigured");
+    if (route === "/api/settings/bangumi/test") return response(null, 204);
     if (route === "/api/settings/emby") return response(body ? { enabled: body.enabled, server: body.server, configured: true } :
       { enabled: false, server: "", configured: false });
     if (route === "/api/settings/emby/test") return response(null, 204);
@@ -122,6 +124,14 @@ function button(name: string | RegExp) {
 
 function click(name: string | RegExp) {
   fireEvent.click(button(name));
+}
+
+function confirmScrape(mode?: "AI 刮削" | "覆盖刮削") {
+  const dialog = screen.getByRole("dialog", { name: /选择刮削方式|确认刮削/ });
+  if (mode) fireEvent.click(within(dialog).getByRole("radio", { name: new RegExp(mode + "$") }));
+  fireEvent.click(within(dialog).getByRole("button", {
+    name: mode === "覆盖刮削" ? "确认覆盖刮削" : /提交采集任务|请求 Emby 刮削/,
+  }));
 }
 
 function setLabel(name: string, value: string) {
@@ -379,6 +389,18 @@ describe("设置", () => {
     setLabel("TMDB API 凭据", "fixture");
     click("保存配置");
     await screen.findByText("已保存 TMDB 凭据");
+    fireEvent.click(screen.getByRole("tab", { name: "Bangumi" }));
+    const token = screen.getByLabelText("Bangumi 访问令牌") as HTMLInputElement;
+    expect(token.type).toBe("password");
+    setLabel("Bangumi 访问令牌", "fixture-token");
+    click("测试连接");
+    await screen.findByText("Bangumi 连接测试成功。");
+    click("保存配置");
+    await screen.findByText("已保存 Bangumi 凭据");
+    expect(token.value).toBe("");
+    expect(calls.mock.calls.find(([route, options]) =>
+      route === "/api/settings/bangumi" && options?.method === "POST")?.[1]?.body)
+      .toBe('{"credential":"fixture-token"}');
     fireEvent.click(screen.getByRole("tab", { name: "家庭 Emby" }));
     setLabel("Emby 服务地址", "https://emby.example.test");
     setLabel("Emby API 密钥", "fixture");
@@ -454,10 +476,10 @@ describe("后台批次", () => {
     expect(screen.queryByRole("dialog", { name: "Emby 媒体写回" })).toBeNull();
   });
 
-  it("不连接 PostgreSQL 也能预览海报，但不能提交刮削", async () => {
+  it("Web 没有 PostgreSQL 时还能预览文件夹", async () => {
     const calls = harness([], false);
     const { container } = render(<App />);
-    await screen.findByText("连接 PostgreSQL 后即可提交后台批次。");
+    await screen.findByText("Web 文件夹刮削需要连接 PostgreSQL 后提交后台任务。");
     expect((button("选择媒体文件夹") as HTMLButtonElement).disabled).toBe(false);
     const file = new File([""], "movie.mkv");
     Object.defineProperty(file, "webkitRelativePath", { value: "电影/movie.mkv" });
@@ -569,7 +591,12 @@ describe("后台批次", () => {
     expect(screen.queryByRole("heading", { name: "剧集馆" })).toBeNull();
     expect(screen.queryByRole("button", { name: /^Emby 剧集/ })).toBeNull();
     expect(screen.getByText("3 个媒体库 · 2 部作品")).toBeTruthy();
-    expect(filmButton.querySelector("img")?.getAttribute("src")).toBe("/api/emby/images/30/poster?v=fixture");
+    const poster = filmButton.closest("li")!.querySelector("img")!;
+    expect(poster.getAttribute("src")).toBe("/api/emby/images/30/poster?v=fixture");
+    expect(within(filmButton.closest("li")!).getByText("正在加载图片…")).toBeTruthy();
+    fireEvent.error(poster);
+    expect(within(filmButton.closest("li")!).getByText("图片加载失败")).toBeTruthy();
+    expect(within(filmButton.closest("li")!).queryByText("无海报")).toBeNull();
     expect(calls.mock.calls.some(([route]) => route.startsWith("/api/emby/credits/"))).toBe(false);
     expect(calls.mock.calls.some(([route]) => route === "/api/emby/import-all")).toBe(false);
 
@@ -596,10 +623,11 @@ describe("后台批次", () => {
 
     fireEvent.keyDown(screen.getByRole("tab", { name: "电影馆" }), { key: "ArrowRight" });
     expect(screen.queryByRole("button", { name: /^Emby 电影/ })).toBeNull();
-    expect(button(/^Emby 剧集/).querySelector("img")).toBeNull();
+    expect(button(/^Emby 剧集/).closest("li")!.querySelector("img")).toBeNull();
     click(/^Emby 剧集/);
     click("刮削此剧集");
-    await screen.findByText("已提交后台任务 #9。");
+    confirmScrape();
+    await screen.findByText("Collect Metadata 已创建后台采集任务 #9。");
     expect(calls.mock.calls.find(([route]) => route === "/api/emby/items/31/scrape")?.[1]?.body).toBe('"series"');
     fireEvent.click(screen.getByRole("tab", { name: "季与分集" }));
     await screen.findByRole("heading", { name: "季与分集" });
@@ -611,18 +639,76 @@ describe("后台批次", () => {
     expect(within(episodeDetail).getByText("2017-12-01")).toBeTruthy();
     expect(episodeDetail.querySelector(".episode-detail img")?.getAttribute("src")).toBe("/api/emby/images/35/episode?v=still");
     fireEvent.click(within(episodeDetail).getByRole("button", { name: "刮削此分集" }));
-    await within(episodeDetail.querySelector(".episode-detail")!).findByText("已提交后台任务 #9。");
+    confirmScrape();
+    await within(episodeDetail.querySelector(".episode-detail")!).findByText("Collect Metadata 已创建后台采集任务 #9。");
     expect(calls.mock.calls.find(([route]) => route === "/api/emby/items/35/scrape")?.[1]?.body).toBe('"episode"');
     click(/返回分集/);
     expect(button("第 2 季").getAttribute("aria-pressed")).toBe("true");
     expect(document.activeElement).toBe(episodeButton);
     click("关闭详情");
     click("刮削全部媒体库");
-    await screen.findByText(/已将 Emby 的全部媒体库提交/);
+    confirmScrape();
+    await screen.findByText(/Collect Metadata 已为 Emby 的全部媒体库创建后台采集任务/);
     expect(calls.mock.calls.filter(([route]) => route === "/api/emby/import-all")).toHaveLength(1);
     expect(screen.getByRole("tab", { name: "电影馆" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "空媒体库" }));
     expect(screen.getByRole("tabpanel", { name: "空媒体库" }).tabIndex).toBe(0);
+  });
+
+  it("单独筛选缺简介的分集，并从剧集海报定位到缺简介的季集", async () => {
+    const series = { id: "30", kind: "series" as const, title: "已有作品简介", year: 2026,
+      original_title: null, overview: "整部剧简介", genres: [], rating: null,
+      runtime_minutes: null, poster: null, backdrop: null };
+    const calls = harness([], true, [{ id: "7", name: "影片库", works: [
+      series, { ...series, id: "31", title: "另一部剧集", overview: null },
+    ] }]);
+    const defaultRequest = calls.getMockImplementation()!;
+    const missingRoute = "/api/emby/libraries/7/missing-episode-overviews";
+    let attempt = 0;
+    let overviewRequests = 0;
+    calls.mockImplementation((route, options) => {
+      if (route === missingRoute) return Promise.resolve(++attempt === 1
+        ? response({ error: "分集资料暂不可用。" }, 400) : response({ "30": ["52"] }));
+      if (route === "/api/emby/episodes/52/overview") {
+        overviewRequests++;
+        return Promise.resolve(response({ overview: "Bangumi 的简体中文简介", source: "Bangumi" }));
+      }
+      if (route === "/api/emby/series/30") return Promise.resolve(response({ partial: false, seasons: [
+        { number: 1, title: null, episodes: [{ id: "51", number: 1, title: "有简介的一集", overview: "简介" }] },
+        { number: 2, title: null, episodes: [{ id: "52", number: 1, title: "缺简介的一集", overview: null }] },
+      ] }));
+      return defaultRequest(route, options);
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /^已有作品简介/ });
+    expect(attempt).toBe(0);
+    setLabel("资料完整性", "overview");
+    expect(screen.queryByRole("button", { name: /^已有作品简介/ })).toBeNull();
+    expect(button(/^另一部剧集/)).toBeTruthy();
+
+    setLabel("资料完整性", "episode-overview");
+    expect(screen.getByText("正在检查分集简介…")).toBeTruthy();
+    await screen.findByText("分集资料暂不可用。");
+    expect(screen.queryByText("没有符合筛选条件的作品。")).toBeNull();
+    click("重试");
+    const work = await screen.findByRole("button", { name: /^已有作品简介.*缺 1 集简介/ });
+    expect(screen.queryByRole("button", { name: /^另一部剧集/ })).toBeNull();
+    fireEvent.click(work);
+    const detail = screen.getByRole("dialog", { name: "已有作品简介" });
+    expect(within(detail).getByRole("tab", { name: "季与分集" }).getAttribute("aria-selected")).toBe("true");
+    const episode = await within(detail).findByRole("button", { name: /缺简介的一集/ });
+    expect(overviewRequests).toBe(0);
+    expect(within(detail).queryByRole("button", { name: "第 1 季" })).toBeNull();
+    const filter = within(detail).getByRole("checkbox", { name: "仅看缺少简介的分集" });
+    fireEvent.click(episode);
+    await screen.findByText("Bangumi 的简体中文简介");
+    expect(screen.getByText("简介来源 · Bangumi")).toBeTruthy();
+    click("刮削此分集");
+    confirmScrape();
+    await waitFor(() => expect(overviewRequests).toBe(2));
+    click(/返回分集/);
+    fireEvent.click(filter);
+    expect(within(detail).getByRole("button", { name: /有简介的一集/ })).toBeTruthy();
   });
 
   it("在 Emby 库中搜索、筛缺资料并保持跨筛选选择，支持普通和 AI 刮削", async () => {
@@ -633,7 +719,10 @@ describe("后台批次", () => {
       original_title: "Dark", overview: null, poster: "art", year: 2017 };
     const calls = harness([], true, [{ id: "7", name: "影片库", works: [film, series] }], true);
     render(<App />);
-    await screen.findByRole("checkbox", { name: "选择 红辣椒" });
+    await screen.findByRole("button", { name: /^红辣椒/ });
+    expect(screen.queryByRole("checkbox", { name: "选择 红辣椒" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "刮削所选" })).toBeNull();
+    click("选择");
     setLabel("资料完整性", "poster");
     expect(screen.queryByRole("checkbox", { name: "选择 暗黑" })).toBeNull();
     click("选择当前结果");
@@ -642,19 +731,62 @@ describe("后台批次", () => {
     setLabel("搜索片名", "Ｄａｒｋ");
     fireEvent.click(screen.getByRole("checkbox", { name: "选择 暗黑" }));
     expect(screen.getByText("显示 1 部 · 已选 2 部")).toBeTruthy();
-    click("AI 刮削所选");
-    await screen.findByText("已将所选 2 部作品提交到 AI 刮削。");
+    click("刮削所选");
+    confirmScrape("AI 刮削");
+    await screen.findByText("Collect Metadata 已为所选 2 部作品创建 AI 刮削任务。");
     const requests = () => calls.mock.calls.filter(([route]) => route === "/api/emby/import-selection");
     expect(JSON.parse(String(requests()[0][1]?.body))).toEqual({
       items: [{ id: "30", scope: "movie" }, { id: "31", scope: "series" }], use_ai: true,
     });
-    await waitFor(() => expect(button("刮削所选")).toHaveProperty("disabled", true));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "刮削所选" })).toBeNull());
+    expect(screen.queryByRole("checkbox", { name: "选择 暗黑" })).toBeNull();
+    click("选择");
     fireEvent.click(screen.getByRole("checkbox", { name: "选择 暗黑" }));
     click("刮削所选");
+    confirmScrape();
     await waitFor(() => expect(requests()).toHaveLength(2));
     expect(JSON.parse(String(requests()[1][1]?.body))).toEqual({
       items: [{ id: "31", scope: "series" }], use_ai: false,
     });
+  });
+
+  it("没有 PostgreSQL 时，单部和多选刮削直接提交给 Emby", async () => {
+    const film = { id: "30", kind: "movie" as const, title: "红辣椒", year: 2006,
+      original_title: null, overview: null, genres: [], rating: null,
+      runtime_minutes: null, poster: null, backdrop: null };
+    const calls = harness([], false, [{ id: "7", name: "影片库", works: [film, {
+      ...film, id: "31", title: "暗黑", kind: "series",
+    }] }], true);
+    const defaultRequest = calls.getMockImplementation()!;
+    let failSeries = true;
+    calls.mockImplementation((route, options) => route === "/api/emby/refresh"
+      ? Promise.resolve(failSeries && JSON.parse(String(options?.body)).id === "31"
+        ? response({ error: "无法连接 Emby。" }, 400) : response(null, 204))
+      : defaultRequest(route, options));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /^红辣椒/ }));
+    click("刮削此影片");
+    expect(screen.getByRole("radio", { name: "Emby 普通刮削" })).toHaveProperty("checked", true);
+    expect(screen.queryByRole("radio", { name: "Collect Metadata 后台采集" })).toBeNull();
+    confirmScrape();
+    await screen.findByText("Emby 已接收刮削请求。由该媒体库的元数据下载器执行。");
+    click("关闭详情");
+
+    click("选择");
+    click("选择当前结果");
+    click("刮削所选");
+    expect(screen.queryByRole("radio", { name: "Collect Metadata AI 刮削" })).toBeNull();
+    confirmScrape();
+    await screen.findByText("1 部作品提交失败。无法连接 Emby。");
+    expect(screen.getByRole("checkbox", { name: "选择 红辣椒" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("checkbox", { name: "选择 暗黑" })).toHaveProperty("checked", true);
+    failSeries = false;
+    click("刮削所选");
+    confirmScrape();
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: "选择 暗黑" })).toBeNull());
+    expect(calls.mock.calls.filter(([route]) => route === "/api/emby/refresh")
+      .map(([, options]) => JSON.parse(String(options?.body)).id)).toEqual(["30", "30", "31", "31"]);
+    expect(calls.mock.calls.some(([route]) => route === "/api/emby/import-selection")).toBe(false);
   });
 
   it("在原批次条目搜索新匹配或直接按 TMDB ID 重新采集", async () => {
@@ -694,48 +826,70 @@ describe("后台批次", () => {
       : defaultRequest(route, options));
     render(<App />);
     const animated = await screen.findByRole("tabpanel", { name: "动画电影" });
-    fireEvent.click(within(animated).getByRole("button", { name: "刮削此媒体库" }));
-    await within(animated).findByText("已提交后台任务 #9。");
+    expect(screen.getByRole("button", { name: "重新读取媒体库" })).toBeTruthy();
+    expect(within(animated).getByLabelText("资料完整性")).toBeTruthy();
+    const libraryScrape = within(animated).getByRole("button", { name: "刮削此媒体库" });
+    fireEvent.click(libraryScrape);
+    expect(calls.mock.calls.some(([route]) => route === "/api/emby/import")).toBe(false);
+    expect(screen.getByRole("radio", { name: "Collect Metadata 后台采集" })).toHaveProperty("checked", true);
+    click("取消");
+    expect(document.activeElement).toBe(libraryScrape);
+
+    fireEvent.click(libraryScrape);
+    confirmScrape();
+    await within(animated).findByText("Collect Metadata 已创建后台采集任务 #9。");
     expect(calls.mock.calls.find(([route]) => route === "/api/emby/import")?.[1]?.body).toBe('"7"');
 
     click(/^红辣椒/);
     const animatedFilm = screen.getByRole("dialog", { name: "红辣椒" });
     fireEvent.click(within(animatedFilm).getByRole("button", { name: "刮削此影片" }));
-    await within(animatedFilm).findByText("已提交后台任务 #9。");
+    confirmScrape();
+    await within(animatedFilm).findByText("Collect Metadata 已创建后台采集任务 #9。");
     expect(calls.mock.calls.find(([route]) => route === "/api/emby/items/30/scrape")?.[1]?.body).toBe('"movie"');
     click("关闭详情");
 
     fireEvent.click(screen.getByRole("tab", { name: "私人影片" }));
     const privateLibrary = screen.getByRole("tabpanel", { name: "私人影片" });
     fireEvent.click(within(privateLibrary).getByRole("button", { name: "刮削此媒体库" }));
-    await within(privateLibrary).findByText("已提交后台任务 #9。");
-    expect(calls.mock.calls.filter(([route]) => route === "/api/emby/import").map(([, options]) => options?.body))
-      .toEqual(['"7"', '"8"']);
-    fireEvent.click(within(privateLibrary).getByRole("button", { name: "覆盖刮削" }));
-    expect(within(privateLibrary).getByText(/「私人影片」/)).toBeTruthy();
+    const libraryDialog = screen.getByRole("dialog", { name: "选择刮削方式" });
+    expect(within(libraryDialog).getByText("媒体库 · 私人影片")).toBeTruthy();
+    expect(within(libraryDialog).queryByRole("checkbox", { name: "同时替换已有图片" })).toBeNull();
     expect(overwriteRequests()).toHaveLength(0);
-    fireEvent.click(within(privateLibrary).getByRole("button", { name: "确认覆盖刮削" }));
-    await within(privateLibrary).findByText("已将覆盖刮削请求提交给 Emby。");
+    confirmScrape("覆盖刮削");
+    await within(privateLibrary).findByText("Emby 已接收覆盖刮削请求。由该媒体库的元数据下载器执行。");
     expect(JSON.parse(String(overwriteRequests()[0][1]?.body))).toEqual({
       target: { type: "library", id: "8" }, replace_images: false,
     });
 
     click(/^家庭旅行/);
     const video = screen.getByRole("dialog", { name: "家庭旅行" });
-    fireEvent.click(within(video).getByRole("button", { name: "刮削此影片" }));
-    await within(video).findByText("已提交后台任务 #9。");
-    expect(calls.mock.calls.find(([route]) => route === "/api/emby/items/40/scrape")?.[1]?.body).toBe('"movie"');
-    const overwrite = () => fireEvent.click(within(video).getByRole("button", { name: "覆盖刮削" }));
-    overwrite();
-    fireEvent.click(within(video).getByRole("button", { name: "取消" }));
+    const open = () => fireEvent.click(within(video).getByRole("button", { name: "刮削此影片" }));
+    open();
+    fireEvent.click(screen.getByRole("radio", { name: "Emby 覆盖刮削" }));
+    click("取消");
     expect(overwriteRequests()).toHaveLength(1);
-    overwrite();
-    fireEvent.click(within(video).getByRole("checkbox", { name: "同时替换已有图片" }));
-    fireEvent.click(within(video).getByRole("button", { name: "确认覆盖刮削" }));
-    await within(video).findByText("已将覆盖刮削请求提交给 Emby。");
+
+    open();
+    fireEvent.click(screen.getByRole("radio", { name: "Emby 覆盖刮削" }));
+    const replaceImages = screen.getByRole("checkbox", { name: "同时替换已有图片" });
+    expect(replaceImages).toHaveProperty("checked", false);
+    fireEvent.click(replaceImages);
+    click("确认覆盖刮削");
+    await within(video).findByText("Emby 已接收覆盖刮削请求。由该媒体库的元数据下载器执行。");
     expect(overwriteRequests()).toHaveLength(2);
     expect(JSON.parse(String(overwriteRequests()[1][1]?.body))).toEqual({
       target: { type: "item", id: "40", scope: "movie" }, replace_images: true,
+    });
+    click("关闭详情");
+
+    click("选择");
+    click("选择当前结果");
+    click("刮削所选");
+    confirmScrape("覆盖刮削");
+    await screen.findByText("Emby 已接收 1 部作品的覆盖刮削请求。由该媒体库的元数据下载器执行。");
+    expect(overwriteRequests()).toHaveLength(3);
+    expect(JSON.parse(String(overwriteRequests()[2][1]?.body))).toEqual({
+      target: { type: "item", id: "40", scope: "movie" }, replace_images: false,
     });
     expect(calls.mock.calls.some(([route]) => route === "/api/emby/import-all")).toBe(false);
   });

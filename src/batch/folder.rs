@@ -25,6 +25,8 @@ pub struct FolderWorkPreview {
     pub kind: MediaKind,
     pub query: String,
     pub file_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub source_files: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -43,8 +45,12 @@ pub struct FolderSelection {
 }
 
 impl FolderSelection {
-    pub(crate) fn new(folder: String, paths: Vec<String>) -> Result<Self, String> {
-        let preview = preview_folder(paths.clone())?;
+    pub(crate) fn new(
+        folder: String,
+        paths: Vec<String>,
+        include_sources: bool,
+    ) -> Result<Self, String> {
+        let preview = folder_preview(paths.clone(), include_sources)?;
         Ok(Self {
             folder,
             paths,
@@ -54,6 +60,10 @@ impl FolderSelection {
 }
 
 pub fn preview_folder(paths: Vec<String>) -> Result<FolderPreview, String> {
+    folder_preview(paths, false)
+}
+
+fn folder_preview(paths: Vec<String>, include_sources: bool) -> Result<FolderPreview, String> {
     let (items, info) = classify_paths(paths)?;
     Ok(FolderPreview {
         works: items
@@ -62,6 +72,11 @@ pub fn preview_folder(paths: Vec<String>) -> Result<FolderPreview, String> {
                 kind: item.kind,
                 query: item.query,
                 file_count: item.source_files.len(),
+                source_files: if include_sources {
+                    item.source_files
+                } else {
+                    Vec::new()
+                },
             })
             .collect(),
         files: info.files,
@@ -86,6 +101,7 @@ pub fn scan_native_folder(root: &std::path::Path) -> Result<FolderSelection, Str
     FolderSelection::new(
         root.to_string_lossy().into_owned(),
         scan_folder_paths(root)?,
+        true,
     )
 }
 

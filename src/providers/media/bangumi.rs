@@ -1,7 +1,8 @@
-use std::{collections::HashSet, env};
+use std::collections::HashSet;
 
 use reqwest::header;
 use serde_json::json;
+use unicode_normalization::UnicodeNormalization;
 
 use super::*;
 use crate::providers::{field_map, request_text};
@@ -102,162 +103,308 @@ fn candidate(subject: &Value) -> Option<Candidate> {
     })
 }
 
-async fn api(client: &Client, path: &str, body: Option<&Value>) -> Result<Value, Failure> {
-    let url = Url::parse(&format!("https://api.bgm.tv/v0/{path}")).unwrap();
-    let token = env::var("BANGUMI_ACCESS_TOKEN").ok();
-    let text = request_text(&url, |url| {
-        let mut request = match body {
-            Some(body) => client.post(url).json(body),
-            None => client.get(url),
+pub(crate) struct Bangumi {
+    api_root: Url,
+    authorization: Option<header::HeaderValue>,
+    cache: EntityCache,
+}
+
+impl Default for Bangumi {
+    fn default() -> Self {
+        Self {
+            api_root: Url::parse("https://api.bgm.tv/v0/").unwrap(),
+            authorization: None,
+            cache: EntityCache::default(),
         }
-        .header(header::ACCEPT, "application/json");
-        if let Some(token) = token
-            .as_deref()
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
+    }
+}
+
+impl Bangumi {
+    pub(crate) fn authenticated(token: &str) -> Option<Self> {
+        let token = token.trim();
+        if token.is_empty()
+            || token.len() > 8192
+            || !token.bytes().all(|byte| byte.is_ascii_graphic())
         {
-            request = request.bearer_auth(token);
+            return None;
         }
-        request
-    })
-    .await?;
-    serde_json::from_str(&text).map_err(|_| Failure::format_changed())
+        let mut value = header::HeaderValue::from_str(&format!("Bearer {token}")).ok()?;
+        value.set_sensitive(true);
+        Some(Self {
+            authorization: Some(value),
+            ..Self::default()
+        })
+    }
+
+    pub(crate) async fn validate(&self, client: &Client) -> Result<(), String> {
+        let user = self
+            .api(client, "me", None)
+            .await
+            .map_err(|error| format!("Bangumi 连接测试失败。{}", error.description()))?;
+        if !user["id"].as_u64().is_some_and(|id| id > 0) {
+            return Err("Bangumi 未返回有效的用户资料。".into());
+        }
+        Ok(())
+    }
+
+    async fn api(
+        &self,
+        client: &Client,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, Failure> {
+        let url = self.api_root.join(path).expect("static Bangumi API path");
+        let text = request_text(&url, |url| {
+            let mut request = match body {
+                Some(body) => client.post(url).json(body),
+                None => client.get(url),
+            }
+            .header(header::ACCEPT, "application/json");
+            if let Some(value) = &self.authorization {
+                request = request.header(header::AUTHORIZATION, value.clone());
+            }
+            request
+        })
+        .await?;
+        serde_json::from_str(&text).map_err(|_| Failure::format_changed())
+    }
+
+    pub(super) async fn search(
+        &self,
+        client: &Client,
+        kind: MediaKind,
+        query: &str,
+    ) -> Result<Vec<Candidate>, Failure> {
+        let body = json!({ "keyword": query, "filter": { "type": [2, 6] } });
+        let result = self
+            .api(client, "search/subjects?limit=12", Some(&body))
+            .await?;
+        let hits = result["data"]
+            .as_array()
+            .ok_or_else(Failure::format_changed)?;
+        Ok(hits
+            .iter()
+            .filter(|hit| matches_kind(hit, kind))
+            .filter_map(candidate)
+            .collect())
+    }
+
+    pub(super) async fn search_id(
+        &self,
+        client: &Client,
+        kind: MediaKind,
+        id: u32,
+    ) -> Result<Vec<Candidate>, Failure> {
+        let subject = self.subject(client, id).await?;
+        if !supports_kind(&subject, kind) {
+            return Err(wrong_kind());
+        }
+        candidate(&subject)
+            .map(|candidate| vec![candidate])
+            .ok_or_else(Failure::format_changed)
+    }
+
+    async fn subject(&self, client: &Client, id: u32) -> Result<Arc<Value>, Failure> {
+        let key = format!("Bangumi-{id}");
+        if let Some(subject) = self.cache.get(&key) {
+            return Ok(subject);
+        }
+        let data = self.api(client, &format!("subjects/{id}"), None).await?;
+        if data["id"].as_u64() != Some(u64::from(id)) {
+            return Err(Failure::format_changed());
+        }
+        let data = Arc::new(data);
+        self.cache.insert(&key, Arc::clone(&data));
+        Ok(data)
+    }
+
+    async fn people(&self, client: &Client, id: u32, section: &str) -> Result<Value, Failure> {
+        let people = self
+            .api(client, &format!("subjects/{id}/{section}"), None)
+            .await?;
+        people
+            .is_array()
+            .then_some(people)
+            .ok_or_else(Failure::format_changed)
+    }
+
+    async fn episodes(&self, client: &Client, id: u32, kind: MediaKind) -> (Vec<Value>, bool) {
+        let mut episodes = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+        for _ in 0..10 {
+            let offset = episodes.len();
+            let mut path = format!("episodes?subject_id={id}&limit={PAGE_SIZE}&offset={offset}");
+            if kind == MediaKind::Movie {
+                path.push_str("&type=0");
+            }
+            let Ok(Ok(mut data)) =
+                tokio::time::timeout_at(deadline, self.api(client, &path, None)).await
+            else {
+                break;
+            };
+            let Some(total) = data["total"].as_u64() else {
+                break;
+            };
+            if data["offset"].as_u64() != Some(offset as u64) {
+                break;
+            }
+            let Some(page) = data["data"].as_array_mut() else {
+                break;
+            };
+            let empty = page.is_empty();
+            episodes.append(page);
+            if episodes.len() as u64 >= total {
+                return (episodes, true);
+            }
+            if empty {
+                break;
+            }
+        }
+        (episodes, false)
+    }
+
+    pub(crate) async fn emby_episode_overview(
+        &self,
+        client: &Client,
+        emby: &emby::Emby,
+        item: &Value,
+    ) -> Option<Source> {
+        let series_id = emby.series_provider_id(client, item, "Bangumi").await?;
+        let (episodes, complete) = self.episodes(client, id(&series_id)?, MediaKind::Series).await;
+        if !complete {
+            return None;
+        }
+        let episode = matching_episode(&episodes, item)?;
+        let description = text(&episode["desc"]).filter(|text| chinese_overview(text))?;
+        let episode_id = episode["id"].as_u64().filter(|id| *id > 0)?;
+        let page = Url::parse(&format!("https://bgm.tv/ep/{episode_id}")).ok()?;
+        Some(Source::found(
+            NAME,
+            &page,
+            field_map([("description", json!(description))]),
+            json!({ "episode": episode, "overview_language": "zh" }),
+        ))
+    }
+
+    pub(crate) async fn details(&self, client: &Client, kind: MediaKind, id: u32) -> Source {
+        let page = Url::parse(&format!("https://bgm.tv/subject/{id}")).unwrap();
+        let subject = match self.subject(client, id).await {
+            Ok(subject) if supports_kind(&subject, kind) => subject,
+            Ok(_) => return Source::failure(NAME, &page, wrong_kind()),
+            Err(error) => return Source::failure(NAME, &page, error),
+        };
+        let (persons, characters, (episodes, complete)) = tokio::join!(
+            self.people(client, id, "persons"),
+            self.people(client, id, "characters"),
+            self.episodes(client, id, kind),
+        );
+        let mut missing = Vec::new();
+        if persons.is_err() {
+            missing.push("幕后人员");
+        }
+        if characters.is_err() {
+            missing.push("角色与配音");
+        }
+        if !complete {
+            missing.push("分集");
+        }
+        let data = json!({
+            "subject": subject.as_ref(),
+            "persons": persons.unwrap_or_default(),
+            "characters": characters.unwrap_or_default(),
+            "episodes": episodes,
+        });
+        let mut source = Source::found(NAME, &page, fields(&data, kind, id), data);
+        if !missing.is_empty() {
+            source.status = "partial";
+            source.note = Some(format!(
+                "已取得作品资料，部分{}资料未能读取。",
+                missing.join("、")
+            ));
+        }
+        source
+    }
 }
 
-pub(super) async fn search(
-    client: &Client,
-    kind: MediaKind,
-    query: &str,
-) -> Result<Vec<Candidate>, Failure> {
-    let body = json!({ "keyword": query, "filter": { "type": [2, 6] } });
-    let result = api(client, "search/subjects?limit=12", Some(&body)).await?;
-    let hits = result["data"]
-        .as_array()
-        .ok_or_else(Failure::format_changed)?;
-    Ok(hits
-        .iter()
-        .filter(|hit| matches_kind(hit, kind))
-        .filter_map(candidate)
-        .collect())
+#[cfg(all(test, feature = "web"))]
+#[tokio::test]
+async fn validates_the_token_using_the_authenticated_user_endpoint() {
+    use axum::{Json, Router, http::HeaderMap, routing::get};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/v0/me",
+        get(|headers: HeaderMap| async move {
+            assert_eq!(headers[header::AUTHORIZATION], "Bearer fixture-token");
+            Json(json!({"id": 123, "username": "fixture"}))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut provider = Bangumi::authenticated(" fixture-token ").unwrap();
+    provider.api_root = Url::parse(&format!("http://{root}/v0/")).unwrap();
+    provider.validate(&Client::new()).await.unwrap();
+    server.abort();
 }
 
-pub(super) async fn search_id(
-    client: &Client,
-    cache: &EntityCache,
-    kind: MediaKind,
-    id: u32,
-) -> Result<Vec<Candidate>, Failure> {
-    let subject = subject(client, cache, id).await?;
-    if !supports_kind(&subject, kind) {
-        return Err(wrong_kind());
-    }
-    candidate(&subject)
-        .map(|candidate| vec![candidate])
-        .ok_or_else(Failure::format_changed)
+pub(crate) fn chinese_overview(value: &str) -> bool {
+    whatlang::detect(value).is_some_and(|info| info.is_reliable() && info.lang() == whatlang::Lang::Cmn)
 }
 
-async fn subject(client: &Client, cache: &EntityCache, id: u32) -> Result<Arc<Value>, Failure> {
-    let key = format!("Bangumi-{id}");
-    if let Some(subject) = cache.get(&key) {
-        return Ok(subject);
+fn matching_episode<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
+    let number = item["IndexNumber"].as_u64().filter(|&number| number > 0)?;
+    let season = item["ParentIndexNumber"].as_u64().filter(|&season| season > 0)?;
+    if item["IndexNumberEnd"].as_u64().is_some_and(|end| end > number) {
+        return None;
     }
-    let data = api(client, &format!("subjects/{id}"), None).await?;
-    if data["id"].as_u64() != Some(u64::from(id)) {
-        return Err(Failure::format_changed());
-    }
-    let data = Arc::new(data);
-    cache.insert(&key, Arc::clone(&data));
-    Ok(data)
+    let premiere = text(&item["PremiereDate"]).and_then(|date| date.get(..10));
+    let titles = [&item["Name"], &item["OriginalTitle"]].into_iter()
+        .filter_map(text)
+        .map(episode_title)
+        .filter(|title| !title.is_empty())
+        .collect::<Vec<_>>();
+    let mut matches = episodes.iter().filter(|episode| {
+        if episode["type"] != 0
+            || episode_fields(episode).and_then(|fields| fields["number"].as_u64()) != Some(number)
+        {
+            return false;
+        }
+        match (premiere, text(&episode["airdate"])) {
+            (Some(premiere), Some(airdate)) => premiere == airdate,
+            _ => season == 1 && [&episode["name_cn"], &episode["name"]]
+                .into_iter().filter_map(text).any(|name| titles.contains(&episode_title(name))),
+        }
+    });
+    let matched = matches.next()?;
+    matches.next().is_none().then_some(matched)
+}
+
+#[cfg(test)]
+#[test]
+fn matches_regular_episodes_by_number_and_date_or_first_season_title() {
+    let episodes = vec![
+        json!({"id":101,"type":0,"ep":9,"airdate":"2026-11-28","name_cn":"菲亚前往萨斯兰特"}),
+        json!({"id":202,"type":1,"sort":9,"airdate":"2026-11-28","name_cn":"菲亚前往萨斯兰特"}),
+    ];
+    let mut emby = json!({
+        "IndexNumber":9,"ParentIndexNumber":1,"PremiereDate":"2026-11-28T00:00:00Z",
+        "Name":"菲亚，前往萨斯兰特"
+    });
+    assert_eq!(matching_episode(&episodes, &emby).unwrap()["id"], 101);
+    emby["PremiereDate"] = json!("2026-11-27");
+    assert!(matching_episode(&episodes, &emby).is_none());
+    emby["PremiereDate"] = Value::Null;
+    assert_eq!(matching_episode(&episodes, &emby).unwrap()["id"], 101);
+    emby["IndexNumberEnd"] = json!(10);
+    assert!(matching_episode(&episodes, &emby).is_none());
+}
+
+fn episode_title(value: &str) -> String {
+    value.nfkc().filter(|value| value.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
 fn wrong_kind() -> Failure {
     Failure::Unavailable("条目类型与所选类别不一致。".into())
-}
-
-async fn people(client: &Client, id: u32, section: &str) -> Result<Value, Failure> {
-    let people = api(client, &format!("subjects/{id}/{section}"), None).await?;
-    people
-        .is_array()
-        .then_some(people)
-        .ok_or_else(Failure::format_changed)
-}
-
-async fn episodes(client: &Client, id: u32, kind: MediaKind) -> (Vec<Value>, bool) {
-    let mut episodes = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
-    for _ in 0..10 {
-        let offset = episodes.len();
-        let mut path = format!("episodes?subject_id={id}&limit={PAGE_SIZE}&offset={offset}");
-        if kind == MediaKind::Movie {
-            path.push_str("&type=0");
-        }
-        let Ok(Ok(mut data)) = tokio::time::timeout_at(deadline, api(client, &path, None)).await
-        else {
-            break;
-        };
-        let Some(total) = data["total"].as_u64() else {
-            break;
-        };
-        if data["offset"].as_u64() != Some(offset as u64) {
-            break;
-        }
-        let Some(page) = data["data"].as_array_mut() else {
-            break;
-        };
-        let empty = page.is_empty();
-        episodes.append(page);
-        if episodes.len() as u64 >= total {
-            return (episodes, true);
-        }
-        if empty {
-            break;
-        }
-    }
-    (episodes, false)
-}
-
-pub(crate) async fn details(
-    client: &Client,
-    cache: &EntityCache,
-    kind: MediaKind,
-    id: u32,
-) -> Source {
-    let page = Url::parse(&format!("https://bgm.tv/subject/{id}")).unwrap();
-    let subject = match subject(client, cache, id).await {
-        Ok(subject) if supports_kind(&subject, kind) => subject,
-        Ok(_) => return Source::failure(NAME, &page, wrong_kind()),
-        Err(error) => return Source::failure(NAME, &page, error),
-    };
-    let (persons, characters, (episodes, complete)) = tokio::join!(
-        people(client, id, "persons"),
-        people(client, id, "characters"),
-        episodes(client, id, kind),
-    );
-    let mut missing = Vec::new();
-    if persons.is_err() {
-        missing.push("幕后人员");
-    }
-    if characters.is_err() {
-        missing.push("角色与配音");
-    }
-    if !complete {
-        missing.push("分集");
-    }
-    let data = json!({
-        "subject": subject.as_ref(),
-        "persons": persons.unwrap_or_default(),
-        "characters": characters.unwrap_or_default(),
-        "episodes": episodes,
-    });
-    let mut source = Source::found(NAME, &page, fields(&data, kind, id), data);
-    if !missing.is_empty() {
-        source.status = "partial";
-        source.note = Some(format!(
-            "已取得作品资料，部分{}资料未能读取。",
-            missing.join("、")
-        ));
-    }
-    source
 }
 
 fn episode_fields(episode: &Value) -> Option<Value> {

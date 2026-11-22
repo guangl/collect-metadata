@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use super::{Failure, request};
 use crate::collect::Source;
+use bangumi::Bangumi;
 pub(crate) use tmdb::Tmdb;
 
 #[derive(Default)]
@@ -125,7 +126,7 @@ pub(crate) fn tmdb_id_query(query: &str) -> Option<&str> {
 pub(crate) async fn search(
     client: &Client,
     cache: &EntityCache,
-    tmdb: Option<&Tmdb>,
+    (tmdb, bangumi): (Option<&Tmdb>, &Bangumi),
     kind: MediaKind,
     query: &str,
     language: &str,
@@ -151,7 +152,7 @@ pub(crate) async fn search(
     }
     if let Some(raw_id) = bangumi::id_query(query) {
         return match bangumi::id(raw_id) {
-            Some(id) => match search_within(bangumi::search_id(client, cache, kind, id)).await {
+            Some(id) => match search_within(bangumi.search_id(client, kind, id)).await {
                 Ok(candidates) => SearchResult {
                     candidates,
                     notes: Vec::new(),
@@ -184,7 +185,7 @@ pub(crate) async fn search(
         }),
         search_within(async {
             if kind != MediaKind::Av && !wikidata::valid_id(query) {
-                bangumi::search(client, kind, query).await
+                bangumi.search(client, kind, query).await
             } else {
                 Ok(Vec::new())
             }
@@ -264,7 +265,7 @@ async fn search_within<T>(query: impl Future<Output = Result<T, Failure>>) -> Re
 pub(crate) async fn collect(
     client: &Client,
     cache: &EntityCache,
-    tmdb: Option<&Tmdb>,
+    (tmdb, bangumi): (Option<&Tmdb>, &Bangumi),
     kind: MediaKind,
     provider: MediaProvider,
     id: &str,
@@ -283,7 +284,7 @@ pub(crate) async fn collect(
                 wikidata_and_links(client, tmdb, kind, id, entity, language),
                 async {
                     match bangumi_id {
-                        Some(id) => Some(bangumi::details(client, cache, kind, id).await),
+                        Some(id) => Some(bangumi.details(client, kind, id).await),
                         None => None,
                     }
                 },
@@ -296,7 +297,7 @@ pub(crate) async fn collect(
         MediaProvider::Bangumi if kind != MediaKind::Av => {
             let id = bangumi::id(id).ok_or("Bangumi ID 无效。")?;
             let (bgm, wiki) = tokio::join!(
-                bangumi::details(client, cache, kind, id),
+                bangumi.details(client, kind, id),
                 search_within(wikidata::by_bangumi_id(client, cache, kind, id)),
             );
             let include_linked = !bgm.fields.is_empty();

@@ -99,7 +99,7 @@ fn parse(value: &str) -> Result<Tmdb, String> {
     Tmdb::new(value).ok_or_else(|| "请填写有效格式的 TMDB API 读取令牌或 v3 API Key。".into())
 }
 
-fn write_credential(path: &Path, value: &str) -> io::Result<()> {
+pub(super) fn write_credential(path: &Path, value: &str) -> io::Result<()> {
     let directory = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())

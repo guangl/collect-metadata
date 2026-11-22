@@ -78,14 +78,14 @@ pub struct AiBatchInput {
 
 #[derive(Deserialize)]
 pub struct EmbyOverwriteInput {
-    target: EmbyOverwriteTarget,
+    target: EmbyScrapeTarget,
     #[serde(default)]
     replace_images: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum EmbyOverwriteTarget {
+pub enum EmbyScrapeTarget {
     Library { id: String },
     Item { id: String, scope: EmbyScrapeScope },
 }
@@ -111,6 +111,16 @@ pub enum BatchAction {
     Resume,
     Cancel,
     RetryFailed,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Serialize)]
+pub struct FolderWorkResult {
+    stage: &'static str,
+    message: Option<String>,
+    candidates: Option<Value>,
+    result: Option<LookupResponse>,
+    output: Option<OutputReport>,
 }
 
 #[derive(Serialize)]
@@ -335,6 +345,15 @@ impl Collector {
         self.emby_connection()?.credits(&self.client, id).await
     }
 
+    pub async fn emby_missing_episode_overviews(
+        &self,
+        library: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+        let emby = self.emby_connection()?;
+        emby.library(&self.client, library).await?;
+        emby.missing_episode_overviews(&self.client, library).await
+    }
+
     pub async fn emby_series_preview(&self, id: &str) -> Result<EmbySeriesPreview, String> {
         self.emby_connection()?
             .series_preview(&self.client, id)
@@ -421,18 +440,32 @@ impl Collector {
     }
 
     pub async fn overwrite_emby(&self, input: EmbyOverwriteInput) -> Result<(), String> {
+        self.update_emby_metadata(input.target, true, input.replace_images)
+            .await
+    }
+
+    pub async fn refresh_emby_metadata(&self, target: EmbyScrapeTarget) -> Result<(), String> {
+        self.update_emby_metadata(target, false, false).await
+    }
+
+    async fn update_emby_metadata(
+        &self,
+        target: EmbyScrapeTarget,
+        overwrite: bool,
+        replace_images: bool,
+    ) -> Result<(), String> {
         let emby = self.emby_connection()?;
-        let (id, recursive) = match input.target {
-            EmbyOverwriteTarget::Library { id } => {
+        let (id, recursive) = match target {
+            EmbyScrapeTarget::Library { id } => {
                 emby.library(&self.client, &id).await?;
                 (id, true)
             }
-            EmbyOverwriteTarget::Item { id, scope } => {
+            EmbyScrapeTarget::Item { id, scope } => {
                 emby.item(&self.client, &id, scope.item_type(), "").await?;
                 (id, matches!(scope, EmbyScrapeScope::Series))
             }
         };
-        emby.overwrite_metadata(&self.client, &id, recursive, input.replace_images)
+        emby.refresh_metadata(&self.client, &id, recursive, overwrite, replace_images)
             .await
     }
 
@@ -457,6 +490,60 @@ impl Collector {
             .create_batch_mode(items, false, Some(name), None, Some(&owner), mode)
             .await
             .map_err(|_| "无法保存 Emby 导入批次。".into())
+    }
+
+    #[cfg(feature = "desktop")]
+    pub async fn scrape_folder_work(
+        &self,
+        batch: i64,
+        row: i64,
+        paths: Vec<String>,
+        candidate: Option<CandidateChoice>,
+    ) -> Result<FolderWorkResult, String> {
+        if batch >= 0 || row <= 0 {
+            return Err("本地刮削任务编号无效。".into());
+        }
+        let (items, _) = folder::classify_paths(paths)?;
+        let [item]: [BatchItemInput; 1] = items
+            .try_into()
+            .map_err(|_| "请选择属于同一作品的视频文件。")?;
+        let export_plan = self
+            .output_settings()
+            .map(|settings| settings.folder_plan())
+            .transpose()?
+            .flatten();
+        let claim = Claim {
+            id: row,
+            batch,
+            attempt: 0,
+            kind: item.kind,
+            query: item.query,
+            candidate,
+            remember_match: false,
+            use_ai: false,
+            fill_missing: false,
+            export_revision: 0,
+            folder_root: item.source_files[0]
+                .split_once('/')
+                .map(|(root, _)| root.to_owned()),
+            export_plan,
+            source_files: item.source_files,
+            writeback: None,
+        };
+        let outcome = self
+            .process_claim(None, &claim)
+            .await
+            .ok_or("无法完成本地刮削。")?;
+        let output = outcome
+            .output
+            .map(|prepared| prepared.map_or_else(|report| report, BatchExport::publish));
+        Ok(FolderWorkResult {
+            stage: outcome.stage,
+            message: outcome.message,
+            candidates: outcome.candidates,
+            result: outcome.result.filter(LookupResponse::has_fields),
+            output,
+        })
     }
 
     pub async fn create_folder_batch(

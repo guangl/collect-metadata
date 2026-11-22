@@ -6,6 +6,12 @@ use serde_json::Value;
 use crate::{HistoryItem, MediaKind};
 
 #[derive(Serialize)]
+pub struct EmbyEpisodeOverview {
+    pub(crate) overview: Option<String>,
+    pub(crate) source: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct LookupResponse {
     pub(crate) record: Value,
     pub(crate) saved: Option<HistoryItem>,

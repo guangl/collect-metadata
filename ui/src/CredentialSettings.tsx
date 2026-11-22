@@ -1,18 +1,45 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { getTmdbStatus, saveTmdb, testTmdb } from "./api";
+import { getBangumiStatus, getTmdbStatus, saveBangumi, saveTmdb, testBangumi, testTmdb } from "./api";
 import { ExternalLink } from "./Catalog";
 import { errorText } from "./types";
-import type { TmdbStatus } from "./types";
+import type { CredentialStatus } from "./types";
 
-const labels: Record<TmdbStatus, string> = {
-  unconfigured: "尚未配置 TMDB",
-  environment: "当前使用环境变量中的凭据",
-  saved: "已保存 TMDB 凭据",
-};
+const providers = {
+  tmdb: {
+    name: "TMDB",
+    empty: "尚未配置 TMDB",
+    label: "TMDB API 凭据",
+    placeholder: "API Read Access Token 或 v3 API Key",
+    link: "https://www.themoviedb.org/settings/api",
+    getStatus: getTmdbStatus,
+    test: testTmdb,
+    save: saveTmdb,
+  },
+  bangumi: {
+    name: "Bangumi",
+    empty: "公开条目可直接采集，访问令牌为可选项。",
+    label: "Bangumi 访问令牌",
+    placeholder: "Access Token",
+    link: "https://bgm.tv/dev/app",
+    getStatus: getBangumiStatus,
+    test: testBangumi,
+    save: saveBangumi,
+  },
+} as const;
 
-export function TmdbSettings({ onError }: { onError: (message: string) => void }) {
-  const [status, setStatus] = useState<TmdbStatus | null>(null);
+export function CredentialSettings({ source, onError }: {
+  source: keyof typeof providers;
+  onError: (message: string) => void;
+}) {
+  const provider = providers[source];
+  const { name } = provider;
+  const labels: Record<CredentialStatus, string> = {
+    unconfigured: provider.empty,
+    environment: "当前使用环境变量中的凭据",
+    saved: `已保存 ${name} 凭据`,
+  };
+  const [status, setStatus] = useState<CredentialStatus | null>(null);
   const [credential, setCredential] = useState("");
   const [action, setAction] = useState<"test" | "save" | null>(null);
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
@@ -21,20 +48,20 @@ export function TmdbSettings({ onError }: { onError: (message: string) => void }
 
   useEffect(() => {
     let active = true;
-    getTmdbStatus().then(
-      (status) => { if (active) setStatus(status); },
-      (error) => { if (active) setMessage({ text: errorText(error), error: true }); },
+    provider.getStatus().then(
+      (status) => { if (active) setStatus((current) => current ?? status); },
+      (error) => { if (active) setMessage((current) => current ?? { text: errorText(error), error: true }); },
     );
     return () => { active = false; };
-  }, []);
+  }, [provider]);
 
   async function test() {
     if (action || (!value && !hasSavedCredential)) return;
     setAction("test");
     setMessage(null);
     try {
-      await testTmdb(value || null);
-      setMessage({ text: "TMDB 连接测试成功。" });
+      await provider.test(value || null);
+      setMessage({ text: `${name} 连接测试成功。` });
     } catch (error) {
       setMessage({ text: errorText(error), error: true });
     } finally {
@@ -48,7 +75,7 @@ export function TmdbSettings({ onError }: { onError: (message: string) => void }
     setAction("save");
     setMessage(null);
     try {
-      setStatus(await saveTmdb(value));
+      setStatus(await provider.save(value));
       setCredential("");
       setMessage({ text: "已验证并保存，电影和剧集采集即刻生效。" });
     } catch (error) {
@@ -59,18 +86,18 @@ export function TmdbSettings({ onError }: { onError: (message: string) => void }
   }
 
   return (
-    <section aria-labelledby="tmdb-title">
-      <div className="section-heading"><h2 id="tmdb-title">TMDB</h2></div>
+    <section aria-labelledby={source + "-title"}>
+      <div className="section-heading"><h2 id={source + "-title"}>{name}</h2></div>
       <form className="panel batch-form" onSubmit={save}>
         {status ? <p className="muted">{labels[status]}</p>
-          : !message && <p className="muted" role="status">正在读取 TMDB 配置…</p>}
-        <label htmlFor="tmdb-credential" className="batch-input">TMDB API 凭据</label>
-        <input className="field w-full" id="tmdb-credential" type="password" autoComplete="off" spellCheck={false}
-          placeholder="API Read Access Token 或 v3 API Key" maxLength={8192}
+          : !message && <p className="muted" role="status">正在读取 {name} 配置…</p>}
+        <label htmlFor={source + "-credential"} className="batch-input">{provider.label}</label>
+        <input className="field w-full" id={source + "-credential"} type="password" autoComplete="off" spellCheck={false}
+          placeholder={provider.placeholder} maxLength={8192}
           value={credential} onChange={(event) => { setCredential(event.target.value); setMessage(null); }}
           disabled={action !== null} />
         <p className="muted">
-          <ExternalLink value="https://www.themoviedb.org/settings/api" onError={onError}>获取 TMDB API 凭据 ↗</ExternalLink>
+          <ExternalLink value={provider.link} onError={onError}>获取 {provider.label} ↗</ExternalLink>
         </p>
         <div className="settings-actions">
           <button type="button" className="secondary" disabled={action !== null || (!value && !hasSavedCredential)}

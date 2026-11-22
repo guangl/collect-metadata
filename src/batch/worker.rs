@@ -115,7 +115,9 @@ impl Collector {
                         .await,
                     ))
                 } else {
-                    self.process_claim(store, claim).await.map(Work::Collect)
+                    self.process_claim(Some(store), claim)
+                        .await
+                        .map(Work::Collect)
                 }
             };
             tokio::pin!(work);
@@ -158,7 +160,11 @@ impl Collector {
         }
     }
 
-    async fn process_claim(&self, store: &Store, claim: &Claim) -> Option<Outcome> {
+    pub(super) async fn process_claim(
+        &self,
+        store: Option<&Store>,
+        claim: &Claim,
+    ) -> Option<Outcome> {
         let _permit = self.batch_permit().await;
         if claim.query.is_empty() {
             return Some(Outcome::failed("缺少作品名称或番号。".into()));
@@ -180,7 +186,7 @@ impl Collector {
         let key = match_key(claim, import, emby.as_deref());
         let remembered = if claim.kind != MediaKind::Av
             && claim.candidate.is_none()
-            && let Some(key) = key.as_deref()
+            && let (Some(store), Some(key)) = (store, key.as_deref())
         {
             match store.remembered_match(claim.kind, key).await {
                 Ok(value) => value,
@@ -237,7 +243,9 @@ impl Collector {
                     }
                     Err(outcome) => return Some(*outcome),
                 };
-                if !mark_collecting(store, claim, candidate.as_ref()?).await {
+                if let Some(store) = store
+                    && !mark_collecting(store, claim, candidate.as_ref()?).await
+                {
                     return None;
                 }
             }
@@ -267,7 +275,9 @@ impl Collector {
                     Ok(found) => found,
                     Err(outcome) => return Some(*outcome),
                 };
-                if !mark_collecting(store, claim, &found).await {
+                if let Some(store) = store
+                    && !mark_collecting(store, claim, &found).await
+                {
                     return None;
                 }
                 ai_matched = from_ai;
@@ -291,7 +301,7 @@ impl Collector {
             if claim.remember_match {
                 outcome.remembered_match = key.zip(candidate);
             }
-            if emby_source(&result.record).is_none()
+            if (store.is_none() || emby_source(&result.record).is_none())
                 && let Some(plan) = claim
                     .export_plan
                     .as_ref()

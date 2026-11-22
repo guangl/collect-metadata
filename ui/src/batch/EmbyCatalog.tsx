@@ -1,9 +1,10 @@
 import { memo, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent, PointerEvent, ReactNode } from "react";
-import { getEmbyCredits, getEmbySeries, isDesktop, loadEmbyImage, overwriteEmby } from "../api";
+import { getEmbyCredits, getEmbyEpisodeOverview, getEmbySeries, getMissingEpisodeOverviews, isDesktop, loadEmbyImage, overwriteEmby } from "../api";
 import { LocalDate } from "../Catalog";
 import { Tabs } from "../Tabs";
-import type { EmbyImage } from "../api";
+import { EmbyScrapeDialog, type EmbyScrapeChoice } from "./EmbyScrapeDialog";
+import type { EmbyImage, EpisodeOverview } from "../api";
 import { errorText, mediaLabels } from "../types";
 import type { EmbyCredit, EmbyEpisodePreview, EmbyLibraryPreview, EmbyScrapeTarget, EmbySeasonPreview, EmbySeriesPreview, EmbyWorkPreview } from "../types";
 
@@ -14,6 +15,20 @@ const artworkClasses: Record<EmbyImage, string> = {
   portrait: "credit-art",
 };
 
+const imageQueue: (() => Promise<void>)[] = [];
+let loadingImages = 0;
+
+function loadNextImage() {
+  if (loadingImages >= 6) return;
+  const task = imageQueue.shift();
+  if (!task) return;
+  loadingImages++;
+  void task().finally(() => {
+    loadingImages--;
+    loadNextImage();
+  });
+}
+
 function EmbyArtwork({ id, tag, image, eager = false }: {
   id: string;
   tag: string | null;
@@ -21,48 +36,61 @@ function EmbyArtwork({ id, tag, image, eager = false }: {
   eager?: boolean;
 }) {
   const host = useRef<HTMLSpanElement>(null);
-  const [localUrl, setLocalUrl] = useState<string>();
+  const imageKey = `${id}/${image}?v=${tag}`;
+  const [local, setLocal] = useState<{ key: string; url?: string }>();
+  const [loaded, setLoaded] = useState<string>();
   const [failed, setFailed] = useState<string>();
-  const src = tag && (isDesktop ? localUrl :
-    `/api/emby/images/${encodeURIComponent(id)}/${image}?v=${encodeURIComponent(tag)}`);
+  const src = !tag ? undefined : isDesktop ? (local?.key === imageKey ? local.url : undefined)
+    : `/api/emby/images/${encodeURIComponent(id)}/${image}?v=${encodeURIComponent(tag)}`;
 
   useEffect(() => {
     if (!isDesktop || !tag || !host.current) return;
     let stopped = false;
     let url: string | undefined;
+    let observer: IntersectionObserver | undefined;
     async function load() {
       try {
         url = await loadEmbyImage(id, image);
         if (stopped) URL.revokeObjectURL(url);
-        else setLocalUrl(url);
+        else setLocal({ key: imageKey, url });
       } catch {
-        if (!stopped) setLocalUrl(undefined);
+        if (!stopped) setLocal({ key: imageKey });
       }
     }
+    function enqueue() {
+      if (eager) imageQueue.unshift(load);
+      else imageQueue.push(load);
+      loadNextImage();
+    }
 
-    let observer: IntersectionObserver | undefined;
     if (eager || typeof IntersectionObserver === "undefined") {
-      void load();
+      enqueue();
     } else {
       observer = new IntersectionObserver(([entry]) => {
         if (entry.isIntersecting) {
           observer?.disconnect();
-          void load();
+          enqueue();
         }
-      }, { rootMargin: "160px" });
+      }, { rootMargin: "240px" });
       observer.observe(host.current);
     }
     return () => {
       stopped = true;
       observer?.disconnect();
+      const queued = imageQueue.indexOf(load);
+      if (queued >= 0) imageQueue.splice(queued, 1);
       if (url) URL.revokeObjectURL(url);
     };
-  }, [id, image, tag, eager]);
+  }, [id, image, tag, eager, imageKey]);
 
+  const unavailable = (local?.key === imageKey && !local.url) || (!!src && failed === src);
+  const emptyLabel = image === "poster" ? "无海报" : image === "portrait" ? "无头像" : "无剧照";
   return <span ref={host} className={artworkClasses[image]} aria-hidden="true">
-    {image !== "backdrop" && <span className="poster-placeholder">{image === "poster" ? "无海报" : image === "portrait" ? "无头像" : "无剧照"}</span>}
-    {src && failed !== src && <img src={src} alt="" loading={eager ? "eager" : "lazy"} decoding="async"
-      onError={() => setFailed(src)} />}
+    {image !== "backdrop" && (!src || loaded !== src) && <span className="poster-placeholder">
+      {!tag ? emptyLabel : unavailable ? "图片加载失败" : "正在加载图片…"}
+    </span>}
+    {src && failed !== src && <img src={src} alt="" loading={eager || isDesktop ? "eager" : "lazy"} decoding="async"
+      className={loaded === src ? undefined : "opacity-0"} onLoad={() => setLoaded(src)} onError={() => setFailed(src)} />}
   </span>;
 }
 
@@ -78,13 +106,15 @@ function episodeLabel(episode: EmbyEpisodePreview) {
   return last_number != null && last_number > number ? `第 ${number}–${last_number} 集` : `第 ${number} 集`;
 }
 
-function SeriesEpisodes({ id, onOpen }: {
+function SeriesEpisodes({ id, missingEpisodeIds, onOpen }: {
   id: string;
+  missingEpisodeIds?: string[];
   onOpen: (episode: EmbyEpisodePreview, season: EmbySeasonPreview, button: HTMLButtonElement) => void;
 }) {
   const heading = useId();
   const [result, setResult] = useState<EmbySeriesPreview>();
   const [selectedSeason, setSelectedSeason] = useState<number>();
+  const [onlyMissing, setOnlyMissing] = useState(!!missingEpisodeIds);
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string>();
 
@@ -99,7 +129,12 @@ function SeriesEpisodes({ id, onOpen }: {
     return () => { active = false; };
   }, [id, attempt]);
 
-  const seasons = result?.seasons ?? [];
+  const allSeasons = result?.seasons ?? [];
+  const missingIds = new Set(missingEpisodeIds);
+  const seasons = onlyMissing ? allSeasons.map((season) => ({
+    ...season,
+    episodes: season.episodes.filter((episode) => missingIds.has(episode.id) && !episode.overview?.trim()),
+  })).filter((season) => season.episodes.length > 0) : allSeasons;
   const firstRegular = seasons.findIndex((season) => (season.number ?? 0) > 0 && season.episodes.length > 0);
   const firstAvailable = seasons.findIndex((season) => season.episodes.length > 0);
   const index = selectedSeason ?? (firstRegular >= 0 ? firstRegular : Math.max(firstAvailable, 0));
@@ -118,7 +153,15 @@ function SeriesEpisodes({ id, onOpen }: {
       setAttempt((value) => value + 1);
     }}>重新读取分集</button>}
     {!result && !error && <p className="muted" role="status">正在读取 Emby 分集…</p>}
-    {result && !seasons.length && <p className="muted">Emby 暂无分集。</p>}
+    {result && missingEpisodeIds && <label className="check-option mt-2">
+      <input type="checkbox" checked={onlyMissing} onChange={(event) => {
+        setSelectedSeason(undefined);
+        setOnlyMissing(event.target.checked);
+      }} />仅看缺少简介的分集
+    </label>}
+    {result && !seasons.length && <p className="muted">
+      {onlyMissing ? "已读取的分集中没有缺简介的条目。" : "Emby 暂无分集。"}
+    </p>}
     {season && <>
       <div className="my-3 flex flex-wrap gap-2" role="group" aria-label="按季查看">
         {seasons.map((item, position) => <button type="button" className="season-button"
@@ -177,7 +220,8 @@ export function EmbyCredits({ id, fallback }: { id: string; fallback?: ReactNode
 
 type ScrapeControls = {
   canScrape: boolean;
-  onScrape: (target: EmbyScrapeTarget, name: string) => Promise<number>;
+  usesQueue: boolean;
+  onScrape: (target: EmbyScrapeTarget, name: string) => Promise<number | null>;
 };
 
 const scrapeLabels = {
@@ -187,67 +231,36 @@ const scrapeLabels = {
   episode: "刮削此分集",
 };
 
-function ScrapeActions({ target, name, canScrape, onScrape }: ScrapeControls & {
+function ScrapeActions({ target, name, canScrape, usesQueue, onScrape, onSubmitted }: ScrapeControls & {
   target: EmbyScrapeTarget;
   name: string;
+  onSubmitted?: () => void;
 }) {
-  const [pending, setPending] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [replaceImages, setReplaceImages] = useState(false);
-  const [feedback, setFeedback] = useState<{ message: string; error?: boolean }>();
+  const [opener, setOpener] = useState<HTMLButtonElement>();
+  const [feedback, setFeedback] = useState("");
   const scope = target.type === "library" ? "library" : target.scope;
+  const children = scope === "library" ? "包含库内所有条目。" : scope === "series" ? "包含季和分集。" : "";
 
-  async function submit(mode: "scrape" | "overwrite") {
-    if (pending || (mode === "scrape" && !canScrape)) return;
-    setPending(true);
-    setFeedback(undefined);
-    try {
-      if (mode === "overwrite") {
-        await overwriteEmby(target, replaceImages);
-        setConfirming(false);
-        setReplaceImages(false);
-        setFeedback({ message: "已将覆盖刮削请求提交给 Emby。" });
-      } else {
-        const batch = await onScrape(target, name);
-        setFeedback({ message: `已提交后台任务 #${batch}。` });
-      }
-    } catch (error) {
-      setFeedback({ message: errorText(error), error: true });
-    } finally {
-      setPending(false);
+  async function submit(choice: EmbyScrapeChoice) {
+    if (choice.mode === "overwrite") {
+      await overwriteEmby(target, choice.replaceImages);
+      setFeedback("Emby 已接收覆盖刮削请求。由该媒体库的元数据下载器执行。");
+    } else {
+      const batch = await onScrape(target, name);
+      setFeedback(batch === null
+        ? "Emby 已接收刮削请求。由该媒体库的元数据下载器执行。"
+        : `Collect Metadata 已创建后台采集任务 #${batch}。`);
     }
+    onSubmitted?.();
   }
 
-  return <div className="space-y-2">
-    {confirming ? <div className="space-y-2 rounded-lg border border-line bg-canvas p-3 text-sm">
-      <p className="[overflow-wrap:anywhere]">Emby 将按媒体库设置重新刮削「{name}」并替换已有元数据。
-        {scope === "library" && "此操作包含库内子项目。"}
-        {scope === "series" && "此操作包含季和分集。"}</p>
-      <label className="check-option">
-        <input type="checkbox" checked={replaceImages} disabled={pending}
-          onChange={(event) => setReplaceImages(event.target.checked)} />同时替换已有图片
-      </label>
-      <div className="flex flex-wrap gap-2">
-        <button className="secondary batch-cancel" type="button" disabled={pending}
-          onClick={() => void submit("overwrite")}>{pending ? "正在提交…" : "确认覆盖刮削"}</button>
-        <button className="secondary" type="button" disabled={pending} onClick={() => {
-          setConfirming(false);
-          setReplaceImages(false);
-          setFeedback(undefined);
-        }}>取消</button>
-      </div>
-    </div> : <div className="flex flex-wrap gap-2">
-      <button className="primary" type="button" onClick={() => void submit("scrape")} disabled={pending || !canScrape}>
-        {pending ? "正在提交…" : scrapeLabels[scope]}
-      </button>
-      <button className="secondary" type="button" disabled={pending} onClick={() => {
-        setFeedback(undefined);
-        setConfirming(true);
-      }}>覆盖刮削</button>
-    </div>}
-    {feedback && <p className={feedback.error ? "batch-error" : "muted"} role={feedback.error ? "alert" : "status"}>
-      {feedback.message}
-    </p>}
+  return <div>
+    <button className="primary" type="button" aria-haspopup="dialog" disabled={!canScrape}
+      onClick={(event) => { setFeedback(""); setOpener(event.currentTarget); }}>{scrapeLabels[scope]}</button>
+    {feedback && <p className="muted mt-2" role="status">{feedback}</p>}
+    {opener && <EmbyScrapeDialog opener={opener} target={scope === "library" ? `媒体库 · ${name}` : name} usesQueue={usesQueue}
+      overwrite={`Emby 服务器调用该媒体库的元数据下载器，重新刮削并替换已有元数据。${children}`}
+      onClose={() => setOpener(undefined)} onSubmit={submit} />}
   </div>;
 }
 
@@ -258,9 +271,29 @@ function clickedBackdrop(event: MouseEvent<HTMLDialogElement> | PointerEvent<HTM
     || event.clientY < bounds.top || event.clientY >= bounds.bottom;
 }
 
-function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeControls & {
+function EpisodeSynopsis({ episode, revision }: { episode: EmbyEpisodePreview; revision: number }) {
+  const [localized, setLocalized] = useState<EpisodeOverview>();
+  useEffect(() => {
+    let active = true;
+    getEmbyEpisodeOverview(episode.id).then(
+      (overview) => { if (active) setLocalized(overview); },
+      () => { if (active) setLocalized(undefined); },
+    );
+    return () => { active = false; };
+  }, [episode.id, revision]);
+
+  const overview = localized?.overview ?? episode.overview;
+  const source = localized?.source;
+  return <>
+    <p className="movie-description">{overview || "Emby 暂无本集简介。"}</p>
+    {!!overview && source && source !== "Emby" && <p className="mt-2 text-sm text-muted">简介来源 · {source}</p>}
+  </>;
+}
+
+function WorkPreview({ work, library, missingEpisodeIds, onClose, canScrape, usesQueue, onScrape }: ScrapeControls & {
   work: EmbyWorkPreview;
   library: string;
+  missingEpisodeIds?: string[];
   onClose: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -269,6 +302,7 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
   const episodeTitle = useId();
   const back = useRef<HTMLButtonElement>(null);
   const origin = useRef<{ button: HTMLButtonElement; scroll: number }>(null);
+  const [episodeRevision, setEpisodeRevision] = useState(0);
   const [selected, setSelected] = useState<{ episode: EmbyEpisodePreview; season: EmbySeasonPreview }>();
   useLayoutEffect(() => {
     const frame = dialog.current;
@@ -324,10 +358,10 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
           </div>
           {!!work.genres.length && <p className="work-genres">{work.genres.join(" / ")}</p>}
           <div className="mt-3"><ScrapeActions target={{ type: "item", id: work.id, scope: work.kind }}
-            name={work.title} canScrape={canScrape} onScrape={onScrape} /></div>
+            name={work.title} canScrape={canScrape} usesQueue={usesQueue} onScrape={onScrape} /></div>
         </div>
       </div>
-      <Tabs label="作品资料" className="work-tabs" tabs={[
+      <Tabs label="作品资料" className="work-tabs" initialTab={missingEpisodeIds ? "episodes" : undefined} tabs={[
         { id: "overview", label: "简介", content: <div className="work-panel">
           <p className="movie-description">{work.overview || "Emby 暂无剧情简介。"}</p>
           {(work.official_rating || work.critic_rating != null || work.imdb_rating || work.bangumi_id || !!work.tags?.length) &&
@@ -339,7 +373,7 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
               {!!work.tags?.length && <div><dt>标签</dt><dd>{work.tags.join(" / ")}</dd></div>}
             </dl>}
         </div> },
-        ...(work.kind === "series" ? [{ id: "episodes", label: "季与分集", retain: true, content: <SeriesEpisodes id={work.id} onOpen={(episode, season, button) => {
+        ...(work.kind === "series" ? [{ id: "episodes", label: "季与分集", retain: true, content: <SeriesEpisodes id={work.id} missingEpisodeIds={missingEpisodeIds} onOpen={(episode, season, button) => {
           origin.current = { button, scroll: dialog.current?.scrollTop ?? 0 };
           setSelected({ episode, season });
         }} /> }] : []),
@@ -355,7 +389,8 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
       <div className="mt-3"><ScrapeActions key={selected.episode.id}
         target={{ type: "item", id: selected.episode.id, scope: "episode" }}
         name={`${work.title} · ${seasonLabel(selected.season)} · ${selected.episode.title}`}
-        canScrape={canScrape} onScrape={onScrape} /></div>
+        canScrape={canScrape} usesQueue={usesQueue} onScrape={onScrape}
+        onSubmitted={() => setEpisodeRevision((value) => value + 1)} /></div>
       <Tabs label="分集资料" className="mt-4" tabs={[{ id: "details", label: "分集简介", content: <div className="mt-4 grid items-start gap-4 sm:grid-cols-[minmax(0,45fr)_minmax(0,55fr)] sm:gap-5">
         <EmbyArtwork id={selected.episode.id} tag={selected.episode.image} image="episode" eager />
         <div>
@@ -364,7 +399,7 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
             {selected.episode.runtime_minutes != null && <div><dt>时长</dt><dd>{selected.episode.runtime_minutes} 分钟</dd></div>}
             {selected.episode.rating != null && <div><dt>评分</dt><dd className="work-rating">{selected.episode.rating.toFixed(1)} / 10</dd></div>}
           </dl>
-          <p className="movie-description">{selected.episode.overview || "Emby 暂无本集简介。"}</p>
+          <EpisodeSynopsis key={selected.episode.id} episode={selected.episode} revision={episodeRevision} />
         </div>
       </div> }, { id: "credits", label: "本集演职员", retain: true, content: <EmbyCredits id={selected.episode.id} /> }]} />
     </section>}
@@ -373,30 +408,47 @@ function WorkPreview({ work, library, onClose, canScrape, onScrape }: ScrapeCont
 
 type SelectionControls = {
   aiConfigured: boolean;
-  onSelection: (works: EmbyWorkPreview[], useAi: boolean) => Promise<number>;
+  onSelection: (works: EmbyWorkPreview[], choice: EmbyScrapeChoice) => Promise<{ submitted: string[]; error?: string }>;
 };
 
 const MAX_SELECTION = 500;
 
-function LibraryWorks({ library, canScrape, onScrape, aiConfigured, onSelection, onOpen }: ScrapeControls & SelectionControls & {
+function LibraryWorks({ library, canScrape, usesQueue, onScrape, aiConfigured, onSelection, onOpen }: ScrapeControls & SelectionControls & {
   library: EmbyLibraryPreview;
-  onOpen: (work: EmbyWorkPreview) => void;
+  onOpen: (work: EmbyWorkPreview, missingEpisodeIds?: string[]) => void;
 }) {
   const [query, setQuery] = useState("");
   const [missing, setMissing] = useState("all");
+  const [selecting, setSelecting] = useState(false);
   const [selections, setSelections] = useState<Set<string>>(() => new Set());
-  const [pending, setPending] = useState(false);
+  const [opener, setOpener] = useState<HTMLButtonElement>();
+  const toggle = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState("");
+  const [episodeFilter, setEpisodeFilter] = useState<{ episodes: Map<string, string[]> } | { error: string }>();
+  const [filterAttempt, setFilterAttempt] = useState(0);
+  const byEpisode = missing === "episode-overview";
+  const missingEpisodes = byEpisode && episodeFilter && "episodes" in episodeFilter ? episodeFilter.episodes : undefined;
+
+  useEffect(() => {
+    if (!byEpisode) return;
+    let active = true;
+    getMissingEpisodeOverviews(library.id).then(
+      (result) => { if (active) setEpisodeFilter({ episodes: new Map(Object.entries(result)) }); },
+      (error) => { if (active) setEpisodeFilter({ error: errorText(error) }); },
+    );
+    return () => { active = false; };
+  }, [byEpisode, library.id, filterAttempt]);
+
   const term = query.trim().normalize("NFKC").toLowerCase();
   const visible = library.works.filter((work) =>
     (!term || [work.title, work.original_title, work.year].some((value) =>
       String(value ?? "").normalize("NFKC").toLowerCase().includes(term))) &&
     (missing === "all" || (missing === "poster" && !work.poster) ||
       (missing === "overview" && !work.overview?.trim()) ||
+      (byEpisode && work.kind === "series" && !!missingEpisodes?.get(work.id)?.length) ||
       (missing === "any" && (!work.poster || !work.overview?.trim())))
   );
   const selected = library.works.filter((work) => selections.has(work.id));
-  const canSelect = canScrape && !pending;
   const allVisible = visible.length > 0 && visible.every((work) => selections.has(work.id));
 
   function selectVisible() {
@@ -410,86 +462,120 @@ function LibraryWorks({ library, canScrape, onScrape, aiConfigured, onSelection,
     });
   }
 
-  async function submit(useAi: boolean) {
-    setError("");
-    setPending(true);
-    try {
-      await onSelection(selected, useAi);
-      setSelections(new Set());
-    } catch (error) {
-      setError(errorText(error));
-    } finally {
-      setPending(false);
-    }
+  async function submit(choice: EmbyScrapeChoice) {
+    const { submitted, error } = await onSelection(selected, choice);
+    setSelections((previous) => {
+      const next = new Set(previous);
+      for (const id of submitted) next.delete(id);
+      return next;
+    });
+    if (error) setError(error);
+    else setSelecting(false);
   }
 
-  return <section className="py-4 sm:py-6" aria-labelledby={`emby-library-${library.id}`}>
-    <div className="section-heading justify-start [overflow-wrap:anywhere]">
-      <h3 id={`emby-library-${library.id}`}>{library.name}</h3>
-      <span>{library.works.length} 部</span>
-    </div>
+  function toggleSelection() {
+    if (selecting) {
+      setSelections(new Set());
+      setError("");
+    }
+    setSelecting(!selecting);
+  }
+
+  return <section className="py-4" aria-labelledby={`emby-library-${library.id}`}>
+    <h3 id={`emby-library-${library.id}`} className="sr-only">{library.name}</h3>
     {library.works.length > 0 && <>
-      <div className="mb-4">
-        <ScrapeActions target={{ type: "library", id: library.id }} name={library.name}
-          canScrape={canScrape} onScrape={onScrape} />
-      </div>
-      <div className="mb-4 flex flex-wrap items-end gap-2">
-        <label className="filter">搜索片名
-          <input className="field" type="search" value={query} onChange={(event) => setQuery(event.target.value)} />
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <label className="filter grow sm:grow-0">
+          <span className="sr-only">搜索片名</span>
+          <input className="field min-w-0" type="search" placeholder="搜索片名" value={query}
+            onChange={(event) => setQuery(event.target.value)} />
         </label>
-        <label className="filter">资料完整性
-          <select className="field" value={missing} onChange={(event) => setMissing(event.target.value)}>
+        <label>
+          <span className="sr-only">资料完整性</span>
+          <select className="field" value={missing} onChange={(event) => {
+            setEpisodeFilter(undefined);
+            setMissing(event.target.value);
+          }}>
             <option value="all">全部作品</option>
-            <option value="any">缺少海报或简介</option>
+            <option value="any">作品缺少海报或简介</option>
             <option value="poster">缺少海报</option>
-            <option value="overview">缺少简介</option>
+            <option value="overview">作品缺少简介</option>
+            {library.works.some((work) => work.kind === "series") && <option value="episode-overview">分集缺少简介</option>}
           </select>
         </label>
-        <span className="muted" role="status">显示 {visible.length} 部 · 已选 {selected.length} 部</span>
+        <div className="flex flex-wrap items-center gap-2 sm:ms-auto">
+          <button className="secondary" type="button" ref={toggle} aria-pressed={selecting} disabled={!canScrape}
+            onClick={toggleSelection}>{selecting ? "退出选择" : "选择"}</button>
+          {!selecting && <ScrapeActions target={{ type: "library", id: library.id }} name={library.name}
+            canScrape={canScrape} usesQueue={usesQueue} onScrape={onScrape} />}
+        </div>
+        {!selecting && (term || missing !== "all") && (!byEpisode || missingEpisodes) &&
+          <span className="muted" role="status">显示 {visible.length} 部</span>}
       </div>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+      {selecting && <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="muted" role="status">{(!byEpisode || missingEpisodes) && `显示 ${visible.length} 部 · `}已选 {selected.length} 部</span>
         <button className="secondary" type="button"
-          disabled={!canSelect || visible.length === 0 || (!allVisible && selected.length >= MAX_SELECTION)}
+          disabled={!canScrape || visible.length === 0 || (!allVisible && selected.length >= MAX_SELECTION)}
           onClick={selectVisible}>{allVisible ? "取消选择当前结果" : "选择当前结果"}</button>
-        {selected.length > 0 && <button className="secondary" type="button" disabled={pending}
+        {selected.length > 0 && <button className="secondary" type="button" disabled={!canScrape}
           onClick={() => setSelections(new Set())}>清空选择</button>}
-        <button className="primary" type="button" disabled={!canSelect || !selected.length}
-          onClick={() => void submit(false)}>刮削所选</button>
-        {aiConfigured && <button className="secondary" type="button" disabled={!canSelect || !selected.length}
-          onClick={() => void submit(true)}>AI 刮削所选</button>}
+        <button className="primary" type="button" aria-haspopup="dialog" disabled={!canScrape || !selected.length}
+          onClick={(event) => { setError(""); setOpener(event.currentTarget); }}>刮削所选</button>
         {selected.length === MAX_SELECTION && <span className="muted">每批最多选择 {MAX_SELECTION} 部作品。</span>}
-      </div>
+      </div>}
+      {opener && <EmbyScrapeDialog opener={opener} fallbackFocus={toggle.current} target={`已选 ${selected.length} 部作品`}
+        usesQueue={usesQueue} allowAi={aiConfigured}
+        overwrite="Emby 服务器调用该媒体库的元数据下载器，重新刮削所选作品。所选剧集包含季和分集。已有元数据会被替换。"
+        onClose={() => setOpener(undefined)} onSubmit={submit} />}
       {error && <p className="batch-error" role="alert">{error}</p>}
     </>}
+    {byEpisode && !episodeFilter && <p className="muted" role="status">正在检查分集简介…</p>}
+    {byEpisode && episodeFilter && "error" in episodeFilter && <div className="flex flex-wrap items-center gap-2">
+      <p className="batch-error" role="alert">{episodeFilter.error}</p>
+      <button className="secondary" type="button" onClick={() => {
+        setEpisodeFilter(undefined);
+        setFilterAttempt((value) => value + 1);
+      }}>重试</button>
+    </div>}
     {visible.length ? <ul className="grid grid-cols-library gap-x-3 gap-y-4 sm:grid-cols-library-wide sm:gap-4" role="list">
-      {visible.map((work) => <li className="relative min-w-0" key={work.id}>
-        <label className="absolute end-1.5 top-1.5 z-10 flex cursor-pointer rounded bg-canvas p-1.5 shadow">
-          <input type="checkbox" aria-label={`选择 ${work.title}`} checked={selections.has(work.id)}
-            disabled={!canSelect || (selected.length >= MAX_SELECTION && !selections.has(work.id))}
-            onChange={(event) => {
-              const checked = event.target.checked;
-              setSelections((before) => {
-                const next = new Set(before);
-                if (checked) next.add(work.id);
-                else next.delete(work.id);
-                return next;
-              });
-            }} />
-        </label>
-        <button type="button" className="emby-tile" onClick={() => onOpen(work)}>
-          <EmbyArtwork key={work.poster} id={work.id} tag={work.poster} image="poster" />
-          <span className="emby-tile-caption">
-            <strong title={work.title}>{work.title}</strong>
+      {visible.map((work) => {
+        const checked = selections.has(work.id);
+        const missingEpisodeIds = missingEpisodes?.get(work.id);
+        const missingLabel = missingEpisodeIds?.length ? `缺 ${missingEpisodeIds.length} 集简介` : undefined;
+        return <li className="emby-tile relative min-w-0" data-selected={selecting && checked} key={work.id}>
+          {selecting ? <label className="absolute inset-0 z-10 cursor-pointer">
+            <span className="absolute end-1.5 top-1.5 flex rounded bg-canvas p-1.5 shadow">
+              <input type="checkbox" aria-label={`选择 ${work.title}`} checked={checked}
+                disabled={!canScrape || (selected.length >= MAX_SELECTION && !checked)}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setSelections((before) => {
+                    const next = new Set(before);
+                    if (checked) next.add(work.id);
+                    else next.delete(work.id);
+                    return next;
+                  });
+                }} />
+            </span>
+          </label> : <button type="button" className="absolute inset-0 z-10 rounded-lg"
+            aria-label={[work.title, work.year, mediaLabels[work.kind], missingLabel].filter(Boolean).join(" · ")}
+            title={work.title} aria-haspopup="dialog" onClick={() => onOpen(work, missingEpisodeIds)} />}
+          <EmbyArtwork id={work.id} tag={work.poster} image="poster" />
+          <span className="emby-tile-caption" aria-hidden="true">
+            <strong>{work.title}</strong>
             <span>{[work.year, mediaLabels[work.kind]].filter(Boolean).join(" · ")}</span>
+            {missingLabel && <span className="text-accent">{missingLabel}</span>}
           </span>
-        </button>
-      </li>)}
-    </ul> : <p className="muted">{library.works.length ? "没有符合筛选条件的作品。" : "这个媒体库没有可刮削的电影、剧集或私人影片。"}</p>}
+        </li>;
+      })}
+    </ul> : (!byEpisode || missingEpisodes) && <p className="muted">{
+      library.works.length ? "没有符合筛选条件的作品。" : "这个媒体库没有可刮削的电影、剧集或私人影片。"
+    }</p>}
   </section>;
 }
 
 export const EmbyCatalog = memo(function EmbyCatalog({ libraries, ...controls }: ScrapeControls & SelectionControls & { libraries: EmbyLibraryPreview[] }) {
-  const [selected, setSelected] = useState<{ work: EmbyWorkPreview; library: string }>();
+  const [selected, setSelected] = useState<{ work: EmbyWorkPreview; library: string; missingEpisodeIds?: string[] }>();
 
   return <div className="min-w-0">
     <Tabs label="Emby 媒体库" className="mt-3" tabs={libraries.map((library) => ({
@@ -498,9 +584,9 @@ export const EmbyCatalog = memo(function EmbyCatalog({ libraries, ...controls }:
       retain: true,
       panelFocusable: library.works.length === 0,
       content: <LibraryWorks library={library} {...controls}
-        onOpen={(work) => setSelected({ work, library: library.name })} />,
+        onOpen={(work, missingEpisodeIds) => setSelected({ work, library: library.name, missingEpisodeIds })} />,
     }))} />
-    {selected && <WorkPreview {...selected} canScrape={controls.canScrape} onScrape={controls.onScrape}
+    {selected && <WorkPreview {...selected} canScrape={controls.canScrape} usesQueue={controls.usesQueue} onScrape={controls.onScrape}
       onClose={() => setSelected(undefined)} />}
   </div>;
 });

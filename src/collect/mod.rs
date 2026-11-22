@@ -4,6 +4,7 @@ use reqwest::Client;
 use sqlx::postgres::PgConnectOptions;
 use tokio::sync::{OnceCell, Semaphore};
 
+mod bangumi_settings;
 mod identifier;
 mod localization;
 mod model;
@@ -17,10 +18,11 @@ use crate::{
     providers::{av, media},
     storage::Store,
 };
+pub use bangumi_settings::{BangumiSettings, BangumiStatus};
 pub(crate) use identifier::Identifier;
 pub use localization::{LanguageSettings, LanguageSettingsView};
 use model::Lookup;
-pub use model::LookupResponse;
+pub use model::{EmbyEpisodeOverview, LookupResponse};
 pub(crate) use model::{Fields, Source};
 pub use tmdb_settings::{TmdbSettings, TmdbStatus};
 
@@ -31,6 +33,7 @@ pub struct Collector {
     searches: Semaphore,
     entities: media::EntityCache,
     tmdb: Arc<TmdbSettings>,
+    bangumi: Arc<BangumiSettings>,
     output: Option<Arc<OutputSettings>>,
     emby: Option<Arc<EmbySettings>>,
     languages: Arc<LanguageSettings>,
@@ -83,6 +86,7 @@ impl Collector {
             searches: Semaphore::new(8),
             entities: media::EntityCache::default(),
             tmdb: Arc::new(TmdbSettings::from_environment()),
+            bangumi: Arc::new(BangumiSettings::from_environment()),
             output: None,
             emby: None,
             languages: Arc::new(LanguageSettings::load(None).expect("default language settings")),
@@ -102,6 +106,29 @@ impl Collector {
     pub fn with_tmdb_settings(mut self, settings: Arc<TmdbSettings>) -> Self {
         self.tmdb = settings;
         self
+    }
+
+    pub fn with_bangumi_settings(mut self, settings: Arc<BangumiSettings>) -> Self {
+        self.bangumi = settings;
+        self
+    }
+
+    pub fn bangumi_settings(&self) -> &Arc<BangumiSettings> {
+        &self.bangumi
+    }
+
+    pub fn bangumi_status(&self) -> BangumiStatus {
+        self.bangumi.status()
+    }
+
+    pub async fn test_bangumi(&self, credential: Option<&str>) -> Result<(), String> {
+        let _permit = self.permit()?;
+        self.bangumi.test(&self.client, credential).await
+    }
+
+    pub async fn save_bangumi(&self, credential: String) -> Result<BangumiStatus, String> {
+        let _permit = self.permit()?;
+        self.bangumi.save(&self.client, credential).await
     }
 
     pub fn with_output_settings(mut self, settings: Arc<OutputSettings>) -> Self {
@@ -200,20 +227,33 @@ impl Collector {
                     .and_then(serde_json::Value::as_str)
                     .and_then(media::bangumi::id)
             {
-                let enrichment =
-                    media::bangumi::details(&self.client, &self.entities, kind, bangumi_id).await;
+                let enrichment = self
+                    .bangumi
+                    .provider()
+                    .details(&self.client, kind, bangumi_id)
+                    .await;
                 if !enrichment.fields.is_empty() {
                     sources.push(enrichment);
                 }
             }
-            if is_episode && let Some(tmdb) = self.tmdb.provider() {
+            if is_episode {
                 let episode = &sources[0].data["item"];
-                if let Some(enrichment) = tmdb
-                    .emby_episode(&self.client, emby, episode, &targets[0])
-                    .await
-                {
-                    sources.push(enrichment);
-                }
+                let needs_chinese = targets.iter().any(|target| target == "zh-CN")
+                    && !episode["Overview"].as_str().is_some_and(media::bangumi::chinese_overview);
+                let (tmdb, bangumi) = tokio::join!(
+                    async {
+                        self.tmdb.provider()?.emby_episode(&self.client, emby, episode, &targets[0]).await
+                    },
+                    async {
+                        if needs_chinese {
+                            self.bangumi.provider().emby_episode_overview(&self.client, emby, episode).await
+                        } else {
+                            None
+                        }
+                    },
+                );
+                sources.extend(tmdb);
+                sources.extend(bangumi);
             }
             sources
         };
@@ -338,6 +378,20 @@ impl Collector {
         Ok(self.localize_lookup(result, targets).await)
     }
 
+    pub async fn emby_episode_overview(&self, id: &str) -> Result<EmbyEpisodeOverview, String> {
+        let _permit = self.permit()?;
+        let emby = self.emby_settings().and_then(|settings| settings.connection())
+            .ok_or("请先配置 Emby 服务。")?;
+        let query = format!("{}{id}", media::emby::EPISODE_QUERY_PREFIX);
+        let home = emby.find(&self.client, MediaKind::Series, &query, None)
+            .await.ok_or("无法读取此 Emby 分集。")?;
+        let record = self.gather_emby(&emby, MediaKind::Series, &query, home, None, false).await?.record;
+        Ok(EmbyEpisodeOverview {
+            overview: record["fields"]["description"].as_str().map(str::to_owned),
+            source: record["field_sources"]["description"].as_str().map(str::to_owned),
+        })
+    }
+
     pub async fn upsert_emby_item(
         &self,
         server: &str,
@@ -456,7 +510,7 @@ impl Collector {
         Ok(media::search(
             &self.client,
             &self.entities,
-            self.tmdb.provider().as_deref(),
+            (self.tmdb.provider().as_deref(), &self.bangumi.provider()),
             kind,
             query,
             &self.languages.targets(None)[0],
@@ -512,7 +566,7 @@ impl Collector {
         media::collect(
             &self.client,
             &self.entities,
-            self.tmdb.provider().as_deref(),
+            (self.tmdb.provider().as_deref(), &self.bangumi.provider()),
             kind,
             provider,
             id,

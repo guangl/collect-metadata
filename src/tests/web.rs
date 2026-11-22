@@ -73,6 +73,34 @@ async fn failed_api_requests_have_safe_errors_and_server_generated_ids() {
 }
 
 #[tokio::test]
+async fn bangumi_routes_report_status_without_returning_the_token() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("bangumi-token");
+    fs::write(&path, "secret-fixture-token\n").unwrap();
+    let collector = Collector::from_environment(None)
+        .unwrap()
+        .with_bangumi_settings(Arc::new(BangumiSettings::from_file(path.clone()).unwrap()));
+    let (address, server) = listen(router(Arc::new(collector))).await;
+    let api = Api {
+        address,
+        client: Client::builder().no_proxy().build().unwrap(),
+    };
+    assert_eq!(api.send("/readyz", None).await.status(), 204);
+    assert_eq!(api.success("/api/settings/postgres", None).await, "none");
+    let route = "/api/settings/bangumi";
+    assert_eq!(api.success(route, None).await, "saved");
+    for path in [route, "/api/settings/bangumi/test"] {
+        let rejected = api
+            .send(path, Some(json!({"credential":"invalid token"})))
+            .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert!(!rejected.text().await.unwrap().contains("invalid token"));
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), "secret-fixture-token\n");
+    server.abort();
+}
+
+#[tokio::test]
 async fn web_language_preferences_validate_and_persist() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("languages.json");
@@ -178,6 +206,26 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
         .query_pairs()
         .into_owned()
         .collect();
+    if args.get("HasOverview").is_some_and(|value| value == "false") {
+        assert_eq!(args["ParentId"], "7");
+        assert_eq!(args["IncludeItemTypes"], "Episode");
+        assert_eq!(args["Recursive"], "true");
+        assert_eq!(args["IsMissing"], "false");
+        assert_eq!(args["EnableImages"], "false");
+        let items = match args["StartIndex"].as_str() {
+            "0" => json!([
+                {"Id":"37","Type":"Episode","SeriesId":"31"},
+                {"Id":"80","Type":"Episode","SeriesId":"31","LocationType":"Virtual"}
+            ]),
+            "2" => json!([
+                {"Id":"37","Type":"Episode","SeriesId":"31"},
+                {"Id":"81","Type":"Episode","SeriesId":"31","Overview":"已有简介"},
+                {"Id":"82","Type":"Episode","SeriesId":"35","Overview":"  "}
+            ]),
+            _ => panic!("unexpected page size"),
+        };
+        return Json(json!({"Items":items,"TotalRecordCount":5})).into_response();
+    }
     let film = json!({
         "Id":"30","Type":"Movie","Name":"海报电影","OriginalTitle":"Poster Movie","ProductionYear":2019,
         "Path":"/media/海报电影.mkv","PremiereDate":"2019-05-30T00:00:00Z","RunTimeTicks":7_200_000_000_i64,
@@ -305,6 +353,14 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
     assert_eq!(catalog[1]["works"][0]["title"], "本地剧集");
     assert!(catalog[1]["works"][0]["poster"].is_null());
     assert_eq!(catalog[2]["works"], json!([]));
+    assert_eq!(
+        api.success("/api/emby/libraries/7/missing-episode-overviews", None).await,
+        json!({"31":["37"], "35":["82"]}),
+    );
+    assert_eq!(
+        api.send("/api/emby/libraries/404/missing-episode-overviews", None).await.status(),
+        StatusCode::BAD_REQUEST,
+    );
     let film = &catalog[0]["works"][0];
     assert_eq!(film["poster"], "3");
     assert_eq!(film["backdrop"], "4");
@@ -333,6 +389,14 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
             .await
             .status(),
         404
+    );
+    assert_eq!(
+        api.success("/api/emby/episodes/34/overview", None).await,
+        json!({"overview":"已有中文译文","source":"Emby"}),
+    );
+    assert_eq!(
+        api.send("/api/emby/episodes/30/overview", None).await.status(),
+        StatusCode::BAD_REQUEST,
     );
     let people = api.success("/api/emby/credits/30", None).await;
     assert_eq!(people[0], json!({"id":"99","name":"导演","role":"director","detail":null,"portrait":"3"}));
@@ -433,8 +497,72 @@ async fn emby_overwrite_validates_target_and_requests_native_refresh() {
         assert_eq!(params["ReplaceAllImages"], replace_images.to_string());
         assert_eq!(params["ImageRefreshMode"], if replace_images { "FullRefresh" } else { "Default" });
     }
+
+    for (id, scope, recursive) in [("30", "movie", "false"), ("31", "series", "true")] {
+        let target = json!({"type":"item","id":id,"scope":scope});
+        assert_eq!(
+            api.send("/api/emby/refresh", Some(target)).await.status(),
+            204
+        );
+        let (requested, params) = received.try_recv().unwrap();
+        assert_eq!(requested, id);
+        assert_eq!(params["Recursive"], recursive);
+        assert_eq!(params["MetadataRefreshMode"], "FullRefresh");
+        assert_eq!(params["ImageRefreshMode"], "FullRefresh");
+        assert_eq!(params["ReplaceAllMetadata"], "false");
+        assert_eq!(params["ReplaceAllImages"], "false");
+    }
     emby.abort();
     server.abort();
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn desktop_folder_scrapes_and_exports_without_postgres() {
+    let (mock, emby) = listen(Router::new().fallback(get(emby_fixture))).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path();
+    fs::write(
+        path.join("emby.json"),
+        json!({
+            "enabled":true,"server":mock,"api_key":"test-secret"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = OutputSettings::load(path.join("output.json"), Some(path.join("output"))).unwrap();
+    output
+        .save(
+            serde_json::from_value(json!({
+                "enabled": true, "directory": "local", "poster": false,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let collector = Collector::from_environment(None)
+        .unwrap()
+        .with_emby_settings(Arc::new(
+            EmbySettings::load(path.join("emby.json")).unwrap(),
+        ))
+        .with_output_settings(Arc::new(output));
+
+    let video = path.join("Media/家庭旅行.mov");
+    fs::create_dir(video.parent().unwrap()).unwrap();
+    fs::write(&video, "fixture").unwrap();
+    let selection = collect_metadata::scan_native_folder(video.parent().unwrap()).unwrap();
+    let file = selection.preview.works[0].source_files.clone();
+    let result = collector
+        .scrape_folder_work(-1, 1, file, None)
+        .await
+        .unwrap();
+    let result = serde_json::to_value(result).unwrap();
+    assert_eq!(result["stage"], "success");
+    assert_eq!(result["result"]["record"]["fields"]["title"], "家庭旅行");
+    assert!(result["result"]["saved"].is_null());
+    let metadata = path.join("output/local/batch--1/work-1/metadata.json");
+    assert!(metadata.is_file());
+    assert_eq!(fs::read_to_string(video).unwrap(), "fixture");
+    emby.abort();
 }
 
 impl Api {

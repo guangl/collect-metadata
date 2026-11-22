@@ -211,6 +211,8 @@
   }
 
   .work-preview::backdrop { @apply bg-canvas/75 backdrop-blur-sm; }
+  .scrape-dialog { @apply max-w-[30rem]; }
+  .scrape-dialog label[data-selected="true"] { @apply border-accent bg-raised; }
   .work-preview-close { @apply absolute end-2 top-2 z-10 size-11 p-0 text-2xl leading-none sm:end-3 sm:top-3 sm:size-10; }
 
 
@@ -316,6 +318,6 @@
 
   .emby-tile { @apply block w-full rounded-lg text-start; }
   .emby-tile .poster-art { @apply rounded-lg border border-line motion-safe:transition; }
-  .emby-tile:hover .poster-art, .emby-tile:focus-visible .poster-art { @apply border-accent brightness-110; }
+  .emby-tile:hover .poster-art, .emby-tile:focus-within .poster-art, .emby-tile[data-selected="true"] .poster-art { @apply border-accent brightness-110; }
   .emby-tile-caption { @apply px-0.5 pt-2; }
 }

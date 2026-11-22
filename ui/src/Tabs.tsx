@@ -1,14 +1,18 @@
 import { useId, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 
-export function Tabs({ label, tabs, className = "" }: {
+export function Tabs({ label, tabs, className = "", initialTab }: {
   label: string;
   tabs: { id: string; label: string; content: ReactNode; retain?: boolean; panelFocusable?: boolean }[];
   className?: string;
+  initialTab?: string;
 }) {
   const prefix = useId();
-  const [selected, setSelected] = useState<string>();
-  const [visited, setVisited] = useState<string[]>(() => tabs.length ? [tabs[0].id] : []);
+  const [selected, setSelected] = useState(initialTab);
+  const [visited, setVisited] = useState<string[]>(() => {
+    const first = tabs.find((tab) => tab.id === initialTab) ?? tabs[0];
+    return first ? [first.id] : [];
+  });
   const active = tabs.some(({ id }) => id === selected) ? selected : tabs[0]?.id;
   function select(id: string) {
     setSelected(id);

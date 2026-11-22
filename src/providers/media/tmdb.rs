@@ -184,8 +184,10 @@ impl Tmdb {
                 Err(error) => {
                     let fallback = match (item["ParentIndexNumber"].as_u64(), number) {
                         (Some(season), Some(number)) if number > 0 => emby
-                            .series_tmdb_id(client, item)
+                            .series_provider_id(client, item, "Tmdb")
                             .await
+                            .as_deref()
+                            .and_then(id)
                             .map(|series| Episode {
                                 series,
                                 season,
@@ -213,7 +215,7 @@ impl Tmdb {
         let mut endpoint = self.endpoint(&path, language);
         endpoint
             .query_pairs_mut()
-            .append_pair("append_to_response", "external_ids");
+            .append_pair("append_to_response", "external_ids,translations");
         let series_endpoint = self.endpoint(&format!("tv/{series}"), language);
         let (details, show) = tokio::join!(
             self.get(client, &endpoint),

@@ -17,11 +17,11 @@ use axum::{
     routing::{get, post},
 };
 use collect_metadata::{
-    AiBatchInput, AutoScrape, BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput,
-    EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope, EmbySelectionInput, EmbySettings,
-    HistoryItem, LanguageSettings, LookupResponse, MediaKind, MediaProvider, OutputOptions,
-    OutputSettings, TmdbSettings, browse_mounted_folders, diagnostics, preview_folder,
-    scan_mounted_folder,
+    AiBatchInput, AutoScrape, BangumiSettings, BatchAction, BatchItemInput, CandidateChoice, Collector,
+    EmbyInput, EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope, EmbyScrapeTarget,
+    EmbySelectionInput, EmbySettings, HistoryItem, LanguageSettings, LookupResponse, MediaKind,
+    MediaProvider, OutputOptions, OutputSettings, TmdbSettings, browse_mounted_folders,
+    diagnostics, preview_folder, scan_mounted_folder,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -77,7 +77,7 @@ struct MediaFolderQuery {
 }
 
 #[derive(Deserialize)]
-struct TmdbInput {
+struct CredentialInput {
     credential: Option<String>,
 }
 
@@ -130,21 +130,20 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         LanguageSettings::load(Some(config.with_file_name("metadata-languages.json"))),
     )?);
     let ai_file = config.with_file_name("ai.json");
+    let bangumi = diagnostics::startup_step(
+        "bangumi_config",
+        BangumiSettings::from_file(config.with_file_name("bangumi-token")),
+    )?;
     let tmdb = diagnostics::startup_step("tmdb_config", TmdbSettings::from_file(config))?;
     let collector =
         diagnostics::startup_step("collector_config", Collector::from_environment(None))?;
     let collector =
         diagnostics::startup_step("ai_config", collector.with_ai_config_file(&ai_file))?
             .with_tmdb_settings(Arc::new(tmdb))
+            .with_bangumi_settings(Arc::new(bangumi))
             .with_output_settings(Arc::new(output))
             .with_emby_settings(emby)
             .with_language_settings(languages);
-    if !collector.storage_configured() {
-        return diagnostics::startup_step(
-            "database_config",
-            Err("请通过 DATABASE_URL 或 PGHOST 配置 PostgreSQL。".into()),
-        );
-    }
     diagnostics::startup_step("database_init", collector.init_storage().await)?;
     let collector = Arc::new(collector);
     let app = router(Arc::clone(&collector));
@@ -219,6 +218,11 @@ fn router(collector: Arc<Collector>) -> Router {
         .route("/api/settings/tmdb", get(tmdb_status).post(save_tmdb))
         .route("/api/settings/tmdb/test", post(test_tmdb))
         .route(
+            "/api/settings/bangumi",
+            get(bangumi_status).post(save_bangumi),
+        )
+        .route("/api/settings/bangumi/test", post(test_bangumi))
+        .route(
             "/api/settings/output",
             get(output_settings).post(save_output_settings),
         )
@@ -236,7 +240,13 @@ fn router(collector: Arc<Collector>) -> Router {
         .route("/api/emby/import-selection", post(import_emby_selection))
         .route("/api/emby/items/{id}/scrape", post(import_emby_item))
         .route("/api/emby/overwrite", post(overwrite_emby))
+        .route("/api/emby/refresh", post(refresh_emby_metadata))
+        .route("/api/emby/episodes/{id}/overview", get(emby_episode_overview))
         .route("/api/emby/series/{id}", get(emby_series_preview))
+        .route(
+            "/api/emby/libraries/{id}/missing-episode-overviews",
+            get(emby_missing_episode_overviews),
+        )
         .route("/api/emby/credits/{id}", get(emby_credits))
         .route("/api/emby/images/{id}/{image}", get(emby_preview_image))
         .route(
@@ -418,6 +428,13 @@ async fn tmdb_status(State(collector): AppState) -> impl IntoResponse {
     )
 }
 
+async fn bangumi_status(State(collector): AppState) -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(collector.bangumi_status()),
+    )
+}
+
 async fn language_settings(State(collector): AppState) -> impl IntoResponse {
     (
         [(header::CACHE_CONTROL, "no-store")],
@@ -557,6 +574,17 @@ async fn overwrite_emby(
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
 }
 
+async fn refresh_emby_metadata(
+    State(collector): AppState,
+    Json(target): Json<EmbyScrapeTarget>,
+) -> Result<StatusCode, ApiError> {
+    collector
+        .refresh_emby_metadata(target)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
 async fn emby_preview_image(
     State(collector): AppState,
     Path((id, image)): Path<(String, EmbyPreviewImage)>,
@@ -585,6 +613,28 @@ async fn emby_preview_image(
 async fn emby_credits(State(collector): AppState, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
     collector.emby_credits(&id).await
         .map(|people| ([(header::CACHE_CONTROL, "no-store")], Json(people)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn emby_missing_episode_overviews(
+    State(collector): AppState,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .emby_missing_episode_overviews(&id)
+        .await
+        .map(Json)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn emby_episode_overview(
+    State(collector): AppState,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .emby_episode_overview(&id)
+        .await
+        .map(|overview| ([(header::CACHE_CONTROL, "no-store")], Json(overview)))
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
 }
 
@@ -662,10 +712,14 @@ async fn save_output_settings(
 }
 
 async fn readiness(State(collector): AppState, was_ready: Arc<AtomicBool>) -> impl IntoResponse {
-    let reason = match tokio::time::timeout(Duration::from_secs(2), collector.check_storage()).await {
-        Ok(Ok(())) => None,
-        Ok(Err(_)) => Some("postgres"),
-        Err(_) => Some("timeout"),
+    let reason = if collector.storage_configured() {
+        match tokio::time::timeout(Duration::from_secs(2), collector.check_storage()).await {
+            Ok(Ok(())) => None,
+            Ok(Err(_)) => Some("postgres"),
+            Err(_) => Some("timeout"),
+        }
+    } else {
+        None
     };
     let previous = was_ready.swap(reason.is_none(), Ordering::Relaxed);
     let status = if let Some(reason) = reason {
@@ -683,21 +737,20 @@ async fn readiness(State(collector): AppState, was_ready: Arc<AtomicBool>) -> im
 }
 
 async fn check_storage(State(collector): AppState) -> Result<impl IntoResponse, ApiError> {
+    let cache = [(header::CACHE_CONTROL, "no-store")];
+    if !collector.storage_configured() {
+        return Ok((cache, Json("none")).into_response());
+    }
     collector
         .check_storage()
         .await
-        .map(|()| {
-            (
-                [(header::CACHE_CONTROL, "no-store")],
-                StatusCode::NO_CONTENT,
-            )
-        })
+        .map(|()| (cache, StatusCode::NO_CONTENT).into_response())
         .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))
 }
 
 async fn test_tmdb(
     State(collector): AppState,
-    Json(input): Json<TmdbInput>,
+    Json(input): Json<CredentialInput>,
 ) -> Result<StatusCode, ApiError> {
     collector
         .test_tmdb(input.credential.as_deref())
@@ -708,10 +761,32 @@ async fn test_tmdb(
 
 async fn save_tmdb(
     State(collector): AppState,
-    Json(input): Json<TmdbInput>,
+    Json(input): Json<CredentialInput>,
 ) -> Result<impl IntoResponse, ApiError> {
     collector
         .save_tmdb(input.credential.unwrap_or_default())
+        .await
+        .map(|status| ([(header::CACHE_CONTROL, "no-store")], Json(status)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn test_bangumi(
+    State(collector): AppState,
+    Json(input): Json<CredentialInput>,
+) -> Result<StatusCode, ApiError> {
+    collector
+        .test_bangumi(input.credential.as_deref())
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+}
+
+async fn save_bangumi(
+    State(collector): AppState,
+    Json(input): Json<CredentialInput>,
+) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .save_bangumi(input.credential.unwrap_or_default())
         .await
         .map(|status| ([(header::CACHE_CONTROL, "no-store")], Json(status)))
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))

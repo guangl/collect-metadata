@@ -17,7 +17,7 @@ export const storageLabels: Record<StorageStatus, string> = {
   failed: "PostgreSQL 连接异常",
   none: "未配置 PostgreSQL",
 };
-export type TmdbStatus = "unconfigured" | "environment" | "saved";
+export type CredentialStatus = "unconfigured" | "environment" | "saved";
 export type PortraitRole = "actor" | "voice" | "director" | "writer" | "crew";
 
 export interface OutputOptions {

@@ -65,7 +65,7 @@ fn scan(root: &Path, relative: &str) -> Result<FolderSelection, String> {
             relative.rsplit('/').next().unwrap(),
         )
     };
-    FolderSelection::new(display, scan_open_folder(&folder, name)?)
+    FolderSelection::new(display, scan_open_folder(&folder, name)?, false)
 }
 
 async fn on_mount<T: Send + 'static>(

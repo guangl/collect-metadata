@@ -1,17 +1,18 @@
 import { WritebackDialog } from "./WritebackDialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
-import { chooseBatchCandidate, chooseMediaFolder, controlBatch, correctBatchMatch, createAiBatch, createBatch, createFolderBatch, getAiStatus, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, importEmbyLibrary, importEmbySelection, isDesktop, listBatches, previewMountedFolder, retryBatchRow } from "../api";
+import { chooseBatchCandidate, chooseMediaFolder, controlBatch, correctBatchMatch, createAiBatch, createBatch, createFolderBatch, getAiStatus, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, importEmbyLibrary, importEmbySelection, isDesktop, listBatches, overwriteEmby, previewMountedFolder, refreshEmbyMetadata, retryBatchRow, scrapeFolderWork } from "../api";
 import { languageText, PosterArt } from "../Catalog";
 import { DetailDialog } from "../DetailDialog";
 import { formatDate } from "../Movie";
 import { errorText, mediaLabels, providerLabels } from "../types";
 import type { Candidate, EmbyLibraryPreview, EmbyScrapeTarget, EmbyWorkPreview, LookupResponse, MediaProvider, MediaType, StorageStatus } from "../types";
 import { EmbyCatalog } from "./EmbyCatalog";
+import { EmbyScrapeDialog, type EmbyScrapeChoice } from "./EmbyScrapeDialog";
 import { MatchCorrection } from "./MatchCorrection";
 import { MountedFolderPicker } from "./MountedFolderPicker";
 import { AV_PREFIXES, MAX_FOLDER_FILES, MAX_ITEMS, parseBatch, terminal } from "./engine";
-import type { BatchAction, BatchRow, BatchStage, BatchStatus, BatchSummary, BatchView, FolderBatchResult, FolderSelection } from "./engine";
+import type { BatchAction, BatchRow, BatchStage, BatchStatus, BatchSummary, BatchView, FolderBatchResult, FolderSelection, FolderWorkResult } from "./engine";
 
 const labels: Record<BatchStage, string> = {
   queued: "排队中",
@@ -91,6 +92,90 @@ function LinkedFiles({ batch, row }: { batch: number; row: BatchRow }) {
   </details>;
 }
 
+function LocalFolderScrape({ folder, busy, setBusy }: {
+  folder: FolderSelection;
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+}) {
+  const [run, setRun] = useState<number>();
+  const [results, setResults] = useState<Record<number, FolderWorkResult>>({});
+  const [current, setCurrent] = useState<number>();
+  const [opened, setOpened] = useState<{ response: LookupResponse; opener: HTMLButtonElement }>();
+  const works = folder.preview.works;
+
+  async function collect(batch: number, index: number, candidate: Candidate | null) {
+    const { source_files } = works[index];
+    setCurrent(index);
+    try {
+      const result = await scrapeFolderWork(batch, index + 1, source_files ?? [],
+        candidate && { provider: candidate.provider, id: candidate.id });
+      setResults((previous) => ({ ...previous, [index]: result }));
+    } catch (error) {
+      setResults((previous) => ({ ...previous, [index]: {
+        stage: "failed", message: errorText(error), candidates: null, result: null, output: null,
+      } }));
+    } finally {
+      setCurrent(undefined);
+    }
+  }
+
+  async function start() {
+    if (busy) return;
+    setBusy(true);
+    const batch = -(Date.now() * 1000 + Math.floor(Math.random() * 1000));
+    setRun(batch);
+    setResults({});
+    try {
+      for (const index of works.keys()) await collect(batch, index, null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function choose(index: number, candidate: Candidate) {
+    if (busy || run === undefined) return;
+    setBusy(true);
+    try {
+      await collect(run, index, candidate);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className="mt-5 min-w-0" aria-labelledby="local-folder-title">
+    <div className="section-heading">
+      <h2 id="local-folder-title">本地文件夹刮削</h2>
+      <button type="button" className="primary" disabled={busy || !works.length}
+        onClick={() => void start()}>{busy ? "正在刮削…" : run ? "重新刮削" : "开始刮削元数据"}</button>
+    </div>
+    <p className="muted" role="status">{run
+      ? `已处理 ${Object.keys(results).length} / ${works.length} 部作品`
+      : `识别到 ${works.length} 部作品，关联 ${folder.preview.files} 个文件。`}</p>
+    {!works.length && <p className="catalog-empty">未识别到可刮削的作品。请更换文件夹。</p>}
+    <ul className="mt-3 grid gap-2" aria-label="待刮削作品">
+      {works.map((work, index) => {
+        const row = results[index];
+        const response = row?.result;
+        return <li className="panel min-w-0 space-y-2 [overflow-wrap:anywhere]" key={work.kind + ":" + work.query}>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <strong>{work.query}</strong>
+            <span className="muted">{mediaLabels[work.kind]} · {work.file_count} 个文件</span>
+            {current === index ? <span>正在刮削…</span> : row && <span>{labels[row.stage]}</span>}
+            {response && <button type="button" className="secondary"
+              onClick={(event) => setOpened({ response, opener: event.currentTarget })}>查看结果</button>}
+          </div>
+          {row?.message && <p className="muted">{row.message}</p>}
+          {row?.candidates?.length ? <CandidateChoice candidates={row.candidates} busy={busy}
+            onChoose={(candidate) => void choose(index, candidate)} /> : null}
+          {row?.output?.directory && <p>已写出 {row.output.written} 项资料 · <code>{row.output.directory}</code></p>}
+          {row?.output?.message && <p className="batch-error">{row.output.message}</p>}
+        </li>;
+      })}
+    </ul>
+    {opened && <DetailDialog {...opened} closeLabel="关闭本地刮削结果" onDismiss={() => setOpened(undefined)} />}
+  </section>;
+}
+
 export function Batch({ active, storage, folderSelection, setFolderSelection, onConfigure, onConfigureEmby, onNotice, onError }: {
   active: boolean;
   storage: StorageStatus;
@@ -117,6 +202,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const [correcting, setCorrecting] = useState<number | null>(null);
   const [changing, setChanging] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [localBusy, setLocalBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [folderResult, setFolderResult] = useState<FolderBatchResult | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
@@ -124,7 +210,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const [selectedSource, setSelectedSource] = useState<"folder" | "emby">();
   const [embyResult, setEmbyResult] = useState<{ libraries: EmbyLibraryPreview[] | null } | { error: string }>();
   const [embyRefresh, setEmbyRefresh] = useState(0);
-  const [embyImportError, setEmbyImportError] = useState<string | null>(null);
+  const [allLibrariesOpener, setAllLibrariesOpener] = useState<HTMLButtonElement>();
   const [error, setError] = useState<string | null>(null);
   const [writeback, setWriteback] = useState<{ row: number | null; title: string } | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -163,7 +249,6 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     if (!active || selectedSource === "folder") return;
     let stopped = false;
     setEmbyResult(undefined);
-    setEmbyImportError(null);
     getEmbyCatalog().then(
       (libraries) => { if (!stopped) setEmbyResult({ libraries }); },
       (error) => { if (!stopped) setEmbyResult({ error: errorText(error) }); },
@@ -229,7 +314,9 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const unfinished = ended < rows.length;
   const canCancel = status !== "cancelled" && unfinished;
   const busy = action !== null || changing !== null;
-  const sourceBusy = scanning || submitting;
+  const sourceBusy = scanning || submitting || localBusy;
+  const hasQueue = storage === "ready";
+  const useLocalFolder = isDesktop && (storage === "none" || storage === "failed" || localBusy);
 
   useEffect(() => {
     if (!active) {
@@ -380,27 +467,51 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     }
   }, [onNotice, refreshList, sourceBusy, storage]);
 
-  async function submitEmby() {
-    if (!embyCount || sourceBusy || storage !== "ready") return;
-    setEmbyImportError(null);
-    try {
-      await queueEmby(importEmbyCatalog, "已将 Emby 的全部媒体库提交到后台任务。");
-    } catch (error) {
-      setEmbyImportError(errorText(error));
+  const submitEmbyTarget = useCallback(async (target: EmbyScrapeTarget, name: string) => {
+    if (storage !== "ready") {
+      await refreshEmbyMetadata(target);
+      return null;
     }
-  }
-
-  const submitEmbyTarget = useCallback((target: EmbyScrapeTarget, name: string) => {
     const request = target.type === "library"
       ? () => importEmbyLibrary(target.id)
       : () => importEmbyItem(target.id, target.scope);
-    return queueEmby(request, `已将「${name}」提交到后台任务。`);
-  }, [queueEmby]);
+    return queueEmby(request, `Collect Metadata 已为「${name}」创建后台采集任务。`);
+  }, [queueEmby, storage]);
 
-  const submitEmbySelection = useCallback((works: EmbyWorkPreview[], useAi: boolean) =>
-    queueEmby(() => importEmbySelection(works.map(({ id, kind }) => ({ id, scope: kind })), useAi),
-      `已将所选 ${works.length} 部作品提交到${useAi ? " AI 刮削" : "后台任务"}。`),
-  [queueEmby]);
+  const submitEmbySelection = useCallback(async (works: EmbyWorkPreview[], choice: EmbyScrapeChoice) => {
+    if (storage === "ready" && choice.mode !== "overwrite") {
+      const useAi = choice.mode === "ai";
+      await queueEmby(() => importEmbySelection(works.map(({ id, kind }) => ({ id, scope: kind })), useAi),
+        `Collect Metadata 已为所选 ${works.length} 部作品创建${useAi ? " AI 刮削" : "后台采集"}任务。`);
+      return { submitted: works.map(({ id }) => id) };
+    }
+
+    setSubmitting(true);
+    const submitted: string[] = [];
+    let firstFailure: string | undefined;
+    try {
+      for (const work of works) {
+        try {
+          const target = { type: "item", id: work.id, scope: work.kind } as const;
+          if (choice.mode === "overwrite") await overwriteEmby(target, choice.replaceImages);
+          else await refreshEmbyMetadata(target);
+          submitted.push(work.id);
+        } catch (error) {
+          firstFailure ??= errorText(error);
+        }
+      }
+      if (submitted.length) {
+        const action = choice.mode === "overwrite" ? "覆盖刮削" : "刮削";
+        onNotice(`Emby 已接收 ${submitted.length} 部作品的${action}请求。由该媒体库的元数据下载器执行。`);
+      }
+      return {
+        submitted,
+        error: firstFailure && `${works.length - submitted.length} 部作品提交失败。${firstFailure}`,
+      };
+    } finally {
+      setSubmitting(false);
+    }
+  }, [queueEmby, onNotice, storage]);
 
   async function open(row: BatchRow, opener: HTMLButtonElement) {
     if (selected === null || busy) return;
@@ -419,12 +530,8 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     <section aria-labelledby="batch-title">
       <div className="page-heading flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
         <h1 id="batch-title">刮削工作台</h1>
-        <a className="text-sm" href="#queue-title">后台任务 <span aria-hidden="true">↓</span></a>
+        {hasQueue && <a className="text-sm" href="#queue-title">后台任务 <span aria-hidden="true">↓</span></a>}
       </div>
-      {storage !== "ready" && <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-dashed border-line p-3 text-sm text-muted">
-        <p>{storage === "pending" ? "正在检查 PostgreSQL…" : "连接 PostgreSQL 后即可提交后台批次。"}</p>
-        {onConfigure && <button className="secondary" type="button" onClick={onConfigure}>打开设置</button>}
-      </div>}
       <fieldset className="media-source" aria-label="媒体来源" disabled={sourceBusy}>
         <label><input name="media-source" type="radio" checked={source === "emby"}
           onChange={() => setSelectedSource("emby")} /><span>Emby Server</span></label>
@@ -463,26 +570,31 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
             <h2 id="emby-catalog-title" className="text-xl sm:text-2xl">Emby 媒体库</h2>
             {libraries && <p className="muted mt-1" role="status">{libraries.length} 个媒体库 · {embyCount} 部作品</p>}
           </div>
-          {embyResult && <div className="flex flex-wrap gap-2">
-            {!libraries && !embyError
-              ? <button className="secondary" type="button" onClick={onConfigureEmby}>配置 Emby</button>
-              : <button className="secondary" type="button" disabled={sourceBusy} onClick={() => {
+          {embyResult && (!libraries && !embyError
+            ? <button className="secondary" type="button" onClick={onConfigureEmby}>配置 Emby</button>
+            : <div className="flex flex-wrap gap-2">
+              <button className="secondary" type="button" disabled={sourceBusy} onClick={() => {
                 setSelectedSource("emby");
                 setEmbyRefresh((value) => value + 1);
-              }}>刷新媒体库</button>}
-            {embyCount > 0 && <button className="primary" type="button" disabled={sourceBusy || storage !== "ready"}
-              onClick={submitEmby}>{submitting ? "正在提交…" : "刮削全部媒体库"}</button>}
-          </div>}
+              }}>重新读取媒体库</button>
+              {hasQueue && embyCount > 0 && <button className="secondary" type="button" disabled={sourceBusy}
+                aria-haspopup="dialog" onClick={(event) => setAllLibrariesOpener(event.currentTarget)}>刮削全部媒体库</button>}
+            </div>)}
         </div>
+        {allLibrariesOpener && <EmbyScrapeDialog opener={allLibrariesOpener} target={`全部媒体库 · ${embyCount} 部作品`}
+          usesQueue onClose={() => setAllLibrariesOpener(undefined)} onSubmit={async () => {
+            await queueEmby(importEmbyCatalog, "Collect Metadata 已为 Emby 的全部媒体库创建后台采集任务。");
+          }} />}
         {!embyResult && <p className="catalog-empty" role="status">正在读取 Emby 媒体库…</p>}
         {embyError && <p className="batch-error" role="alert">{embyError}</p>}
-        {embyImportError && <p className="batch-error" role="alert">{embyImportError}</p>}
         {embyResult && !libraries && !embyError && <p className="catalog-empty">连接 Emby 后会自动显示全部媒体库。</p>}
         {libraries && (libraries.length > 0
-          ? <EmbyCatalog libraries={libraries} canScrape={!sourceBusy && storage === "ready"} onScrape={submitEmbyTarget} aiConfigured={aiConfigured} onSelection={submitEmbySelection} />
+          ? <EmbyCatalog libraries={libraries} canScrape={!sourceBusy && storage !== "pending"} usesQueue={hasQueue} onScrape={submitEmbyTarget} aiConfigured={hasQueue && aiConfigured} onSelection={submitEmbySelection} />
           : <p className="catalog-empty">Emby 尚无媒体库。</p>)}
       </section>}
-      {preview && <section className="mt-5 min-w-0" aria-labelledby="folder-preview-heading">
+      {preview && folderSelection && useLocalFolder && <LocalFolderScrape key={folderSelection.folder}
+        folder={folderSelection} busy={sourceBusy} setBusy={setLocalBusy} />}
+      {preview && !useLocalFolder && <section className="mt-5 min-w-0" aria-labelledby="folder-preview-heading">
         <div className="section-heading items-center">
           <h2 id="folder-preview-heading">媒体海报预览</h2>
           <button className="primary" type="button" disabled={preview.works.length === 0 || sourceBusy || storage !== "ready"}
@@ -503,7 +615,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
         : <p className="catalog-empty">未识别到可刮削的作品。请检查视频扩展名、片名或季集编号，也可以手动输入作品。</p>}
       </section>}
       {aiStatusError && <p className="batch-error" role="alert">{aiStatusError}</p>}
-      <details className="mt-4 text-sm [&>summary]:text-muted">
+      {hasQueue && <details className="mt-4 text-sm [&>summary]:text-muted">
       <summary>手动输入作品</summary>
       <form className="panel batch-form mt-2" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit(false); }}>
         <label className="filter">默认类型
@@ -525,20 +637,23 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
           disabled={submitting || scanning || !input.trim() || storage !== "ready"}
           onClick={() => void submit(true)}>提交 AI 刮削</button>}
       </form>
-      </details>
-      <section className="panel mt-6" aria-labelledby="queue-title">
+      </details>}
+      {!hasQueue && storage !== "pending" && source === "folder" && <p className="muted mt-4">
+        {isDesktop ? "后台任务和历史记录需要 PostgreSQL。" : "Web 文件夹刮削需要连接 PostgreSQL 后提交后台任务。"}
+        {onConfigure && <button className="secondary ms-2" type="button" onClick={onConfigure}>数据库设置</button>}
+      </p>}
+      {hasQueue && <section className="panel mt-6" aria-labelledby="queue-title">
       <div className="section-heading">
         <h2 id="queue-title" className="scroll-mt-5">后台任务</h2>
-        {storage === "ready" && <button className="secondary" type="button" onClick={() => {
+        <button className="secondary" type="button" onClick={() => {
           setError(null);
           refreshList().catch((error) => setError(errorText(error)));
-        }}>刷新批次</button>}
+        }}>刷新批次</button>
       </div>
       {error && <p className="batch-error" role="alert">{error}</p>}
       {pollError && <p className="batch-error" role="status">{pollError} 正在重试。</p>}
       {!summaries.length && !error && <p className="catalog-empty" role="status">{
-        storage === "pending" || (storage === "ready" && !listLoaded) ? "正在读取后台批次…" :
-          storage === "ready" ? "暂无后台任务。提交刮削后，可以在这里查看进度。" : "连接 PostgreSQL 后可查看后台任务。"
+        !listLoaded ? "正在读取后台批次…" : "暂无后台任务。提交刮削后，可以在这里查看进度。"
       }</p>}
       {summaries.length > 0 && <div className="my-3 flex flex-wrap items-center gap-x-3 gap-y-2">
         <label className="filter">已提交批次
@@ -642,7 +757,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
           })}
         </ol>
       </>}
-      </section>
+      </section>}
     </section>
   );
 }

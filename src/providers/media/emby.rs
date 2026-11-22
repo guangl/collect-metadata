@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs, io,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -417,11 +417,12 @@ impl Emby {
         Ok(())
     }
 
-    pub(crate) async fn overwrite_metadata(
+    pub(crate) async fn refresh_metadata(
         &self,
         client: &Client,
         id: &str,
         recursive: bool,
+        overwrite: bool,
         replace_images: bool,
     ) -> Result<(), String> {
         if !is_item_id(id) {
@@ -431,10 +432,17 @@ impl Emby {
         url.query_pairs_mut()
             .append_pair("Recursive", if recursive { "true" } else { "false" })
             .append_pair("MetadataRefreshMode", "FullRefresh")
-            .append_pair("ReplaceAllMetadata", "true")
+            .append_pair(
+                "ReplaceAllMetadata",
+                if overwrite { "true" } else { "false" },
+            )
             .append_pair(
                 "ImageRefreshMode",
-                if replace_images { "FullRefresh" } else { "Default" },
+                if replace_images || !overwrite {
+                    "FullRefresh"
+                } else {
+                    "Default"
+                },
             )
             .append_pair("ReplaceAllImages", if replace_images { "true" } else { "false" });
         self.timed_response(client, Method::POST, url, Duration::from_secs(10))
@@ -593,12 +601,17 @@ impl Emby {
         Ok(title)
     }
 
-    pub(super) async fn series_tmdb_id(&self, client: &Client, episode: &Value) -> Option<u32> {
+    pub(crate) async fn series_provider_id(
+        &self,
+        client: &Client,
+        episode: &Value,
+        provider: &str,
+    ) -> Option<String> {
         let series = self
             .item(client, valid_id(&episode["SeriesId"])?, "Series", "ProviderIds")
             .await
             .ok()?;
-        super::tmdb::id(series["ProviderIds"]["Tmdb"].as_str()?)
+        nonempty_text(&series["ProviderIds"][provider])
     }
 
     pub(crate) async fn item(
@@ -722,6 +735,57 @@ impl Emby {
             children.extend(items);
             if last_page || children.len() >= 10_000 {
                 return Ok((children, last_page));
+            }
+        }
+    }
+
+    pub(crate) async fn missing_episode_overviews(
+        &self,
+        client: &Client,
+        library: &str,
+    ) -> Result<HashMap<String, Vec<String>>, String> {
+        const PAGE_SIZE: usize = 200;
+        let mut missing = HashMap::<String, Vec<String>>::new();
+        let mut seen = HashSet::new();
+        let mut offset = 0;
+        loop {
+            let page = self
+                .items(
+                    client,
+                    &[
+                        ("ParentId", library),
+                        ("Recursive", "true"),
+                        ("IncludeItemTypes", "Episode"),
+                        ("HasOverview", "false"),
+                        ("IsMissing", "false"),
+                        ("EnableImages", "false"),
+                        ("Fields", "Overview,LocationType"),
+                        ("Limit", &PAGE_SIZE.to_string()),
+                        ("StartIndex", &offset.to_string()),
+                    ],
+                )
+                .await?;
+            let items = page["Items"]
+                .as_array()
+                .ok_or("Emby 返回的分集格式无效。")?;
+            for item in items {
+                if item["Type"] == "Episode"
+                    && item["LocationType"] != "Virtual"
+                    && item["Overview"].as_str().is_none_or(|text| text.trim().is_empty())
+                    && let (Some(series), Some(id)) = (valid_id(&item["SeriesId"]), valid_id(&item["Id"]))
+                    && seen.insert(id.to_owned())
+                {
+                    missing.entry(series.to_owned()).or_default().push(id.to_owned());
+                }
+            }
+            offset += items.len();
+            let last_page = page["TotalRecordCount"].as_u64()
+                .map_or(items.len() < PAGE_SIZE, |total| offset as u64 >= total);
+            if last_page {
+                return Ok(missing);
+            }
+            if items.is_empty() {
+                return Err("Emby 未返回全部缺少简介的分集。".into());
             }
         }
     }

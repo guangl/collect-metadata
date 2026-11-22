@@ -1,4 +1,4 @@
-import type { Candidate, MediaType, OutputReport } from "../types";
+import type { Candidate, LookupResponse, MediaType, OutputReport } from "../types";
 
 export const MAX_ITEMS = 100;
 export const AV_PREFIXES = ["有码番号", "无码番号", "素人番号", "FC2番号", "欧美番号", "国产番号", "动漫里番", "mywife"];
@@ -13,7 +13,7 @@ export interface BatchInput {
 export const MAX_FOLDER_FILES = 30_000;
 
 export interface FolderPreview {
-  works: (BatchInput & { file_count: number })[];
+  works: (BatchInput & { file_count: number; source_files?: string[] })[];
   files: number;
   skipped: number;
   unrecognized: string[];
@@ -31,6 +31,14 @@ export interface FolderBatchResult {
   files: number;
   skipped: number;
   unrecognized: string[];
+}
+
+export interface FolderWorkResult {
+  stage: BatchStage;
+  message: string | null;
+  candidates: Candidate[] | null;
+  result: LookupResponse | null;
+  output: OutputReport | null;
 }
 
 export type BatchStatus = "running" | "paused" | "cancelled";

@@ -14,10 +14,11 @@ use std::{
 #[cfg(test)]
 use collect_metadata::scan_folder_paths;
 use collect_metadata::{
-    AiBatchInput, BatchAction, BatchItemInput, BatchRow, BatchSummary, BatchView, CandidateChoice,
-    Collector, EmbyInput, EmbyLibrary, EmbyLibraryPreview, EmbyOverwriteInput, EmbyPreviewImage,
-    EmbyScrapeScope, EmbySelectionInput, EmbySeriesPreview, EmbySettings, EmbySettingsView,
-    EmbyWorkPreview, FolderBatchResult, FolderSelection, HistoryItem, LanguageSettings,
+    AiBatchInput, BangumiSettings, BangumiStatus, BatchAction, BatchItemInput, BatchRow,
+    BatchSummary, BatchView, CandidateChoice, Collector, EmbyEpisodeOverview, EmbyInput, EmbyLibrary,
+    EmbyLibraryPreview, EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope, EmbyScrapeTarget,
+    EmbySelectionInput, EmbySeriesPreview, EmbySettings, EmbySettingsView, EmbyWorkPreview,
+    FolderBatchResult, FolderSelection, FolderWorkResult, HistoryItem, LanguageSettings,
     LanguageSettingsView, LookupResponse, MediaKind, MediaProvider, OutputOptions, OutputSettings,
     OutputSettingsView, SearchResult, TmdbSettings, TmdbStatus, diagnostics, scan_native_folder,
 };
@@ -76,6 +77,7 @@ async fn configure_database(state: State<'_, DesktopState>, url: String) -> Resu
         let collector = Collector::from_database_url(url)?
             .with_ai_config_file(&state.database_file.with_file_name("ai.json"))?
             .with_tmdb_settings(Arc::clone(&state.tmdb))
+            .with_bangumi_settings(Arc::clone(state.collector().bangumi_settings()))
             .with_output_settings(Arc::clone(&state.output))
             .with_emby_settings(Arc::clone(&state.emby))
             .with_language_settings(Arc::clone(state.collector().language_settings()));
@@ -124,6 +126,27 @@ async fn save_tmdb(
     credential: String,
 ) -> Result<TmdbStatus, String> {
     diagnostics::desktop_command("save_tmdb", state.collector().save_tmdb(credential)).await
+}
+
+#[tauri::command]
+fn bangumi_status(state: State<'_, DesktopState>) -> BangumiStatus {
+    state.collector().bangumi_status()
+}
+
+#[tauri::command]
+async fn test_bangumi(
+    state: State<'_, DesktopState>,
+    credential: Option<String>,
+) -> Result<(), String> {
+    state.collector().test_bangumi(credential.as_deref()).await
+}
+
+#[tauri::command]
+async fn save_bangumi(
+    state: State<'_, DesktopState>,
+    credential: String,
+) -> Result<BangumiStatus, String> {
+    state.collector().save_bangumi(credential).await
 }
 
 #[tauri::command]
@@ -231,6 +254,14 @@ async fn overwrite_emby(
 }
 
 #[tauri::command]
+async fn refresh_emby_metadata(
+    state: State<'_, DesktopState>,
+    target: EmbyScrapeTarget,
+) -> Result<(), String> {
+    state.collector().refresh_emby_metadata(target).await
+}
+
+#[tauri::command]
 async fn emby_preview_image(
     state: State<'_, DesktopState>,
     id: String,
@@ -250,6 +281,22 @@ async fn emby_credits(
     id: String,
 ) -> Result<Vec<collect_metadata::EmbyCredit>, String> {
     diagnostics::desktop_command("emby_credits", state.collector().emby_credits(&id)).await
+}
+
+#[tauri::command]
+async fn emby_missing_episode_overviews(
+    state: State<'_, DesktopState>,
+    library: String,
+) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+    state.collector().emby_missing_episode_overviews(&library).await
+}
+
+#[tauri::command]
+async fn emby_episode_overview(
+    state: State<'_, DesktopState>,
+    id: String,
+) -> Result<EmbyEpisodeOverview, String> {
+    state.collector().emby_episode_overview(&id).await
 }
 
 #[tauri::command]
@@ -369,6 +416,20 @@ async fn choose_media_folder(app: AppHandle) -> Result<Option<FolderSelection>, 
         .map_err(|_| "无法扫描所选文件夹。")?
     })
     .await
+}
+
+#[tauri::command]
+async fn scrape_folder_work(
+    state: State<'_, DesktopState>,
+    batch: i64,
+    row: i64,
+    paths: Vec<String>,
+    candidate: Option<CandidateChoice>,
+) -> Result<FolderWorkResult, String> {
+    state
+        .collector()
+        .scrape_folder_work(batch, row, paths, candidate)
+        .await
 }
 
 #[tauri::command]
@@ -634,6 +695,13 @@ fn setup_desktop(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
         )
         .map_err(std::io::Error::other)?,
     );
+    let bangumi = Arc::new(
+        diagnostics::startup_step(
+            "bangumi_config",
+            BangumiSettings::from_file(path.with_file_name("bangumi-token")),
+        )
+        .map_err(std::io::Error::other)?,
+    );
     let output = Arc::new(
         diagnostics::startup_step(
             "output_config",
@@ -663,6 +731,7 @@ fn setup_desktop(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     )
     .map_err(std::io::Error::other)?
     .with_tmdb_settings(Arc::clone(&tmdb))
+    .with_bangumi_settings(bangumi)
     .with_output_settings(Arc::clone(&output))
     .with_emby_settings(Arc::clone(&emby))
     .with_language_settings(languages);
@@ -725,6 +794,9 @@ fn main() {
             tmdb_status,
             test_tmdb,
             save_tmdb,
+            bangumi_status,
+            test_bangumi,
+            save_bangumi,
             output_settings,
             emby_settings,
             language_settings,
@@ -740,8 +812,11 @@ fn main() {
             import_emby_catalog,
             import_emby_item,
             overwrite_emby,
+            refresh_emby_metadata,
             emby_preview_image,
             emby_series_preview,
+            emby_episode_overview,
+            emby_missing_episode_overviews,
             emby_credits,
             test_emby,
             save_emby,
@@ -750,6 +825,7 @@ fn main() {
             create_batch,
             choose_media_folder,
             create_folder_batch,
+            scrape_folder_work,
             list_batches,
             batch_rows,
             batch_view,
