@@ -13,7 +13,7 @@ npm run build
 cargo test --locked --all-features
 ```
 
-默认检查不需要私有凭据，也不依赖真实媒体库。需要 PostgreSQL 或在线资料源的测试带有 `ignore`；运行方法见 [README 的测试章节](README.md#测试)。新增测试优先使用脱敏样例或本地模拟服务。
+默认检查不需要私有凭据，也不依赖真实媒体库。需要 PostgreSQL 或在线资料源的测试带有 `ignore`；运行方法见 [README 的测试章节](../README.md#测试)。新增测试优先使用脱敏样例或本地模拟服务。
 
 ## 提交 Pull Request
 

@@ -65,10 +65,10 @@ docker compose exec db pg_isready -U collect_metadata -d collect_metadata
 
 | 表现 | 排查顺序 |
 | --- | --- |
-| 服务器目录不可见、扫描失败 | 桌面确认系统已挂载且当前用户可访问。Web 直接运行时查 `SCRAPE_MEDIA_ROOT`；Docker 查 `compose.media.yaml` 和 `SCRAPE_MEDIA_MOUNT`，容器 UID 65532 要能读取目录并进入各级路径。浏览器选择目录时以浏览器所在机器能看到的文件为准。 |
+| 服务器目录不可见、扫描失败 | 桌面确认系统已挂载且当前用户可访问。Web 直接运行时查 `SCRAPE_MEDIA_ROOT`；Docker 查 `deploy/compose.media.yaml` 和 `SCRAPE_MEDIA_MOUNT`，容器 UID 65532 要能读取目录并进入各级路径。浏览器选择目录时以浏览器所在机器能看到的文件为准。 |
 | 零作品、文件被跳过或提交太大 | 核对视频扩展名、片名年份和季集号。样片、花絮和非视频会跳过。每次最多扫描 30,000 个文件、提交 2,000 部文件夹作品；手动和 Emby 勾选上限以界面为准。 |
 | 设置保存、JSON 导出或另存失败 | 检查配置或目标目录权限、可用空间、挂载是否断开。另存请核对提交批次时的设置、条目输出反馈和 `files.json`。只有预告链接时，确认来源是否提供直链。 |
-| 无法预览写回或路径不符 | 对照 Emby 中的媒体路径和「输出与命名 → Emby 媒体写回」映射。桌面检查本机绝对路径；Docker 检查 `compose.emby-writeback.yaml`、映射的相对路径及 UID 65532 权限。 |
+| 无法预览写回或路径不符 | 对照 Emby 中的媒体路径和「输出与命名 → Emby 媒体写回」映射。桌面检查本机绝对路径；Docker 检查 `deploy/compose.emby-writeback.yaml`、映射的相对路径及 UID 65532 权限。 |
 | 写回失败或预览已失效；`batch_writeback_finished` 有失败项 | 点「查看失败并重试」看每项原因。核对只读挂载、权限、原视频是否仍在、目标是否被改动。修好后重新预览和确认。 |
 | `batch_writeback_snapshot_missing` 或 `batch_writeback_snapshot_read_failed` | 检查条目详情能否打开、数据库健康状态及是否连接到原数据库。先保留现有记录，确认快照状态后再决定是否重新采集。 |
 | 恢复被替换的文件 | 暂停相关写回和 Emby 自动刷新，从「查看写回记录」定位原件及同目录 `.collect-metadata-backups/` 下的备份。核对后恢复对应原件，再让 Emby 重新读取本地资料。 |

@@ -100,7 +100,7 @@ jobs:
           [[ "$amd64" =~ ^sha256:[[:xdigit:]]{64}$ ]]
           export COLLECT_METADATA_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}@$amd64"
           export POSTGRES_PASSWORD=$(openssl rand -hex 18)
-          compose=(docker compose -p collect-metadata-smoke -f compose.yaml -f compose.ghcr.yaml)
+          compose=(docker compose -p collect-metadata-smoke -f compose.yaml -f deploy/compose.ghcr.yaml)
           trap '"${compose[@]}" down --volumes' EXIT
           "${compose[@]}" up -d --wait --wait-timeout 90
           if ! curl -fsS --retry 15 --retry-delay 2 --retry-all-errors http://127.0.0.1:8080/readyz; then

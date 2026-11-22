@@ -6,7 +6,7 @@
 
 **给本地文件夹和 Emby 媒体库用的自托管元数据刮削工具。** 在一个工作台里预览作品、提交后台任务、查看结果并导出资料。工作台不移动或改写原视频；Emby 插件另有默认关闭的散文件整理。
 
-[项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md) · [日志与排查](docs/TROUBLESHOOTING.md)
+[项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [更新日志](CHANGELOG.md) · [贡献指南](.github/CONTRIBUTING.md) · [安全报告](.github/SECURITY.md) · [日志与排查](docs/TROUBLESHOOTING.md)
 
 - **导入**：自动读取 Emby 全部媒体库，也可扫描本地文件夹、服务端挂载目录或手动输入作品清单。
 - **后台采集**：支持暂停、继续和重试；有多个匹配时可手动确认。任务与历史保存在 PostgreSQL。
@@ -109,7 +109,7 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 - **Web 版**：可用浏览器选择客户端能访问的目录，也可在「文件夹 → 浏览服务器挂载目录」中选择服务端的共享。直接运行 Web 服务时，给 `SCRAPE_MEDIA_ROOT` 设置一个已挂载的绝对路径。Docker 部署时，先在宿主机挂载共享，在 `.env` 设置 `SCRAPE_MEDIA_MOUNT=/宿主机/共享目录`，再运行：
 
   ```sh
-  docker compose -f compose.yaml -f compose.media.yaml up -d --build
+  docker compose -f compose.yaml -f deploy/compose.media.yaml up -d --build
   ```
 
   Docker 将该目录只读挂载到容器的 `/media-input`。容器用户 UID 65532 需要读取文件名和访问子目录的权限。只挂载准备刮削的目录，不要暴露 NAS 根目录；能访问此 Web 界面的用户能浏览该共享范围内的目录。服务端目录选择器不接受共享根目录之外的路径。
@@ -137,7 +137,7 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 在「设置 → 输出与命名 → Emby 媒体写回」添加路径映射。Emby 端目录填写服务器看到的路径，例如 `/media/TV`。桌面版的本地目录填写对应的可写绝对路径，例如 `/Volumes/TV`。多个映射匹配时使用最具体的目录。Docker Web 可用以下方式挂载可写媒体目录，本地目录填写挂载中的相对路径，留空表示挂载根目录。挂载须允许容器用户 UID 65532 写入。
 
 ```sh
-EMBY_WRITEBACK_MOUNT=/宿主机/媒体目录 docker compose -f compose.yaml -f compose.emby-writeback.yaml up -d --build
+EMBY_WRITEBACK_MOUNT=/宿主机/媒体目录 docker compose -f compose.yaml -f deploy/compose.emby-writeback.yaml up -d --build
 ```
 
 剧集根目录写入 `tvshow.nfo` 和可用封面、背景图。电影和分集的 NFO 用真实视频文件名，例如 `第 1 集.mkv` 对应 `第 1 集.nfo`，分集缩略图放在同一目录。Emby 图片文件名遵循[电影](https://emby.media/support/articles/Movie-Naming.html#video-images)和[分集](https://emby.media/support/articles/TV-Naming.html#episode-images)的约定。
@@ -307,11 +307,13 @@ EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --all-features --summary-onl
 
 从 [`.env.example`](.env.example) 复制本地 `.env` 并设置 `POSTGRES_PASSWORD`。以下两种部署方式都会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
 
+可选的 Compose 配置位于 `deploy/`。更新已有部署时，在每个可选配置文件名前加 `deploy/`，例如将 `-f compose.ghcr.yaml` 改为 `-f deploy/compose.ghcr.yaml`，并沿用原 Compose 项目名。
+
 **使用预构建镜像（Compose v2.24.4+）：** 从 v0.11.0 起，发布流程为 amd64 和 arm64 构建镜像。`ghcr.io/guangl/collect-metadata:latest` 随最新 GitHub Release 更新。需要固定部署版本时，在 `.env` 设置 `COLLECT_METADATA_IMAGE=ghcr.io/guangl/collect-metadata:0.11.0`，也可用镜像摘要固定到具体构建。[GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata)
 
 ```sh
-docker compose -f compose.yaml -f compose.ghcr.yaml pull
-docker compose -f compose.yaml -f compose.ghcr.yaml up -d
+docker compose -f compose.yaml -f deploy/compose.ghcr.yaml pull
+docker compose -f compose.yaml -f deploy/compose.ghcr.yaml up -d
 ```
 
 如果拉取时返回 `denied`，请检查镜像标签是否已发布，以及 GHCR 包的可见性；私有包需要先用有读取权限的账号登录 `ghcr.io`。也可以改用下面的方式从源码构建。
@@ -324,7 +326,7 @@ docker compose up -d --build
 
 浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。在 `.env` 中用 `APP_HOST` 和 `APP_PORT` 调整宿主机监听地址和端口。
 
-直接运行 Web 服务器时，通过 `DATABASE_URL` 或标准 `PGHOST`、`PGPORT`、`PGDATABASE`、`PGUSER`、`PGPASSWORD` 连接已有 PostgreSQL。应用启动时会创建 `collect_metadata_snapshots` 表。每次有结果的采集写入一条 JSONB 快照，重新采集会新增记录。不要将应用或数据库端口直接暴露在公网，详见 [安全说明](SECURITY.md)。
+直接运行 Web 服务器时，通过 `DATABASE_URL` 或标准 `PGHOST`、`PGPORT`、`PGDATABASE`、`PGUSER`、`PGPASSWORD` 连接已有 PostgreSQL。应用启动时会创建 `collect_metadata_snapshots` 表。每次有结果的采集写入一条 JSONB 快照，重新采集会新增记录。不要将应用或数据库端口直接暴露在公网，详见 [安全说明](.github/SECURITY.md)。
 
 ```sh
 npm ci
@@ -419,7 +421,7 @@ npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
 如需桌面版和 Docker Web 版共用本机数据库，可以加上桌面用 Compose 配置。它仅在本机回环地址开放 PostgreSQL 端口。
 
 ```sh
-docker compose -f compose.yaml -f compose.desktop.yaml up -d --build
+docker compose -f compose.yaml -f deploy/compose.desktop.yaml up -d --build
 ```
 
 桌面端连接 `127.0.0.1:15432` 的 `collect_metadata` 数据库，用户名为 `collect_metadata`，密码取 `.env` 中的 `POSTGRES_PASSWORD`。可用 `POSTGRES_LOCAL_PORT` 调整端口。
