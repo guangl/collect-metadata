@@ -67,11 +67,14 @@ export interface EmbyWorkPreview {
   official_rating?: string | null;
   critic_rating?: number | null;
   imdb_rating?: { value: number; count: number } | null;
+  tmdb_id?: string | null;
   bangumi_id?: string | null;
   tags?: string[];
   runtime_minutes: number | null;
   poster: string | null;
   backdrop: string | null;
+  logo?: string | null;
+  landscape?: string | null;
 }
 
 export interface EmbyLibraryPreview {
