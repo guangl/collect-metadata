@@ -638,6 +638,7 @@ impl Collector {
                 .strip_prefix('Q')
                 .is_some_and(|digits| digits.parse::<u64>().is_ok_and(|id| id > 0)),
             MediaProvider::Tvmaze => id.parse::<u64>().is_ok_and(|id| id > 0),
+            MediaProvider::Bangumi => crate::providers::media::bangumi::id(id).is_some(),
         };
         if !valid {
             return Err("来源 ID 无效。".into());

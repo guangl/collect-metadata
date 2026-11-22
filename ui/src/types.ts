@@ -3,11 +3,12 @@ export type EmbyScrapeTarget =
   | { type: "library"; id: string }
   | { type: "item"; id: string; scope: EmbyScrapeScope };
 export type MediaType = "movie" | "series" | "av";
-export type MediaProvider = "wikidata" | "tvmaze" | "tmdb";
+export type MediaProvider = "wikidata" | "tvmaze" | "tmdb" | "bangumi";
 export const providerLabels: Record<MediaProvider, string> = {
   wikidata: "Wikidata",
   tvmaze: "TVmaze",
   tmdb: "TMDB",
+  bangumi: "Bangumi",
 };
 export type StorageStatus = "pending" | "ready" | "failed" | "none";
 export const storageLabels: Record<StorageStatus, string> = {

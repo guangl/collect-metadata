@@ -633,6 +633,7 @@ mod tests {
             .parse::<PgConnectOptions>()
             .unwrap();
         let admin = PgPool::connect_with(options.clone()).await.unwrap();
+        // The identifier contains a fixed prefix and a hexadecimal UUID.
         let schema = format!("batch_test_{}", uuid::Uuid::new_v4().simple());
         sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
             .execute(&admin)

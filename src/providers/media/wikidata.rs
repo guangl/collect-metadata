@@ -16,7 +16,7 @@ const FILM_CLASSES: &[&str] = &[
     "Q24862",
     "Q24869",
 ];
-const SERIES_CLASSES: &[&str] = &["Q5398426", "Q1259759", "Q581714", "Q526877"];
+const SERIES_CLASSES: &[&str] = &["Q5398426", "Q1259759", "Q581714", "Q526877", "Q63952888"];
 
 fn classes(kind: MediaKind) -> &'static [&'static str] {
     match kind {
@@ -165,6 +165,7 @@ pub(super) async fn search(
                 cover_url: cover(entity, "320"),
                 tvmaze_id: tvmaze_id(entity),
                 tmdb_id: tmdb_id(entity, kind),
+                bangumi_id: bangumi_id(entity),
             })
         })
         .collect();
@@ -204,6 +205,59 @@ pub(super) fn matches_kind(entity: &Value, kind: MediaKind) -> bool {
 
 pub(super) fn tvmaze_id(entity: &Value) -> Option<u64> {
     first_string(entity, "P8600")?.parse().ok()
+}
+
+pub(super) fn bangumi_id(entity: &Value) -> Option<u32> {
+    let mut ids = claim_values(entity, "P5732")
+        .filter_map(Value::as_str)
+        .filter_map(bangumi::id);
+    let id = ids.next()?;
+    ids.all(|other| other == id).then_some(id)
+}
+
+fn bangumi_claim(id: u32) -> String {
+    format!("haswbstatement:P5732={id}")
+}
+
+pub(super) fn bangumi_search_url(id: u32) -> Url {
+    let mut url = Url::parse("https://www.wikidata.org/wiki/Special:Search").unwrap();
+    url.query_pairs_mut()
+        .append_pair("search", &bangumi_claim(id));
+    url
+}
+
+pub(super) async fn by_bangumi_id(
+    client: &Client,
+    cache: &EntityCache,
+    kind: MediaKind,
+    id: u32,
+) -> Result<Option<(String, Arc<Value>)>, Failure> {
+    let data = api(
+        client,
+        &[
+            ("action", "query"),
+            ("list", "search"),
+            ("srsearch", &bangumi_claim(id)),
+            ("srnamespace", "0"),
+            ("srprop", ""),
+            ("srlimit", "2"),
+        ],
+    )
+    .await?;
+    let hits = data["query"]["search"]
+        .as_array()
+        .ok_or_else(Failure::format_changed)?;
+    let [hit] = hits.as_slice() else {
+        return Ok(None);
+    };
+    let Some(qid) = hit["title"].as_str().filter(|id| valid_id(id)) else {
+        return Err(Failure::format_changed());
+    };
+    let entry = entity(client, cache, qid).await?;
+    Ok(
+        (bangumi_id(&entry) == Some(id) && matches_kind(&entry, kind))
+            .then(|| (qid.to_owned(), entry)),
+    )
 }
 
 pub(super) fn tmdb_id(entity: &Value, kind: MediaKind) -> Option<u32> {
@@ -302,6 +356,10 @@ pub(super) async fn details(client: &Client, id: &str, entity: Arc<Value>) -> So
             json!(claim_values(&entity, "P1113").find_map(quantity)),
         ),
         ("imdb_id", json!(first_string(&entity, "P345"))),
+        (
+            "bangumi_id",
+            json!(bangumi_id(&entity).map(|id| id.to_string())),
+        ),
         ("official_url", json!(first_string(&entity, "P856"))),
         ("cover_url", json!(cover(&entity, "640"))),
     ]);
@@ -467,6 +525,21 @@ mod tests {
         cache.insert("Q155653", Arc::clone(&entity_data));
         let entry = entity(&client, &cache, "Q155653").await.ok().unwrap();
         assert!(Arc::ptr_eq(&entity_data, &entry));
+    }
+
+    #[test]
+    fn rejects_ambiguous_bangumi_links() {
+        let statement = |id: &str, rank: &str| {
+            json!({"rank": rank, "mainsnak": {"datavalue": {"value": id}}})
+        };
+        let mut entity = json!({"claims": {"P5732": [
+            statement("253", "normal"),
+            statement("253", "preferred"),
+            statement("160209", "deprecated")
+        ]}});
+        assert_eq!(bangumi_id(&entity), Some(253));
+        entity["claims"]["P5732"][2]["rank"] = json!("normal");
+        assert_eq!(bangumi_id(&entity), None);
     }
 
     #[test]

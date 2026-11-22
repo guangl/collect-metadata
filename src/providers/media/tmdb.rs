@@ -515,6 +515,7 @@ fn candidate(kind: MediaKind, data: &Value) -> Option<Candidate> {
         cover_url: image(&data["poster_path"], "w342"),
         tvmaze_id: None,
         tmdb_id: Some(id as u32),
+        bangumi_id: None,
     })
 }
 

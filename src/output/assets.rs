@@ -4,7 +4,10 @@ use reqwest::{Client, Response, Url, header};
 use serde_json::Value;
 
 use super::settings::{OutputOptions, PortraitRole as Role};
-use crate::providers::media::emby::{Emby, credit_role};
+use crate::providers::media::{
+    bangumi,
+    emby::{Emby, credit_role},
+};
 
 pub(super) struct Asset {
     pub(super) url: Url,
@@ -29,6 +32,7 @@ pub(super) fn allowed(url: &Url) -> bool {
             host,
             "image.tmdb.org"
                 | "static.tvmaze.com"
+                | "lain.bgm.tv"
                 | "upload.wikimedia.org"
                 | "commons.wikimedia.org"
                 | "www.javdatabase.com"
@@ -224,11 +228,21 @@ fn crew_role(value: &str) -> Role {
             | "co-director"
             | "animation director"
             | "chief animation director"
+            | "导演"
+            | "监督"
     ) {
         Role::Director
     } else if matches!(
         job.as_str(),
-        "writer" | "screenplay" | "teleplay" | "screenwriter" | "series composition" | "story"
+        "writer"
+            | "screenplay"
+            | "teleplay"
+            | "screenwriter"
+            | "series composition"
+            | "story"
+            | "脚本"
+            | "编剧"
+            | "系列构成"
     ) {
         Role::Writer
     } else {
@@ -301,6 +315,41 @@ fn portraits(source: &Value) -> Vec<(Role, Url, String)> {
                     credit["type"].as_str(),
                 ) {
                     result.push((crew_role(job), url, name.to_owned()));
+                }
+            }
+        }
+        Some("Bangumi") => {
+            let image = |person: &Value| {
+                [&person["images"]["large"], &person["images"]["medium"]]
+                    .into_iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(asset_url)
+                    .find(|url| url.host_str() == Some("lain.bgm.tv"))
+            };
+            let actor_role = if data["subject"]["type"] == 2 {
+                Role::Voice
+            } else {
+                Role::Actor
+            };
+            for actor in
+                entries(&data["characters"]).flat_map(|character| entries(&character["actors"]))
+            {
+                if let (Some(url), Some(name)) = (image(actor), actor["name"].as_str()) {
+                    result.push((actor_role, url, name.to_owned()));
+                }
+            }
+            for person in entries(&data["persons"]).filter(|person| person["type"] == 1) {
+                if let (Some(url), Some(name), Some(job)) = (
+                    image(person),
+                    person["name"].as_str(),
+                    person["relation"].as_str(),
+                ) {
+                    let role = if actor_role == Role::Actor && bangumi::is_cast(job) {
+                        Role::Actor
+                    } else {
+                        crew_role(job)
+                    };
+                    result.push((role, url, name.to_owned()));
                 }
             }
         }

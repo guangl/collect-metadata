@@ -277,6 +277,7 @@ mod tests {
             cover_url: None,
             tvmaze_id: None,
             tmdb_id: Some(70523),
+            bangumi_id: None,
         }];
         let client = Client::builder().no_proxy().build().unwrap();
         assert_eq!(

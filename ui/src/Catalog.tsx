@@ -127,14 +127,16 @@ export function LocalDate({ value }: { value: string }) {
   return <time dateTime={value}>{label}</time>;
 }
 
-export function Episodes({ episodes, premiereDates, onError }: {
+export function Episodes({ episodes, premiereDates, subjectEpisodes, onError }: {
   episodes: Episode[];
   premiereDates?: ReadonlyMap<string, string>;
+  subjectEpisodes?: boolean;
   onError: (message: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const seasons = [...new Set(episodes.map(({ season }) => season ?? 0))].sort((a, b) => a - b);
-  const [season, setSeason] = useState(seasons.find((value) => value > 0) ?? 0);
+  const episodeSeason = (episode: Episode) => episode.season ?? (subjectEpisodes ? -1 : 0);
+  const seasons = [...new Set(episodes.map(episodeSeason))].sort((a, b) => a - b);
+  const [season, setSeason] = useState(seasons.find((value) => value > 0) ?? seasons[0] ?? 0);
   if (!episodes.length) return null;
 
   return (
@@ -143,16 +145,16 @@ export function Episodes({ episodes, premiereDates, onError }: {
       {open && (
         <>
           <label className="filter">
-            按季查看
+            {subjectEpisodes ? "分集类别" : "按季查看"}
             <select className="field" value={season} onChange={(event) => setSeason(Number(event.target.value))}>
-              {seasons.map((value) => <option key={value} value={value}>{value ? "第 " + value + " 季" : "特别篇"}</option>)}
+              {seasons.map((value) => <option key={value} value={value}>{value === -1 ? "正片" : value === 0 ? "特别篇" : "第 " + value + " 季"}</option>)}
             </select>
           </label>
           <ol className="episode-list">
-            {episodes.filter((episode) => (episode.season ?? 0) === season).map((episode) => {
+            {episodes.filter((episode) => episodeSeason(episode) === season).map((episode) => {
               const date = premiereDates?.get(String(episode.id)) ?? episode.date;
               return <li key={episode.id}>
-                <span>{episode.number == null ? "特别篇" : "第 " + episode.number + " 集"}</span>
+                <span>{episode.number == null ? (season === 0 ? "特别篇" : "—") : "第 " + episode.number + " 集"}</span>
                 {episode.url ? <ExternalLink value={episode.url} onError={onError}>{episode.title}</ExternalLink> : episode.title}
                 {date && <LocalDate value={date} />}
               </li>;

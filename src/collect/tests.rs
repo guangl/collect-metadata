@@ -162,3 +162,84 @@ async fn live_catalog() {
     );
     assert_eq!(result.record["field_sources"]["episodes"], "TVmaze");
 }
+
+#[tokio::test]
+#[ignore = "访问 Bangumi、Wikidata 和 TVmaze 的公开 API"]
+async fn live_bangumi_catalog() {
+    let collector = Collector::new(None).unwrap();
+    let series = collector
+        .search_media(MediaKind::Series, "bangumi:253")
+        .await
+        .unwrap();
+    assert!(series.notes.is_empty(), "{:?}", series.notes);
+    assert_eq!(series.candidates[0].title, "星际牛仔");
+    let movie = collector
+        .search_media(MediaKind::Movie, "你的名字。")
+        .await
+        .unwrap();
+    assert!(
+        movie
+            .candidates
+            .iter()
+            .any(|hit| hit.bangumi_id == Some(160209)),
+        "{:?}",
+        movie.notes
+    );
+    let movie = collector
+        .collect_media(MediaKind::Movie, MediaProvider::Bangumi, "160209")
+        .await
+        .unwrap();
+    assert_eq!(movie.record["fields"]["title"], "你的名字。");
+    assert_eq!(movie.record["fields"]["runtime_minutes"], 106);
+    let wrong_kind = collector
+        .search_media(MediaKind::Series, "bangumi:160209")
+        .await
+        .unwrap();
+    assert!(wrong_kind.candidates.is_empty());
+
+    let result = collector
+        .collect_media(MediaKind::Series, MediaProvider::Bangumi, "253")
+        .await
+        .unwrap();
+    let fields = &result.record["fields"];
+    assert_eq!(fields["bangumi_id"], "253");
+    assert_eq!(fields["title"], "星际牛仔");
+    assert_eq!(fields["imdb_id"], "tt0213338");
+    assert!(
+        fields["voice_actors"]
+            .as_array()
+            .is_some_and(|actors| !actors.is_empty())
+    );
+    assert!(
+        fields["cover_url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("https://lain.bgm.tv/"))
+    );
+    assert!(fields["episodes"].as_array().is_some_and(|episodes| {
+        episodes
+            .iter()
+            .any(|episode| episode["season"].is_null() && episode["number"] == 1)
+            && episodes.iter().any(|episode| episode["season"] == 0)
+    }));
+    assert!(
+        result.record["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| {
+                source["provider"] == "TVmaze"
+                    && matches!(source["status"].as_str(), Some("ok" | "partial"))
+            })
+    );
+    eprintln!(
+        "Bangumi sources: {}",
+        serde_json::json!(
+            result.record["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|source| source["provider"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>()
+        )
+    );
+}
