@@ -444,3 +444,33 @@ fn automatic_episode_sources_replace_only_placeholder_display_names() {
         "人工维护的标题"
     );
 }
+impl Collector {
+    pub(crate) async fn automatic_write_lock(&self, id: &str) -> tokio::sync::MutexGuard<'_, ()> {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hash = DefaultHasher::new();
+        id.hash(&mut hash);
+        self.automatic_writes[hash.finish() as usize % self.automatic_writes.len()]
+            .lock()
+            .await
+    }
+
+    pub async fn repair_anime_metadata(
+        &self,
+        original: &serde_json::Value,
+        field: &str,
+        text: &str,
+    ) -> Result<bool, String> {
+        let id = original["Id"]
+            .as_str()
+            .filter(|id| crate::providers::media::emby::is_item_id(id))
+            .ok_or("Emby 条目 ID 无效。")?;
+        let _write = self.automatic_write_lock(id).await;
+        let url = std::env::var("EMBY_AUTO_SCRAPE_URL").ok();
+        let emby = self
+            .emby_settings()
+            .ok_or("Emby 设置不可用。")?
+            .automatic_connection(url.as_deref())?;
+        emby.repair_anime_metadata(&self.client, original, field, text)
+            .await
+    }
+}

@@ -1,0 +1,49 @@
+services:
+  web:
+    image: homelab/collect-metadata:private-worker-20261122
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 40s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev
+    environment:
+      PRIVATE_METADATA_TRANSLATION_URL: http://metadata-translation-shared:7100/translate
+      PRIVATE_METADATA_TRANSLATION_TOKEN_FILE: /run/secrets/synopsis-token
+    volumes:
+      - type: bind
+        source: ${MEDIA_ROOT:?Set MEDIA_ROOT to the NAS media root}/Media/.private-video
+        target: /private
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOMELAB_ROOT:-/volume1/docker/homelab}/media/emby/private-metadata/translation-model
+        target: /opt/translation-model
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOMELAB_ROOT:-/volume1/docker/homelab}/media/emby/private-metadata/portraits/portraits.py
+        target: /opt/private-metadata/portraits.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOMELAB_ROOT:-/volume1/docker/homelab}/media/emby/private-metadata/synopsis-translation/token
+        target: /run/secrets/synopsis-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOMELAB_ROOT:-/volume1/docker/homelab}/media/emby/private-metadata/emby-key
+        target: /run/secrets/emby-key
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      private_metadata_synopsis:
+networks:
+  private_metadata_synopsis:
+    name: private-metadata_synopsis
+    external: true

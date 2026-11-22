@@ -33,6 +33,8 @@ pub struct Collector {
     database: Option<PgConnectOptions>,
     store: OnceCell<Store>,
     searches: Semaphore,
+    #[cfg(feature = "web")]
+    automatic_writes: [tokio::sync::Mutex<()>; 64],
     entities: media::EntityCache,
     tmdb: Arc<TmdbSettings>,
     bangumi: Arc<BangumiSettings>,
@@ -86,6 +88,8 @@ impl Collector {
             database,
             store: OnceCell::new(),
             searches: Semaphore::new(8),
+            #[cfg(feature = "web")]
+            automatic_writes: std::array::from_fn(|_| tokio::sync::Mutex::new(())),
             entities: media::EntityCache::default(),
             tmdb: Arc::new(TmdbSettings::from_environment()),
             bangumi: Arc::new(BangumiSettings::from_environment()),

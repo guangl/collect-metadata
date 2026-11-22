@@ -1,0 +1,76 @@
+name: metadata-translation
+services:
+  metadata-translation-shared:
+    image: homelab/sublarr:1.18.3-pg18-client
+    pull_policy: never
+    entrypoint: [python3, -Bu, /bridge/metadata_translation_bridge.py]
+    user: "1026:100"
+    working_dir: /app
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    env_file:
+      - ${HOMELAB_ROOT:-/volume1/docker/homelab}/collect-metadata/translation/bridge.env
+    environment:
+      PYTHONPATH: /app
+      METADATA_TRANSLATION_BIND: 0.0.0.0
+      METADATA_TRANSLATION_BUDGET_DB: /state/collect/budget.db
+      METADATA_TRANSLATION_PRIVATE_TOKEN_FILE: /run/secrets/synopsis-token
+      METADATA_TRANSLATION_PRIVATE_USAGE_DB: /state/private/translation.db
+      METADATA_TRANSLATION_EPISODE_TOKEN_FILE: /run/secrets/episode-token
+      METADATA_TRANSLATION_EPISODE_USAGE_DB: /state/episodes/translation.db
+    volumes:
+      - type: bind
+        source: ./metadata_translation_bridge.py
+        target: /bridge/metadata_translation_bridge.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOMELAB_ROOT:-/volume1/docker/homelab}/media/sublarr/config
+        target: /config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOMELAB_ROOT:-/volume1/docker/homelab}/collect-metadata/translation/state
+        target: /state/collect
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOMELAB_ROOT:-/volume1/docker/homelab}/media/emby/private-metadata/synopsis-translation/state
+        target: /state/private
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOMELAB_ROOT:-/volume1/docker/homelab}/media/emby/private-metadata/synopsis-translation/token
+        target: /run/secrets/synopsis-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./episodes/state
+        target: /state/episodes
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./episodes/token
+        target: /run/secrets/episode-token
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [collect, synopsis]
+    healthcheck:
+      test: [CMD, python3, -c, "import socket; socket.create_connection(('127.0.0.1', 7100), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+networks:
+  collect:
+    name: collect-metadata_translation
+    external: true
+  synopsis:
+    name: private-metadata_synopsis
+    external: true

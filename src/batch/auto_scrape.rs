@@ -489,6 +489,7 @@ impl AutoScrape {
         if central {
             collector.require_store().await?;
             let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
+            let _write = collector.automatic_write_lock(&event.id).await;
             emby.enrich_automatic_item(&collector.client, &data["item"], &result.record)
                 .await?;
             let fresh = emby
@@ -573,6 +574,7 @@ async fn sync_mapped_episode(
     bangumi_id: Option<u32>,
 ) -> Result<Outcome, String> {
     let item_id = item["Id"].as_str().ok_or("Emby 条目缺少 ID。")?;
+    let _write = collector.automatic_write_lock(item_id).await;
     let fresh;
     let item = if !has_provider_id(item, "Bangumi")
         && let Some(id) = bangumi_id

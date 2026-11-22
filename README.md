@@ -69,18 +69,11 @@ Emby 插件同步时优先使用 Emby 当前条目的有效元数据语言（包
 
 ### 接入 NAS 的「元数据翻译」
 
-现有 NAS 定时任务只写回简体中文，没有按请求翻译的 API。[`tools/metadata_translation_bridge.py`](tools/metadata_translation_bridge.py) 是可选适配器，在同一个 Sublarr Python 环境里复用 NAS 任务已使用的 `DeepSeekBackend` 与凭据。它不会启动或改动原定时任务。适配器会把待译元数据文本交给 DeepSeek；仅在允许外发这些文本时启用。它有独立的每日额度，默认 100 条文本（UTC），通过 `METADATA_TRANSLATION_DAILY_LIMIT` 调整。
+NAS 可通过 [Sublarr 的 Compose 覆盖](deploy/compose.nas-sublarr-translation.yaml) 启动共享内网翻译服务。同一个 [翻译桥](tools/metadata_translation_bridge.py) 复用 Sublarr 的 DeepSeek 配置。Collect Metadata、私有媒体 worker 和番剧补全任务各有独立令牌及用量记录。共享部署无每日额度，每个调用方同一时间可提交一个请求。
 
-1. 将适配器挂载或复制到 Sublarr 容器中，在该容器的应用工作目录启动。示例（在 NAS 上执行；先将单独生成的翻译令牌安全地设置为宿主环境变量）：
+将 `metadata_translation_bridge.py` 和 `sublarr_runtime.py` 放到覆盖文件指定的宿主目录，并准备各自的令牌和状态目录。Collect Metadata 配置 `METADATA_TRANSLATION_URL=http://metadata-translation-shared:7100/translate` 与对应的 `METADATA_TRANSLATION_TOKEN`。端口 `7100` 仅供可信 Docker 网络访问。翻译会把待译文本发给 DeepSeek。
 
-   ```sh
-   docker cp tools/metadata_translation_bridge.py media-sublarr:/tmp/metadata_translation_bridge.py
-   docker exec -d -e METADATA_TRANSLATION_TOKEN -e METADATA_TRANSLATION_BIND=0.0.0.0 media-sublarr \
-     python3 -B -c 'import runpy; runpy.run_path("/tmp/metadata_translation_bridge.py", run_name="__main__")'
-   ```
-
-   `docker exec` 适合验证，容器重建后需重新启动；长期运行请用持久挂载和服务管理。端口 7100 只允许可信内部网络访问，不要发布到公网。桥接预算默认存于 `/config/collect-metadata-translation.db`。
-2. 给 Collect Metadata 设置 `METADATA_TRANSLATION_URL`（完整地址，如同一 Docker 网络中的 `http://media-sublarr:7100/translate`）和同一个 `METADATA_TRANSLATION_TOKEN`，然后重新启动 Web/桌面进程。Docker Web 从 `.env` 取值，修改后需要重建应用容器；跨不可信网络使用 HTTPS。
+独立部署仍可使用 [单服务 Compose 覆盖](deploy/compose.metadata-translation.yaml)。该模式可用 `METADATA_TRANSLATION_DAILY_LIMIT` 设定每日文本额度，默认 100。
 
 也可接入其他兼容服务：接受 Bearer 令牌及 `POST {"target_language":"ja","texts":["Source text"]}`，返回 `{"translations":["翻訳文"]}`。译文数组顺序与输入一致，单项无法翻译可返回 `null`。
 
@@ -181,6 +174,9 @@ Emby 的分季与公开目录不一致时，可给 Web 服务挂载一份本地 
 入库事件由插件交给 Collect Metadata。队列写入失败会记录在 Emby 日志。Emby 尚未返回条目的事件等待 15 分钟后归档，其他持续失败的事件等待最多 7 天。归档文件留在队列目录，可根据 Web 日志复核，必要时恢复为原来的 `.event` 文件名。
 
 使用 PostgreSQL 季集映射时，将 Web 的 `EMBY_AUTO_SCRAPE_TIMEZONE` 设为 Emby 本地首播日期所属的 IANA 时区，例如 `Asia/Shanghai`。日期冲突可按[官方放送日复核流程](docs/EMBY_SEASON_MAPPING.md#如何比较首播日期)处理。
+
+NAS 定时补全任务可以挂载只读的 `MEDIA_ARRIVAL_DIRECTORY`。该目录包含 `status.json` 快照和用于写回的 `token`。Web 服务在容器内部监听 `7099`，提供状态和经认证的番剧标题、简介写回。通过独立私有媒体任务完成文件入库的部署，应让该任务负责私有库的自动写回。
+
 
 ### 自动整理媒体库根目录（可选）
 

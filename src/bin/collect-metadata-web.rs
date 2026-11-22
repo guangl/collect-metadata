@@ -4,6 +4,8 @@ mod batches;
 mod emby;
 #[path = "collect-metadata-web/errors.rs"]
 mod errors;
+#[path = "collect-metadata-web/media_arrival.rs"]
+mod media_arrival;
 #[path = "collect-metadata-web/metadata.rs"]
 mod metadata;
 #[path = "collect-metadata-web/settings.rs"]
@@ -104,6 +106,10 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
             .with_language_settings(languages);
     diagnostics::startup_step("database_init", collector.init_storage().await)?;
     let collector = Arc::new(collector);
+    diagnostics::startup_step(
+        "media_arrival_config",
+        media_arrival::start(Arc::clone(&collector)).await,
+    )?;
     let app = router(Arc::clone(&collector));
     let bind = env::var("APP_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let listener = tokio::net::TcpListener::bind(&bind)

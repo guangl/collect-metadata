@@ -9,6 +9,82 @@ use crate::output::download_image;
 use crate::providers::media::episode_title::{field_locked, needs_title, usable};
 
 impl Emby {
+    pub(crate) async fn repair_anime_metadata(
+        &self,
+        client: &Client,
+        original: &Value,
+        field: &str,
+        text: &str,
+    ) -> Result<bool, String> {
+        if !matches!(field, "Name" | "Overview")
+            || text.trim().is_empty()
+            || text.chars().count() > 4000
+        {
+            return Err("修复字段或文字无效。".into());
+        }
+        let id = original["Id"]
+            .as_str()
+            .filter(|id| is_item_id(id))
+            .ok_or("Emby 条目 ID 无效。")?;
+        let edit_url = self.automatic_edit_url(client, id).await?;
+        let mut item = self.read_json(client, edit_url.clone()).await?;
+        let identity = [
+            "Id",
+            "Path",
+            "Type",
+            "ProviderIds",
+            "SeriesId",
+            "ParentIndexNumber",
+            "IndexNumber",
+        ];
+        if !item["Path"].as_str().is_some_and(|value| {
+            let path = Path::new(value);
+            path.starts_with("/media/番剧") || path.starts_with("/media/剧场版")
+        }) || identity
+            .iter()
+            .chain([&field])
+            .any(|&key| item[key] != original[key])
+        {
+            return Err("Emby 条目在补全期间发生变化。".into());
+        }
+        if item["LockData"] == true
+            || item["LockData"]["Enabled"] == true
+            || item["IsLocked"] == true
+            || field_locked(&item, field)
+        {
+            return Ok(false);
+        }
+        let mut locks = item["LockedFields"].as_array().cloned().unwrap_or_default();
+        locks.push(json!(field));
+        item[field] = json!(text);
+        if field == "Name" {
+            item["ForcedSortName"] = json!(text);
+            if !field_locked(&item, "SortName") {
+                locks.push(json!("SortName"));
+            }
+        }
+        item["LockedFields"] = json!(locks);
+        self.automatic_post(
+            client,
+            self.endpoint(&format!("Items/{id}")),
+            "application/json",
+            item.to_string(),
+        )
+        .await?;
+        let saved = self.read_json(client, edit_url).await?;
+        if ["Name", "Overview"]
+            .iter()
+            .chain(&identity)
+            .any(|&key| saved[key] != item[key])
+            || !locks
+                .iter()
+                .all(|value| value.as_str().is_some_and(|key| field_locked(&saved, key)))
+        {
+            return Err("Emby 没有确认补全写入。".into());
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn automatic_server_id(&self, client: &Client) -> Result<String, String> {
         let info = self
             .read_json(client, self.endpoint("System/Info/Public"))
