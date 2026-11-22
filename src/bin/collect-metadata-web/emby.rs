@@ -28,6 +28,7 @@ pub(super) fn routes() -> Router<Arc<Collector>> {
         .route("/api/emby/import-all", post(import_emby_catalog))
         .route("/api/emby/import-selection", post(import_emby_selection))
         .route("/api/emby/items/{id}/scrape", post(import_emby_item))
+        .route("/api/emby/items/{id}/sources", get(emby_work_sources))
         .route("/api/emby/overwrite", post(overwrite_emby))
         .route("/api/emby/refresh", post(refresh_emby_metadata))
         .route(
@@ -102,6 +103,17 @@ async fn import_emby_selection(
         .await
         .map(Json)
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyImportFailed, error))
+}
+
+async fn emby_work_sources(
+    State(collector): AppState,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .emby_work_sources(&id)
+        .await
+        .map(|links| ([(header::CACHE_CONTROL, "no-store")], Json(links)))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyDetailsFailed, error))
 }
 
 async fn import_emby_item(

@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     ffi::OsString,
-    io,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -137,6 +137,38 @@ impl MediaPaths {
         }
     }
 
+    pub(crate) fn work_source_urls(&self, path: &str) -> Vec<String> {
+        const MAX_NFO_BYTES: u64 = 512 * 1024;
+        let Some(target) = self.target(path, false) else {
+            return Vec::new();
+        };
+        let Ok(dir) = target.directory() else {
+            return Vec::new();
+        };
+        let names = [target.video_sidecar(".nfo"), "movie.nfo".into()];
+        for name in names {
+            if !dir
+                .symlink_metadata(&name)
+                .is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_NFO_BYTES)
+            {
+                continue;
+            }
+            let mut xml = String::new();
+            if dir
+                .open(&name)
+                .and_then(|file| file.take(MAX_NFO_BYTES + 1).read_to_string(&mut xml))
+                .is_ok()
+                && xml.len() as u64 <= MAX_NFO_BYTES
+            {
+                let urls = private_source_urls(&xml);
+                if !urls.is_empty() {
+                    return urls;
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub(super) fn target(&self, path: &str, series: bool) -> Option<Target> {
         let normalized = path.replace('\\', "/");
         let server = ServerPath::parse(&normalized)?;
@@ -197,6 +229,34 @@ impl MediaPaths {
             video,
         })
     }
+}
+
+fn private_source_urls(xml: &str) -> Vec<String> {
+    use quick_xml::{Reader, escape::unescape, events::Event};
+
+    let mut reader = Reader::from_str(xml);
+    let mut depth = 0;
+    let mut urls = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(tag)) if depth == 0 && tag.name().as_ref() != "movie" => break,
+            Ok(Event::Start(tag))
+                if depth == 1 && matches!(tag.name().as_ref(), "javbusid" | "javdbid") =>
+            {
+                if let Ok(value) = reader.read_text(tag.name())
+                    && let Ok(value) = unescape(value.as_ref().trim())
+                {
+                    urls.push(value.into_owned());
+                }
+            }
+            Ok(Event::Start(_)) => depth += 1,
+            Ok(Event::End(_)) if depth <= 1 => break,
+            Ok(Event::End(_)) => depth -= 1,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    urls
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]

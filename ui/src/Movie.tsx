@@ -92,9 +92,10 @@ export function formatDate(value: string): string {
   }
 }
 
-function FactList({ fields, origins, keys = Object.keys(fields), className = "facts", premiere, onError }: {
+function FactList({ fields, origins, links, keys = Object.keys(fields), className = "facts", premiere, onError }: {
   fields: Fields;
   origins?: Record<string, string | undefined>;
+  links?: Record<string, string | undefined>;
   keys?: string[];
   className?: string;
   premiere?: unknown;
@@ -109,7 +110,9 @@ function FactList({ fields, origins, keys = Object.keys(fields), className = "fa
       {presentKeys.map((key) => (
         <div className={className === "facts" ? "fact" : undefined} key={key}>
           <dt>{factLabels[key] || key}{origins?.[key] && <span>{origins[key]}</span>}</dt>
-          <dd><FactValue name={key} value={key === "release_date" ? releaseDate : fields[key]} onError={onError} /></dd>
+          <dd>{links?.[key] ? <ExternalLink value={links[key]} className="work-entry-link" onError={onError}>
+            {String(fields[key])}
+          </ExternalLink> : <FactValue name={key} value={key === "release_date" ? releaseDate : fields[key]} onError={onError} />}</dd>
         </div>
       ))}
     </dl>
@@ -236,6 +239,8 @@ export function Movie({ response, onNotice, onError }: { response: LookupRespons
   const title = fields.title || fields.title_ja || fields.title_original || fields.title_en || fields.title_site;
   const kind = record.media_type ?? "av";
   const backdrop = safeUrl(fields.backdrop_url);
+  const sourceUrl = (name: string) => sources.find(({ provider, status, url }) =>
+    provider === name && (status === "ok" || status === "partial") && safeUrl(url))?.url;
   const emby = embyData(sources.find(({ provider }) => provider === "Emby"));
   const embyItem = emby?.item?.Id;
   const episodePremieres = new Map<string, string>();
@@ -282,6 +287,7 @@ export function Movie({ response, onNotice, onError }: { response: LookupRespons
         { id: "overview", label: "简介与资料", content: <div className="movie-body">
           {fields.description && <p className="movie-description mb-4">{fields.description}</p>}
           <FactList fields={{ original_languages: [], ...fields }} origins={origins} keys={keyFacts}
+            links={{ tmdb_id: sourceUrl("TMDB"), bangumi_id: sourceUrl("Bangumi") }}
             premiere={origins.release_date === "Emby" ? emby?.item?.PremiereDate : undefined} onError={onError} />
           <FactList fields={fields} origins={origins} keys={additionalFacts} className="full-facts" onError={onError} />
         </div> },

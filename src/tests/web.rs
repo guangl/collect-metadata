@@ -265,6 +265,19 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
         "Overview":"这是简介","Path":"/media/资料剧集","ProviderIds":{"Tmdb":"70523"},"ImageTags":{"Primary":"3"}
     });
     let extra = json!({"Id":"35","Type":"Series","Name":"本地剧集"});
+    let source_fixture = json!({
+        "Id":"44","Type":"Series","Name":"『你们先走我断后』，于是10年后我成为了传说",
+        "ProviderIds":{"Tmdb":"302051","Bangumi":"590786"},
+        "ExternalUrls":[
+            {"Url":"https://www.themoviedb.org/tv/302051-i-became-a-legend-after-my-10-year-long-last-stand"},
+            {"Url":"https://bgm.tv/subject/90000"},
+            {"Url":"https://javdb.com/search?q=fixture"},
+            {"Url":"https://www.javbus.com.example/ABC-123"}
+        ]
+    });
+    let private = json!({
+        "Id":"45","Type":"Movie","Name":"私人影片","Path":"/media/Private/ABC-123.mkv"
+    });
     let mut episode = json!({
         "Id":"34","Type":"Episode","Name":"第一集","SeriesName":"资料剧集","Overview":"已有中文译文",
         "IndexNumber":1,"ParentIndexNumber":1,"Path":"/media/资料剧集/Season 1/S01E01.mkv",
@@ -296,6 +309,8 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
         (Some("34"), _) => vec![episode],
         (Some("35"), _) => vec![extra],
         (Some("40"), _) => vec![video],
+        (Some("44"), _) => vec![source_fixture],
+        (Some("45"), _) => vec![private],
         (_, Some("31")) => vec![
             json!({"Id":"33","Type":"Season","Name":"第二季","IndexNumber":2}),
             json!({"Id":"32","Type":"Season","Name":"第一季","IndexNumber":1}),
@@ -338,7 +353,7 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
     }
     for item in &mut data {
         let requested = args.get("Fields").map_or("", String::as_str);
-        for field in ["ProductionYear", "CommunityRating", "CriticRating", "OfficialRating", "TagItems"] {
+        for field in ["ProductionYear", "CommunityRating", "CriticRating", "OfficialRating", "TagItems", "ExternalUrls"] {
             if !requested.split(',').any(|name| name == field) {
                 item.as_object_mut().unwrap().remove(field);
             }
@@ -354,9 +369,21 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
     let path = workspace.path().join("emby.json");
     fs::write(&path, br#"{"enabled":false,"server":"","api_key":""}"#).unwrap();
     fs::write(path.with_file_name("imdb-ratings.json"), br#"{"tt6751668":{"value":8.6,"count":12345}}"#).unwrap();
+    let media = workspace.path().join("Private");
+    fs::create_dir(&media).unwrap();
+    fs::write(media.join("ABC-123.mkv"), []).unwrap();
+    fs::write(media.join("ABC-123.nfo"), br#"<?xml version="1.0"?>
+        <movie><plot>Local metadata</plot><javbusid>https://www.javbus.com/ABC-123</javbusid>
+        <javdbid>https://javdb.com/v/x1y2</javdbid></movie>"#).unwrap();
+    let output_path = workspace.path().join("output.json");
+    fs::write(&output_path, json!({
+        "owner": "fixture",
+        "options": {"emby_paths": [{"server":"/media/Private","local":media}]}
+    }).to_string()).unwrap();
     let collector = Collector::from_environment(None)
         .unwrap()
-        .with_emby_settings(Arc::new(EmbySettings::load(path).unwrap()));
+        .with_emby_settings(Arc::new(EmbySettings::load(path).unwrap()))
+        .with_output_settings(Arc::new(OutputSettings::load(output_path, None).unwrap()));
     let (address, server) = listen(router(Arc::new(collector))).await;
     let api = Api {
         address,
@@ -369,6 +396,21 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
     )
     .await;
 
+    assert_eq!(
+        api.success("/api/emby/items/44/sources", None).await,
+        json!([
+            {"provider":"TMDB","url":"https://www.themoviedb.org/tv/302051-i-became-a-legend-after-my-10-year-long-last-stand"},
+            {"provider":"Bangumi","url":"https://bgm.tv/subject/590786"}
+        ])
+    );
+    assert_eq!(
+        api.success("/api/emby/items/45/sources", None).await,
+        json!([
+            {"provider":"JavBus","url":"https://www.javbus.com/ABC-123"},
+            {"provider":"JavDB","url":"https://javdb.com/v/x1y2"}
+        ])
+    );
+    assert_eq!(api.success("/api/emby/items/35/sources", None).await, json!([]));
     let response = api.send("/api/emby/catalog", None).await;
     let json = response.text().await.unwrap();
     assert!(!json.contains("test-secret"));

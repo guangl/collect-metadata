@@ -199,6 +199,7 @@ fn main() {
             emby::emby_episode_overview,
             emby::emby_missing_episode_overviews,
             emby::emby_credits,
+            emby::emby_work_sources,
             settings::test_emby,
             settings::save_emby,
             settings::save_output_settings,

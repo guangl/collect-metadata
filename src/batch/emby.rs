@@ -4,8 +4,8 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
 
 use crate::{
-    Collector, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview, EmbyWorkPreview, MediaKind,
-    providers::media::emby::{EPISODE_QUERY_PREFIX, Emby, is_item_id},
+    Collector, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview, EmbyWorkPreview, MediaKind, ScrapeSourceLink,
+    providers::media::emby::{EPISODE_QUERY_PREFIX, Emby, is_item_id, source_links::work_source_links},
 };
 
 use super::{BatchItemInput, MatchMode};
@@ -135,6 +135,22 @@ impl Collector {
             .ok()?
             .preview_image(&self.client, id, image)
             .await
+    }
+
+    pub async fn emby_work_sources(&self, id: &str) -> Result<Vec<ScrapeSourceLink>, String> {
+        let item = self.emby_connection()?.source_link_item(&self.client, id).await?;
+        let mut sidecar_urls = Vec::new();
+        if item["Type"] != "Series"
+            && let Some(path) = item["Path"].as_str()
+            && let Some(settings) = self.output_settings()
+        {
+            let paths = settings.media_paths();
+            let path = path.to_owned();
+            sidecar_urls = tokio::task::spawn_blocking(move || paths.work_source_urls(&path))
+                .await
+                .map_err(|_| "无法读取 Emby 作品来源。")?;
+        }
+        Ok(work_source_links(&self.client, &item, &sidecar_urls).await)
     }
 
     pub async fn emby_credits(&self, id: &str) -> Result<Vec<crate::EmbyCredit>, String> {

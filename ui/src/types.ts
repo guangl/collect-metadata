@@ -171,11 +171,14 @@ export interface Fields {
   [name: string]: unknown;
 }
 
-export interface Source {
+export interface ScrapeSourceLink {
   provider: string;
+  url: string;
+}
+
+export interface Source extends ScrapeSourceLink {
   status: "ok" | "partial" | "not_found" | "unavailable";
   note: string | null;
-  url: string;
   fields: Fields;
   data: unknown;
 }

@@ -15,6 +15,7 @@ import type {
   OutputOptions,
   OutputSettingsView,
   Snapshot,
+  ScrapeSourceLink,
   StorageStatus,
   CredentialStatus,
   WritebackPreview,
@@ -267,6 +268,11 @@ export function getEmbyEpisodeOverview(id: string): Promise<EpisodeOverview> {
 export function getEmbySeries(id: string): Promise<EmbySeriesPreview> {
   return invoke ? invoke("emby_series_preview", { id }) :
     request("/api/emby/series/" + encodeURIComponent(id), { cache: "no-store" });
+}
+
+export function getEmbyWorkSources(id: string): Promise<ScrapeSourceLink[]> {
+  return invoke ? invoke("emby_work_sources", { id }) :
+    request(`/api/emby/items/${encodeURIComponent(id)}/sources`, { cache: "no-store" });
 }
 
 export function getEmbyCredits(id: string): Promise<EmbyCredit[]> {

@@ -14,7 +14,7 @@ pub use collect::{
 pub use output::{OutputOptions, OutputReport, OutputSettings, OutputSettingsView};
 pub use providers::media::emby::{
     EmbyCredit, EmbyInput, EmbyLibrary, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview,
-    EmbySettings, EmbySettingsView, EmbyWorkPreview,
+    EmbySettings, EmbySettingsView, EmbyWorkPreview, ScrapeSourceLink,
 };
 pub use providers::media::{MediaKind, MediaProvider, SearchResult};
 pub use storage::HistoryItem;

@@ -1,8 +1,8 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type PointerEvent } from "react";
-import { getEmbyEpisodeOverview, type EpisodeOverview } from "../../api";
-import { LocalDate } from "../../Catalog";
+import { getEmbyEpisodeOverview, getEmbyWorkSources, type EpisodeOverview } from "../../api";
+import { ExternalLink, LocalDate, safeUrl } from "../../Catalog";
 import { Tabs } from "../../Tabs";
-import { errorText, mediaLabels, type EmbyEpisodePreview, type EmbySeasonPreview, type EmbyWorkPreview } from "../../types";
+import { errorText, mediaLabels, type EmbyEpisodePreview, type EmbySeasonPreview, type EmbyWorkPreview, type ScrapeSourceLink } from "../../types";
 import { EmbyArtwork } from "./Artwork";
 import { EmbyCredits } from "./Credits";
 import { EmbyScrapeActions, type ScrapeControls } from "./ScrapeActions";
@@ -42,8 +42,20 @@ function EpisodeSynopsis({ episode, revision }: { episode: EmbyEpisodePreview; r
   </>;
 }
 
-function WorkSynopsis({ work }: { work: EmbyWorkPreview }) {
-  const hasDetails = work.official_rating || work.critic_rating != null || work.imdb_rating || work.tmdb_id || work.bangumi_id || !!work.tags?.length;
+function WorkSynopsis({ work, sources }: { work: EmbyWorkPreview; sources: ScrapeSourceLink[] }) {
+  const [linkError, setLinkError] = useState<string>();
+  const sourceUrls = new Map(sources.map(({ provider, url }) => [provider, safeUrl(url)]));
+  const tmdb = sourceUrls.get("TMDB") ?? (/^[1-9]\d*$/.test(work.tmdb_id ?? "")
+    ? `https://www.themoviedb.org/${work.kind === "series" ? "tv" : "movie"}/${work.tmdb_id}` : null);
+  const bangumi = sourceUrls.get("Bangumi") ?? (/^[1-9]\d*$/.test(work.bangumi_id ?? "")
+    ? `https://bgm.tv/subject/${work.bangumi_id}` : null);
+  const entryLinks = [
+    { name: "TMDB ID", id: work.tmdb_id, url: tmdb },
+    { name: "Bangumi ID", id: work.bangumi_id, url: bangumi },
+    ...["JavBus", "JavDB"].map((name) => ({ name, url: sourceUrls.get(name), id: undefined })),
+  ];
+  const hasDetails = work.official_rating || work.critic_rating != null || work.imdb_rating ||
+    entryLinks.some(({ id, url }) => id || url) || !!work.tags?.length;
   return <div className="work-panel work-synopsis">
     <div>
       <h3>剧情简介</h3>
@@ -55,12 +67,19 @@ function WorkSynopsis({ work }: { work: EmbyWorkPreview }) {
         {work.official_rating && <div><dt>内容分级</dt><dd>{work.official_rating}</dd></div>}
         {work.critic_rating != null && <div><dt>影评人评分</dt><dd>{work.critic_rating} / 100</dd></div>}
         {work.imdb_rating && <div><dt>IMDb 评分</dt><dd>{work.imdb_rating.value.toFixed(1)} / 10 · {work.imdb_rating.count.toLocaleString("zh-CN")} 人评价</dd></div>}
-        {work.tmdb_id && <div><dt>TMDB ID</dt><dd>{work.tmdb_id}</dd></div>}
-        {work.bangumi_id && <div><dt>Bangumi ID</dt><dd>{work.bangumi_id}</dd></div>}
+        {entryLinks.filter(({ id, url }) => id || url).map(({ name, id, url }) => (
+          <div key={name}>
+            <dt>{name}</dt>
+            <dd>{url ? <ExternalLink value={url} className="work-entry-link" onError={setLinkError}>
+              {id || new URL(url).pathname.split("/").filter(Boolean).at(-1)}
+            </ExternalLink> : id}</dd>
+          </div>
+        ))}
         {!!work.tags?.length && <div><dt>标签</dt><dd>
           <ul className="work-chips" role="list">{work.tags.map((tag) => <li key={tag}>{tag}</li>)}</ul>
         </dd></div>}
       </dl>
+      {linkError && <p className="batch-error mt-2" role="alert">{linkError}</p>}
     </div>}
   </div>;
 }
@@ -100,6 +119,15 @@ export function EmbyWorkPreviewDialog({ work, library, missingEpisodeIds, onClos
   const origin = useRef<{ button: HTMLButtonElement; scroll: number }>(null);
   const [episodeRevision, setEpisodeRevision] = useState(0);
   const [selected, setSelected] = useState<{ episode: EmbyEpisodePreview; season: EmbySeasonPreview }>();
+  const [sources, setSources] = useState<ScrapeSourceLink[]>([]);
+  useEffect(() => {
+    let active = true;
+    getEmbyWorkSources(work.id).then(
+      (links) => { if (active) setSources(links); },
+      () => { if (active) setSources([]); },
+    );
+    return () => { active = false; };
+  }, [work.id]);
   useLayoutEffect(() => {
     const frame = dialog.current;
     if (!frame) return;
@@ -160,7 +188,7 @@ export function EmbyWorkPreviewDialog({ work, library, missingEpisodeIds, onClos
         </div>
       </div>
       <Tabs label="作品资料" className="work-tabs" initialTab={missingEpisodeIds ? "episodes" : undefined} tabs={[
-        { id: "overview", label: "简介", content: <WorkSynopsis work={work} /> },
+        { id: "overview", label: "简介", content: <WorkSynopsis work={work} sources={sources} /> },
         ...(work.kind === "series" ? [{ id: "episodes", label: "季与分集", retain: true, content: <EmbySeriesEpisodes id={work.id} missingEpisodeIds={missingEpisodeIds} onOpen={(episode, season, button) => {
           origin.current = { button, scroll: dialog.current?.scrollTop ?? 0 };
           setSelected({ episode, season });

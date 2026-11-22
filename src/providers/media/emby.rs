@@ -12,11 +12,13 @@ use crate::{collect::Source, diagnostics, providers::field_map};
 mod automatic;
 mod catalog;
 mod settings;
+pub(crate) mod source_links;
 
 pub use catalog::{
     EmbyCredit, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview, EmbyWorkPreview,
 };
 pub use settings::{EmbyInput, EmbySettings, EmbySettingsView};
+pub use source_links::ScrapeSourceLink;
 
 const FIELDS: &str = concat!(
     "Path,Overview,People,ProviderIds,Genres,Studios,Tags,TagItems,Taglines,OriginalTitle,SortName,",
@@ -380,10 +382,10 @@ impl Emby {
             .as_array_mut()
             .and_then(|items| items.first_mut())
             .filter(|item| {
-                let matches = if item_type == "Movie,Video" {
-                    matches_kind(item, MediaKind::Movie)
-                } else {
-                    item["Type"] == item_type
+                let matches = match item_type {
+                    "Movie,Video" => matches_kind(item, MediaKind::Movie),
+                    "Movie,Series,Video" => work_kind(item).is_some(),
+                    _ => item["Type"] == item_type,
                 };
                 valid_id(&item["Id"]) == Some(id) && matches
             })

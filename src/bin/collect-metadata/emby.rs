@@ -1,7 +1,7 @@
 use collect_metadata::{
     AppError, EmbyEpisodeOverview, EmbyLibrary, EmbyLibraryPreview, EmbyOverwriteInput,
     EmbyPreviewImage, EmbyScrapeScope, EmbyScrapeTarget, EmbySelectionInput, EmbySeriesPreview,
-    EmbyWorkPreview, ErrorCode, diagnostics,
+    EmbyWorkPreview, ErrorCode, ScrapeSourceLink, diagnostics,
 };
 use tauri::State;
 
@@ -132,6 +132,19 @@ pub(crate) async fn emby_preview_image(
         .await
         .ok_or_else(|| AppError::new(ErrorCode::EmbyImageUnavailable, "Emby 图片暂不可用。"))?;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub(crate) async fn emby_work_sources(
+    state: State<'_, DesktopState>,
+    id: String,
+) -> Result<Vec<ScrapeSourceLink>, AppError> {
+    diagnostics::desktop_command(
+        "emby_work_sources",
+        ErrorCode::EmbyDetailsFailed,
+        state.collector().emby_work_sources(&id),
+    )
+    .await
 }
 
 #[tauri::command]

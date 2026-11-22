@@ -15,7 +15,7 @@ const saved = { id: 7, title, cover_url: cover, year: 2019, code: "TMDB-496243",
   media_type: "movie", collected_at: "2026-01-01T00:00:00Z", original_languages: ["ko"] };
 const record = { schema_version: 2, media_type: "movie", query: title,
   fields: { title, cover_url: cover, description: "剧情简介", runtime_minutes: 132,
-    original_languages: ["ko"], cast: ["演员"], rating: { value: 8, scale: 10, count: 20 },
+    original_languages: ["ko"], tmdb_id: "496243", cast: ["演员"], rating: { value: 8, scale: 10, count: 20 },
     episodes: [{ id: 1, season: 1, number: 1, title: "第一集", date: "2024-01-01", url: null },
       { id: 2, season: 0, number: null, title: "额外内容", date: "2024-01-01", url: "https://www.themoviedb.org/" }] },
   field_sources: { runtime_minutes: "TMDB" },
@@ -65,6 +65,7 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: Emb
     if (route.startsWith("/api/history?")) return response(historyCleared || route.includes("before=") ? [] :
       route.includes("kind=series") ? [] : Array.from({ length: 50 }, (_, n) => n ? { ...saved, id: n + 9, title: "影片 " + n } : saved));
     if (route === "/api/emby/catalog") return response(libraries);
+    if (/^\/api\/emby\/items\/\d+\/sources$/.test(route)) return response([]);
     if (/^\/api\/emby\/items\/\d+\/scrape$/.test(route) && options?.method === "POST") {
       id = 9;
       return response(id, 201);
@@ -288,6 +289,8 @@ describe("海报与详情", () => {
     expect(poster.querySelector("img")).toBeNull();
     fireEvent.click(poster);
     await screen.findByRole("heading", { name: title, exact: true });
+    expect(screen.getByRole("link", { name: "496243" }).getAttribute("href")).toBe(record.sources[0].url);
+    expect(screen.queryByRole("heading", { name: "刮削来源" })).toBeNull();
     expect(screen.getByText("剧情简介")).toBeTruthy();
     expect(screen.getByText("132 分钟")).toBeTruthy();
     expect(screen.getByText("8 / 10 · 20 人评价")).toBeTruthy();
@@ -597,6 +600,41 @@ describe("后台批次", () => {
     setLabel("默认类型", "av");
     click("提交后台采集");
     await waitFor(() => expect(calls.mock.calls.some(([route, options]) => route === "/api/batches" && options?.method === "POST")).toBe(true));
+  });
+
+  it("在媒体库海报的条目信息中链接站点 ID", async () => {
+    const show = { id: "31", kind: "series" as const, title: "『你们先走我断后』，于是10年后我成为了传说",
+      year: 2026, original_title: null, overview: null, genres: [], rating: null,
+      runtime_minutes: null, poster: "poster", backdrop: null, tmdb_id: "302051", bangumi_id: "590786" };
+    const film = { ...show, id: "45", kind: "movie" as const, title: "IDPC-032", tmdb_id: null, bangumi_id: null };
+    const showLinks = [
+      { provider: "TMDB", url: "https://www.themoviedb.org/tv/302051-i-became-a-legend-after-my-10-year-long-last-stand" },
+      { provider: "Bangumi", url: "https://bgm.tv/subject/590786" },
+    ];
+    const filmLinks = [
+      { provider: "JavBus", url: "https://www.javbus.com/IDPC-032" },
+      { provider: "JavDB", url: "https://javdb.com/v/Aq2xee" },
+    ];
+    const calls = harness([], true, [{ id: "13", name: "媒体库", works: [show, film] }]);
+    const defaultRequest = calls.getMockImplementation()!;
+    calls.mockImplementation((route, options) => {
+      if (route === "/api/emby/items/31/sources") return Promise.resolve(response(showLinks));
+      if (route === "/api/emby/items/45/sources") return Promise.resolve(response(filmLinks));
+      return defaultRequest(route, options);
+    });
+    render(<App />);
+    const poster = await screen.findByRole("button", { name: new RegExp(show.title) });
+    expect(calls.mock.calls.some(([route]) => route.endsWith("/sources"))).toBe(false);
+    fireEvent.click(poster);
+    const showDetails = within(screen.getByRole("heading", { name: "条目信息" }).parentElement!);
+    await waitFor(() => expect(showDetails.getByRole("link", { name: "302051" }).getAttribute("href")).toBe(showLinks[0].url));
+    expect(showDetails.getByRole("link", { name: "590786" }).getAttribute("href")).toBe(showLinks[1].url);
+    expect(screen.queryByRole("heading", { name: "刮削来源" })).toBeNull();
+    click("关闭详情");
+    click(/^IDPC-032/);
+    const filmDetails = within((await screen.findByRole("heading", { name: "条目信息" })).parentElement!);
+    expect(filmDetails.getByRole("link", { name: "IDPC-032" }).getAttribute("href")).toBe(filmLinks[0].url);
+    expect(filmDetails.getByRole("link", { name: "Aq2xee" }).getAttribute("href")).toBe(filmLinks[1].url);
   });
 
   it("切换 Emby 媒体库和详情标签，读取演职员头像并锁定背景滚动",  async () => {

@@ -169,6 +169,7 @@
   .source-card p { @apply mt-1.5 text-xs text-muted; }
   .source-card details { @apply mt-3; }
   .source-link { @apply mb-1 mt-2 inline-flex text-sm; }
+  .work-entry-link { @apply underline underline-offset-2; }
   .raw { @apply py-1.5 text-sm text-accent; }
   .source-card pre { @apply max-h-[27rem] overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-3 font-mono text-xs [overflow-wrap:anywhere]; }
   .source-state { @apply whitespace-nowrap text-xs text-muted; }
