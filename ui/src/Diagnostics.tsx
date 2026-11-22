@@ -35,7 +35,7 @@ export function Diagnostics() {
           {directory && <p className="break-all"><code>{directory}</code></p>}
         </> : <>
           <p className="muted">在部署主机的 Compose 目录查看 Web 日志。直接运行 Web 时，日志输出到标准错误。</p>
-          <pre className="overflow-auto"><code>docker compose logs --since 30m app</code></pre>
+          <pre className="overflow-auto"><code>docker compose logs --since 30m</code></pre>
         </>}
         <div className="settings-actions">
           {isDesktop && directory && <button className="secondary" type="button" onClick={() => {

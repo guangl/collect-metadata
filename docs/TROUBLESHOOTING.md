@@ -11,12 +11,12 @@
 | macOS 桌面版 | 从设置打开日志目录，或在访达中前往 `~/Library/Logs/com.collectmetadata.desktop/` |
 | Windows 桌面版 | 从设置打开日志目录，或在资源管理器中打开 `%LOCALAPPDATA%\com.collectmetadata.desktop\logs` |
 | Linux 桌面版 | 以设置显示的目录为准，默认位于本地数据目录下的 `com.collectmetadata.desktop/logs/` |
-| Docker Web | 在部署主机执行 `docker compose logs --since 30m app`，查数据库时追加 `db` |
+| Docker Web | 在部署主机执行 `docker compose logs --since 30m`，再按需指定服务名 |
 | 直接运行 Web | 查看启动终端或进程管理器收集的标准错误 |
 | Emby 插件 | 在 Emby 管理后台「日志」搜索 `Collect Metadata`，并查看对应计划任务的结果 |
 | 翻译桥接、MCP、私人影片 worker | 查看各自的启动终端、进程管理器或容器日志 |
 
-桌面保留 `collect-metadata.log` 和 `collect-metadata.1.log`、`collect-metadata.2.log`，每份约 2 MiB。写入失败时应用会尝试输出到标准错误。Compose 默认给 `app` 保留三个约 10 MiB 的日志文件，以部署配置为准。Compose 命令请沿用原部署的 `-f` 和项目名参数。
+桌面保留 `collect-metadata.log` 和 `collect-metadata.1.log`、`collect-metadata.2.log`，每份约 2 MiB。写入失败时应用会尝试输出到标准错误。Compose 默认给 `app` 保留三个约 10 MiB 的日志文件，以部署配置为准。Compose 命令请沿用原部署的 `-f` 和项目名参数。可用 `docker compose ps --services` 确认服务名。下例使用默认服务 `app` 和 `db`，自定义部署请替换为实际名称。
 
 ```sh
 docker compose ps

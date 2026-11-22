@@ -399,7 +399,7 @@ describe("设置", () => {
     expect((screen.getByLabelText("输出路径") as HTMLInputElement).value).toBe("media");
     fireEvent.keyDown(tab, { key: "End" });
     const diagnostics = screen.getByRole("tabpanel", { name: "日志与排查" });
-    expect(within(diagnostics).getByText("docker compose logs --since 30m app")).toBeTruthy();
+    expect(within(diagnostics).getByText("docker compose logs --since 30m")).toBeTruthy();
     expect(within(diagnostics).getByRole("button", { name: "下载排查手册" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "元数据语言" }));
     expect(screen.getByRole("tabpanel", { name: "元数据语言" })).toBeTruthy();
