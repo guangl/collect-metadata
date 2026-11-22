@@ -44,7 +44,7 @@ def supplement_nfo(content, code, data):
     return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n", added
 
 
-def build_nfo(data, tags, folder_name):
+def build_nfo(data, tags, folder_name, video_info=None):
     root = ET.Element("movie")
 
     def add(parent, tag, text):
@@ -67,6 +67,7 @@ def build_nfo(data, tags, folder_name):
     add(root, "originaltitle", original_title or display_title)
     add(root, "sorttitle", code)
     add(root, "plot", data.get("plot"))
+    add(root, "originalplot", data.get("plot"))
     add(root, "website", data.get("website"))
     add(root, "num", code)
 
@@ -75,12 +76,33 @@ def build_nfo(data, tags, folder_name):
     unique_id.set("default", "true")
     unique_id.text = code
 
-    add(root, "premiered", data.get("release"))
-    add(root, "releasedate", data.get("release"))
-    if data.get("release") and re.match(r"^\d{4}", data["release"]):
-        add(root, "year", data["release"][:4])
+    digital_release = data.get("digital_release")
+    disc_release = data.get("disc_release")
+    catalog_release = data.get("release")
+    premiere = digital_release or catalog_release or disc_release
+    add(root, "premiered", premiere)
+    add(root, "releasedate", disc_release)
+    if premiere and re.match(r"^\d{4}", premiere):
+        add(root, "year", premiere[:4])
+    dates = []
+    if digital_release:
+        dates.append(f"线上配信 {digital_release}")
+    elif catalog_release and catalog_release != disc_release:
+        dates.append(f"目录日期 {catalog_release}")
+    if disc_release:
+        dates.append(f"实体发行 {disc_release}")
+    add(root, "tagline", " · ".join(dates))
 
-    add(root, "runtime", data.get("runtime"))
+    video_info = video_info or {}
+    add(root, "runtime", video_info.get("minutes") or data.get("runtime"))
+    if video_info:
+        details = ET.SubElement(ET.SubElement(root, "fileinfo"), "streamdetails")
+        video = ET.SubElement(details, "video")
+        for key, name in (
+            ("codec_name", "codec"), ("width", "width"), ("height", "height"),
+            ("duration_seconds", "durationinseconds"),
+        ):
+            add(video, name, video_info.get(key))
     add(root, "studio", data.get("studio"))
     add(root, "maker", data.get("studio"))
     add(root, "label", data.get("label"))
@@ -90,13 +112,14 @@ def build_nfo(data, tags, folder_name):
         collection = ET.SubElement(root, "set")
         add(collection, "name", data["series"])
 
-    for genre in data.get("genres", []):
+    genres = list(dict.fromkeys((*data.get("genres", []), *tags)))
+    for genre in genres:
         add(root, "genre", genre)
-    for tag in tags:
-        add(root, "genre", tag)
+    actor_names = [actor.get("name") for actor in data.get("actors", [])]
+    prefix, separator, _ = code.partition("-")
+    extra_tags = [prefix if separator and prefix.isalpha() else None, data.get("series"), *actor_names]
+    for tag in dict.fromkeys([*genres, *extra_tags]):
         add(root, "tag", tag)
-    if data.get("series"):
-        add(root, "tag", data["series"])
 
     for actor in data.get("actors", []):
         actor_element = ET.SubElement(root, "actor")

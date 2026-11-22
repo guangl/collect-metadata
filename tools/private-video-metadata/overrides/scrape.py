@@ -1,6 +1,9 @@
 """Metadata inspection and scraping workflows."""
 
+import json
+import math
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -17,7 +20,7 @@ from .backdrops import publish_sample_backdrops
 from .catalog import VIDEO_EXT, normalize
 from .filesystem import atomic_write_bytes
 from .nfo import build_nfo, supplement_nfo
-from .publisher import enrich
+from .publisher import fetch_publisher, merge_publisher
 from .sources import fetch_javbus, fetch_javdb, merge_sources
 
 
@@ -44,7 +47,7 @@ def do_inspect(folders):
     print("\n[inspect] No network requests or file writes were performed.")
 
 
-def collect_metadata(fetcher, code):
+def collect_metadata(fetcher, code, *, include_digital=True):
     bus = fetch_javbus(fetcher, code)
     db = fetch_javdb(fetcher, code)
     data = merge_sources(bus, db)
@@ -52,8 +55,34 @@ def collect_metadata(fetcher, code):
         data["source"] = "+".join(
             source for source, found in (("javbus", bus), ("javdb", db)) if found
         )
-        enrich(fetcher, code, data)
-    return data
+    publisher = fetch_publisher(fetcher, code, include_digital=include_digital)
+    return merge_publisher(data, publisher)
+
+
+def probe_video(path):
+    """Read the duration and primary video stream when the file can be probed."""
+    command = [
+        'ffprobe', '-v', 'error', '-select_streams', 'V:0', '-show_entries',
+        'format=duration:stream=duration,codec_name,width,height', '-of', 'json', str(path),
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, timeout=20)
+        data = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    stream = next(iter(data.get('streams', [])), None)
+    if not stream:
+        return {}
+    for value in (data.get('format', {}).get('duration'), stream.get('duration')):
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(seconds) and seconds > 0:
+            stream['duration_seconds'] = round(seconds)
+            stream['minutes'] = max(1, int(seconds // 60))
+            break
+    return stream
 
 
 def supplement_one(folder, fetcher):
@@ -71,7 +100,7 @@ def supplement_one(folder, fetcher):
     else:
         fetcher.begin_movie()
         try:
-            data = collect_metadata(fetcher, code) or {}
+            data = collect_metadata(fetcher, code, include_digital=False) or {}
         finally:
             fetcher.finish_movie()
 
@@ -109,9 +138,19 @@ def scrape_one(folder, fetcher, args):
 
     data = collect_metadata(fetcher, code)
     if not data:
-        return "MISS", f"{code} was not found in either metadata source"
+        return "MISS", f"{code} was not found in any metadata source"
     source_tag = data["source"]
-    payload = build_nfo(data, tags, folder.name)
+    groups = {nfo_path: videos}
+    for video in videos:
+        sidecar = video.with_suffix(".nfo")
+        if sidecar != nfo_path and (args.force or not sidecar.exists()):
+            groups.setdefault(sidecar, []).append(video)
+    measured = {video: probe_video(video) for video in videos}
+    # A sidecar shared by multiple files cannot carry any single file's runtime.
+    payloads = {
+        path: build_nfo(data, tags, folder.name, measured[items[0]] if len(items) == 1 else {})
+        for path, items in groups.items()
+    }
 
     images = []
     samples = data.get("samples", [])
@@ -195,18 +234,12 @@ def scrape_one(folder, fetcher, args):
     except OSError as error:
         print(f"{code}: could not publish Emby backdrops: {error}", flush=True)
 
-    nfo_count = 1
-    for video in videos:
-        sidecar = video.with_suffix(".nfo")
-        if sidecar == nfo_path:
-            continue
-        if sidecar.exists() and not args.force:
-            continue
-        atomic_write_bytes(sidecar, payload)
-        nfo_count += 1
-    atomic_write_bytes(nfo_path, payload)
+    for path, payload in payloads.items():
+        if path != nfo_path:
+            atomic_write_bytes(path, payload)
+    atomic_write_bytes(nfo_path, payloads[nfo_path])
 
-    detail = f"{code} [{source_tag}] nfo×{nfo_count}"
+    detail = f"{code} [{source_tag}] nfo×{len(payloads)}"
     if tags:
         detail += f" tags:{'/'.join(tags)}"
     if images:
