@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::MediaKind;
+use crate::{MediaKind, diagnostics};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -44,7 +44,10 @@ impl Store {
             .acquire_timeout(Duration::from_secs(6))
             .connect_with(options.clone())
             .await
-            .map_err(|_| "无法连接 PostgreSQL，请检查连接设置。")?;
+            .map_err(|error| {
+                diagnostics::postgres_error("postgres_connect_failed", &error);
+                "无法连接 PostgreSQL。请检查主机、端口、数据库名、账号和 TLS 设置。"
+            })?;
 
         let migrate = async {
             let mut transaction = pool.begin().await?;
@@ -73,9 +76,10 @@ impl Store {
             super::batch::migrate(&mut transaction).await?;
             transaction.commit().await
         };
-        migrate
-            .await
-            .map_err(|_| "无法初始化 PostgreSQL 的采集表。")?;
+        migrate.await.map_err(|error| {
+            diagnostics::postgres_error("postgres_migration_failed", &error);
+            "无法初始化 PostgreSQL 的采集表。请检查账号是否能创建和修改应用表。"
+        })?;
         Ok(Self { pool })
     }
 
@@ -87,7 +91,10 @@ impl Store {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| "读取已同步的 Emby 条目失败。".into())
+        .map_err(|error| {
+            diagnostics::postgres_error("postgres_emby_read_failed", &error);
+            "读取已同步的 Emby 条目失败。请检查 PostgreSQL。".into()
+        })
     }
 
     pub(crate) async fn upsert_emby_item(
@@ -100,7 +107,10 @@ impl Store {
             ON CONFLICT(server_id,item_id) DO UPDATE SET document=excluded.document, updated_at=now()
             WHERE collect_metadata_emby_items.document IS DISTINCT FROM excluded.document")
             .bind(server).bind(id).bind(doc).execute(&self.pool).await
-            .map(|_| ()).map_err(|_| "写入 Emby 条目失败。".into())
+            .map(|_| ()).map_err(|error| {
+                diagnostics::postgres_error("postgres_emby_write_failed", &error);
+                "写入 Emby 条目失败。请检查 PostgreSQL。".into()
+            })
     }
 
     pub(crate) async fn check_connection(&self) -> Result<(), String> {
@@ -108,18 +118,23 @@ impl Store {
             .execute(&self.pool)
             .await
             .map(|_| ())
-            .map_err(|_| "无法连接 PostgreSQL，请检查连接设置。".into())
+            .map_err(|error| {
+                diagnostics::postgres_error("postgres_check_failed", &error);
+                "PostgreSQL 连接检查失败。请检查数据库是否在线，再测试连接。".into()
+            })
     }
 
     pub(crate) async fn save(&self, code: &str, document: &Value) -> Result<HistoryItem, String> {
-        let mut connection = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|_| "采集完成，但 PostgreSQL 保存失败。")?;
+        let mut connection = self.pool.acquire().await.map_err(|error| {
+            diagnostics::postgres_error("postgres_snapshot_save_failed", &error);
+            "采集完成，但 PostgreSQL 保存失败。请检查数据库连接。"
+        })?;
         Self::insert_snapshot(&mut connection, code, document)
             .await
-            .map_err(|_| "采集完成，但 PostgreSQL 保存失败。".into())
+            .map_err(|error| {
+                diagnostics::postgres_error("postgres_snapshot_save_failed", &error);
+                "采集完成，但 PostgreSQL 保存失败。请检查数据库连接。".into()
+            })
     }
 
     pub(super) async fn insert_snapshot(
@@ -176,7 +191,10 @@ impl Store {
             .bind(language)
             .fetch_all(&self.pool)
             .await
-            .map_err(|_| "无法读取 PostgreSQL 中的采集历史。")?;
+            .map_err(|error| {
+                diagnostics::postgres_error("postgres_history_failed", &error);
+                "无法读取 PostgreSQL 中的采集历史。"
+            })?;
         Ok(rows.iter().map(history_item).collect())
     }
 
@@ -186,7 +204,7 @@ impl Store {
              FROM collect_metadata_snapshots
              CROSS JOIN LATERAL jsonb_array_elements_text(document->'fields'->'original_languages') as languages(language)
              ORDER BY language"
-        ).fetch_all(&self.pool).await.map_err(|_| "无法读取历史记录中的语言。".into())
+        ).fetch_all(&self.pool).await.map_err(|error| { diagnostics::postgres_error("postgres_history_languages_failed", &error); "无法读取历史记录中的语言。".into() })
     }
 
     pub(crate) async fn load(&self, id: i64) -> Result<(HistoryItem, Value), String> {
@@ -197,7 +215,10 @@ impl Store {
             .bind(id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|_| "无法读取 PostgreSQL 中的采集快照。")?
+            .map_err(|error| {
+                diagnostics::postgres_error("postgres_snapshot_read_failed", &error);
+                "无法读取 PostgreSQL 中的采集快照。"
+            })?
             .ok_or("没有找到这条采集记录。")?;
         Ok((history_item(&row), row.get("document")))
     }

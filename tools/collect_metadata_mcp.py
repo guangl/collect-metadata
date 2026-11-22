@@ -5,6 +5,7 @@
 """Expose Collect Metadata's Web API to local MCP clients over stdio."""
 
 import os
+import re
 import unicodedata
 from typing import Annotated, Any, Literal
 
@@ -50,13 +51,20 @@ async def request(method: str, path: str, payload=None):
         raise ValueError("Could not reach the Collect Metadata Web service.") from None
     if response.status_code == 204:
         return None
+    request_id = response.headers.get("X-Request-ID", "")
+    reference = (
+        f" Diagnostic ID: {request_id}."
+        if re.fullmatch("[0-9a-f]{32}", request_id)
+        else ""
+    )
     try:
         data = response.json()
     except ValueError:
-        raise ValueError(f"Collect Metadata returned HTTP {response.status_code} without JSON.") from None
+        raise ValueError(f"Collect Metadata returned HTTP {response.status_code} without JSON.{reference}") from None
     if not response.is_success:
         message = data.get("error") if isinstance(data, dict) else None
-        raise ValueError(message or f"Collect Metadata returned HTTP {response.status_code}.")
+        detail = message if isinstance(message, str) and message else "Collect Metadata request failed."
+        raise ValueError(f"{detail} HTTP {response.status_code}.{reference}")
     return data
 
 

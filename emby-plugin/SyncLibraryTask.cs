@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -122,11 +123,11 @@ public sealed class SyncLibraryTask : IScheduledTask
                 else if (response.StatusCode == HttpStatusCode.BadRequest || response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
                 {
                     rejected++;
-                    logger.Warn("Collect Metadata rejected Emby item {0} (HTTP {1}).", id, (int)response.StatusCode);
+                    logger.Warn("Collect Metadata rejected Emby item {0} (HTTP {1}).{2}", id, (int)response.StatusCode, SyncDiagnosticReference(response));
                 }
                 else
                 {
-                    throw new InvalidOperationException($"Collect Metadata sync failed (HTTP {(int)response.StatusCode}). The next run will retry.");
+                    throw new InvalidOperationException($"Collect Metadata sync failed (HTTP {(int)response.StatusCode}).{SyncDiagnosticReference(response)} The next run will retry.");
                 }
             }
             progress.Report(100.0 * ++count / ids.Length);
@@ -136,5 +137,19 @@ public sealed class SyncLibraryTask : IScheduledTask
         {
             throw new InvalidOperationException("Some media items could not be synchronized. See the Emby log for item IDs.");
         }
+    }
+
+    private static string SyncDiagnosticReference(HttpResponseMessage response)
+    {
+        if (response.Headers.TryGetValues("X-Request-ID", out var values))
+        {
+            var id = values.FirstOrDefault();
+            if (id != null && id.Length == 32 &&
+                id.All(value => (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')))
+            {
+                return $" Diagnostic ID: {id}.";
+            }
+        }
+        return string.Empty;
     }
 }

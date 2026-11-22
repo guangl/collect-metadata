@@ -13,7 +13,7 @@ mod tmdb_settings;
 mod tests;
 
 use crate::{
-    EmbySettings, HistoryItem, MediaKind, MediaProvider, OutputSettings, SearchResult,
+    EmbySettings, HistoryItem, MediaKind, MediaProvider, OutputSettings, SearchResult, diagnostics,
     providers::{av, media},
     storage::Store,
 };
@@ -415,10 +415,10 @@ impl Collector {
             match self.store().await {
                 Ok(Some(store)) => match store.save(response.code(), &response.record).await {
                     Ok(item) => response.saved = Some(item),
-                    Err(error) => response.storage_error = Some(error),
+                    Err(error) => response.storage_error = Some(diagnostics::with_reference(error)),
                 },
                 Ok(None) => {}
-                Err(error) => response.storage_error = Some(error),
+                Err(error) => response.storage_error = Some(diagnostics::with_reference(error)),
             }
         }
         response

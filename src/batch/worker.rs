@@ -1,10 +1,14 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
 
 use super::{CandidateChoice, Claim, Outcome};
 use crate::{
-    Collector, MediaKind, MediaProvider, SearchResult,
+    Collector, MediaKind, MediaProvider, SearchResult, diagnostics,
     output::{PreparedWriteback, emby_source, prepare_writeback},
     providers::media::emby::Emby,
     storage::Store,
@@ -17,17 +21,32 @@ enum Work {
 
 impl Collector {
     pub async fn run_batch_worker(self: Arc<Self>) {
-        tokio::join!(self.batch_loop(), self.batch_loop(), self.batch_loop());
+        if self.storage_configured() {
+            diagnostics::info("batch_worker_started", json!({"concurrency": 3}));
+            tokio::join!(self.batch_loop(), self.batch_loop(), self.batch_loop());
+        }
     }
 
     async fn batch_loop(&self) {
-        if !self.storage_configured() {
-            return;
-        }
+        let mut queue_unavailable = false;
+        let mut last_error = None;
         let owner = self.output_settings().map(|settings| settings.owner());
         loop {
-            let delay = if let Ok(store) = self.require_store().await {
-                match store
+            let mut log_queue_error = |event, error: Option<&sqlx::Error>| {
+                queue_unavailable = true;
+                if last_error.is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(30))
+                {
+                    last_error = Some(Instant::now());
+                    if let Some(error) = error {
+                        diagnostics::postgres_error(event, error);
+                    } else {
+                        diagnostics::warn(event, json!({"retry_in_seconds": 2}));
+                    }
+                }
+                Duration::from_secs(2)
+            };
+            let delay = match self.require_store().await {
+                Ok(store) => match store
                     .claim_with_ai(
                         self.tmdb_configured(),
                         owner.as_deref(),
@@ -35,15 +54,27 @@ impl Collector {
                     )
                     .await
                 {
-                    Ok(Some(claim)) => {
-                        self.run_claim(store, &claim).await;
-                        continue;
+                    Ok(claim) => {
+                        if queue_unavailable {
+                            diagnostics::info("batch_queue_recovered", json!({}));
+                            queue_unavailable = false;
+                            last_error = None;
+                        }
+                        if let Some(claim) = claim {
+                            diagnostics::with_batch_row(
+                                claim.batch,
+                                claim.id,
+                                claim.attempt,
+                                self.run_claim(store, &claim),
+                            )
+                            .await;
+                            continue;
+                        }
+                        Duration::from_millis(600)
                     }
-                    Ok(None) => Duration::from_millis(600),
-                    Err(_) => Duration::from_secs(2),
-                }
-            } else {
-                Duration::from_secs(2)
+                    Err(error) => log_queue_error("batch_claim_failed", Some(&error)),
+                },
+                Err(_) => log_queue_error("batch_store_unavailable", None),
             };
             tokio::time::sleep(delay).await;
         }
@@ -53,8 +84,24 @@ impl Collector {
         let outcome = {
             let work = async {
                 if let Some((job, state)) = &claim.writeback {
-                    let result = store.batch_row_result(claim.batch, claim.id).await.ok()??;
-                    let paths = self.output_settings()?.media_paths();
+                    let result = match store.batch_row_result(claim.batch, claim.id).await {
+                        Ok(Some(result)) => result,
+                        Ok(None) => {
+                            diagnostics::error("batch_writeback_snapshot_missing", json!({}));
+                            return None;
+                        }
+                        Err(_) => {
+                            diagnostics::warn("batch_writeback_snapshot_read_failed", json!({}));
+                            return None;
+                        }
+                    };
+                    let paths = self
+                        .output_settings()
+                        .or_else(|| {
+                            diagnostics::error("batch_writeback_settings_missing", json!({}));
+                            None
+                        })?
+                        .media_paths();
                     let emby = self.emby_connection().ok();
                     Some(Work::Writeback(
                         prepare_writeback(
@@ -78,8 +125,13 @@ impl Collector {
                 tokio::select! {
                     outcome = &mut work => break outcome,
                     _ = heartbeat.tick() => {
-                        if !matches!(store.renew(claim).await, Ok(true)) {
-                            break None;
+                        match store.renew(claim).await {
+                            Ok(true) => {}
+                            Ok(false) => break None,
+                            Err(error) => {
+                                diagnostics::postgres_error("batch_lease_renew_failed", &error);
+                                break None;
+                            }
                         }
                     }
                 }
@@ -97,11 +149,13 @@ impl Collector {
                 Ok(true) => return,
                 Ok(false) => {}
                 Err(error) => {
-                    eprintln!("Batch item {} could not be committed: {}", claim.id, error);
+                    diagnostics::postgres_error("batch_commit_failed", &error);
                 }
             }
         }
-        let _ = store.release_revoked(claim).await;
+        if let Err(error) = store.release_revoked(claim).await {
+            diagnostics::postgres_error("batch_release_failed", &error);
+        }
     }
 
     async fn process_claim(&self, store: &Store, claim: &Claim) -> Option<Outcome> {
@@ -130,7 +184,12 @@ impl Collector {
         {
             match store.remembered_match(claim.kind, key).await {
                 Ok(value) => value,
-                Err(_) => return Some(Outcome::failed("无法读取已保存的作品匹配。".into())),
+                Err(error) => {
+                    diagnostics::postgres_error("batch_match_read_failed", &error);
+                    return Some(Outcome::failed(
+                        "无法读取已保存的作品匹配，请检查 PostgreSQL 连接后重试。".into(),
+                    ));
+                }
             }
         } else {
             None
@@ -178,7 +237,7 @@ impl Collector {
                     }
                     Err(outcome) => return Some(*outcome),
                 };
-                if !matches!(store.collecting(claim, candidate.as_ref()?).await, Ok(true)) {
+                if !mark_collecting(store, claim, candidate.as_ref()?).await {
                     return None;
                 }
             }
@@ -208,7 +267,7 @@ impl Collector {
                     Ok(found) => found,
                     Err(outcome) => return Some(*outcome),
                 };
-                if !matches!(store.collecting(claim, &found).await, Ok(true)) {
+                if !mark_collecting(store, claim, &found).await {
                     return None;
                 }
                 ai_matched = from_ai;
@@ -332,6 +391,16 @@ impl Collector {
         );
         outcome.candidates = serde_json::to_value(search.candidates).ok();
         Err(Box::new(outcome))
+    }
+}
+
+async fn mark_collecting(store: &Store, claim: &Claim, candidate: &CandidateChoice) -> bool {
+    match store.collecting(claim, candidate).await {
+        Ok(owned) => owned,
+        Err(error) => {
+            diagnostics::postgres_error("batch_collecting_failed", &error);
+            false
+        }
     }
 }
 

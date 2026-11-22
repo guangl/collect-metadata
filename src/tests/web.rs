@@ -25,8 +25,50 @@ async fn process_health_is_independent_of_postgres_readiness() {
         address,
         client: Client::builder().no_proxy().build().unwrap(),
     };
-    assert_eq!(api.send("/healthz", None).await.status(), StatusCode::NO_CONTENT);
-    assert_eq!(api.send("/readyz", None).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        api.send("/healthz", None).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        api.send("/readyz", None).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_api_requests_have_safe_errors_and_server_generated_ids() {
+    let collector = Arc::new(Collector::from_environment(None).unwrap());
+    let (address, server) = listen(router(collector)).await;
+    let client = Client::builder().no_proxy().build().unwrap();
+    let supplied = "do-not-echo";
+    let invalid = client
+        .post(format!("{address}/api/search?private={supplied}"))
+        .header("x-request-id", supplied)
+        .json(&json!({"kind": supplied, "query": supplied}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let id = invalid.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(id.len(), 32);
+    assert!(uuid::Uuid::parse_str(&id).is_ok());
+    assert_eq!(invalid.headers()[header::CACHE_CONTROL], "no-store");
+    let body = invalid.text().await.unwrap();
+    assert!(!body.contains(supplied));
+    assert!(serde_json::from_str::<Value>(&body).unwrap()["error"].is_string());
+
+    let unknown = client
+        .get(format!("{address}/api/old/{supplied}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert_ne!(unknown.headers()["x-request-id"].to_str().unwrap(), id);
+    assert!(unknown.json::<Value>().await.unwrap()["error"].is_string());
     server.abort();
 }
 

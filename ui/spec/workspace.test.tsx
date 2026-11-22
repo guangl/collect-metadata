@@ -398,6 +398,10 @@ describe("设置", () => {
     fireEvent.keyDown(tab, { key: "Home" });
     expect((screen.getByLabelText("输出路径") as HTMLInputElement).value).toBe("media");
     fireEvent.keyDown(tab, { key: "End" });
+    const diagnostics = screen.getByRole("tabpanel", { name: "日志与排查" });
+    expect(within(diagnostics).getByText("docker compose logs --since 30m app")).toBeTruthy();
+    expect(within(diagnostics).getByRole("button", { name: "下载排查手册" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "元数据语言" }));
     expect(screen.getByRole("tabpanel", { name: "元数据语言" })).toBeTruthy();
     await screen.findByRole("checkbox", { name: "简体中文（首选）" });
   });
@@ -746,6 +750,13 @@ it("识别非法输入及旧版本接口失败", async () => {
   expect(safeUrl("broken")).toBeNull();
   expect(languageName("1-invalid")).toBe("1-invalid");
   await expect(configureDatabase("none")).rejects.toThrow("服务端");
+  const id = "1234567890abcdef1234567890abcdef";
+  calls.mockResolvedValueOnce(new Response(JSON.stringify({ error: "数据库不可用" }), {
+    status: 503, headers: { "x-request-id": id },
+  }));
+  await expect(getBatchView(100)).rejects.toThrow("数据库不可用（诊断编号 " + id + "）");
+  calls.mockRejectedValueOnce(new TypeError("failed to fetch"));
+  await expect(getBatchView(100)).rejects.toThrow("无法连接 Collect Metadata Web");
   calls.mockResolvedValueOnce(new Response("broken", { status: 503 }));
   await expect(getBatchView(100)).rejects.toThrow("503");
 });

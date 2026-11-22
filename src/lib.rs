@@ -1,5 +1,6 @@
 mod batch;
 mod collect;
+pub mod diagnostics;
 mod output;
 mod providers;
 mod storage;

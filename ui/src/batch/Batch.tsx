@@ -113,6 +113,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const [refresh, setRefresh] = useState(0);
   const [opened, setOpened] = useState<{ id: number; response: LookupResponse; opener: HTMLButtonElement } | null>(null);
   const [aiConfigured, setAiConfigured] = useState(false);
+  const [aiStatusError, setAiStatusError] = useState<string | null>(null);
   const [correcting, setCorrecting] = useState<number | null>(null);
   const [changing, setChanging] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -145,9 +146,15 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     if (!active) return;
     let stopped = false;
     getAiStatus().then((configured) => {
-      if (!stopped) setAiConfigured(configured === true);
-    }, () => {
-      if (!stopped) setAiConfigured(false);
+      if (!stopped) {
+        setAiConfigured(configured === true);
+        setAiStatusError(null);
+      }
+    }, (error) => {
+      if (!stopped) {
+        setAiConfigured(false);
+        setAiStatusError("无法读取 AI 配置状态。 " + errorText(error));
+      }
     });
     return () => { stopped = true; };
   }, [active]);
@@ -493,8 +500,9 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
               </div>
             </li>)}
           </ul>
-        : <p className="catalog-empty">未识别到可刮削的作品。请更换文件夹。</p>}
+        : <p className="catalog-empty">未识别到可刮削的作品。请检查视频扩展名、片名或季集编号，也可以手动输入作品。</p>}
       </section>}
+      {aiStatusError && <p className="batch-error" role="alert">{aiStatusError}</p>}
       <details className="mt-4 text-sm [&>summary]:text-muted">
       <summary>手动输入作品</summary>
       <form className="panel batch-form mt-2" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit(false); }}>
@@ -567,6 +575,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
         <div className="mb-4 mt-5 [&_progress]:block [&_progress]:h-2.5 [&_progress]:w-full">
           <div className="section-heading">
             <h2>采集进度</h2>
+            <span className="muted">批次 #{selected}</span>
             <span aria-live="polite">已结束 {ended} / {rows.length}
               {running > 0 && " · 处理中 " + running}
               {waiting > 0 && " · 待选择 " + waiting}
@@ -602,7 +611,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
                   <p className="muted mt-1">{row.query.startsWith("emby-episode:") ? "分集" : mediaLabels[row.kind]}{row.title && " · " + languageText(row.original_languages)}</p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="batch-status" data-stage={row.stage}>{row.writeback === "queued" ? "等待写回" : row.writeback === "collecting" ? "正在写回" : labels[row.stage]}</span>
+                  <span className="batch-status" data-stage={row.stage} title={"条目 #" + row.id}>{row.writeback === "queued" ? "等待写回" : row.writeback === "collecting" ? "正在写回" : labels[row.stage]}</span>
                   {view.status !== "cancelled" && (row.stage === "failed" || row.stage === "not_found") && row.query &&
                     <button className="secondary" type="button" disabled={busy} onClick={() => changeRow(row)}>重试</button>}
                   {view.status !== "cancelled" && row.kind !== "av" && row.query && correcting !== row.id &&
@@ -618,7 +627,9 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
                     onClick={() => setWriteback({ row: row.id, title })}>
                     {row.writeback === "ready" ? "预览写回" : row.writeback === "failed" ? "查看失败并重试" : "查看写回记录"}
                   </button>}
-                {row.message && <p className="muted">{row.message}</p>}
+                {row.message && <p className={row.stage === "failed" ? "batch-error" : "muted"}>{row.message}</p>}
+                {(row.stage === "failed" || row.stage === "partial" || row.writeback === "failed") &&
+                  <p className="muted">条目 #{row.id}</p>}
                 {row.output && <div className="muted">
                   {row.output.directory && <p>已写出 {row.output.written} 项资料 · <code>{row.output.directory}</code></p>}
                   {row.output.message && <p className="batch-error">{row.output.message}</p>}

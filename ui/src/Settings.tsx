@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import type { KeyboardEvent } from "react";
 import { Database } from "./Database";
+import { Diagnostics } from "./Diagnostics";
 import { EmbySettings } from "./EmbySettings";
 import { LanguageSettings } from "./LanguageSettings";
 import { OutputSettings } from "./OutputSettings";
@@ -13,6 +14,7 @@ const sections = [
   ["emby", "家庭 Emby"],
   ["storage", "PostgreSQL"],
   ["languages", "元数据语言"],
+  ["diagnostics", "日志与排查"],
 ] as const;
 export type SettingsSection = typeof sections[number][0];
 
@@ -47,6 +49,7 @@ export function Settings({ section, onSection, storage, onStorage, onConnected, 
     emby: <EmbySettings />,
     storage: <Database storage={storage} onStorage={onStorage} onConnected={onConnected} />,
     languages: section === "languages" ? <LanguageSettings /> : null,
+    diagnostics: section === "diagnostics" ? <Diagnostics /> : null,
   };
 
   return (
@@ -55,8 +58,8 @@ export function Settings({ section, onSection, storage, onStorage, onConnected, 
         <h1 id="settings-title">设置</h1>
         <p>管理资料来源、数据库连接和刮削结果的输出方式。</p>
       </div>
-      <div className="mb-4 grid grid-cols-2 gap-1 rounded-lg border border-line bg-header p-1.5 sm:grid-cols-5 lg:sticky lg:top-3 lg:grid-cols-1" role="tablist" aria-label="设置分类">
-        {sections.map(([id, label], index) => <button className="tab-button last:col-span-2 sm:last:col-span-1 lg:justify-start lg:text-start" type="button" role="tab" key={id}
+      <div className="mb-4 grid grid-cols-2 gap-1 rounded-lg border border-line bg-header p-1.5 sm:grid-cols-3 lg:sticky lg:top-3 lg:grid-cols-1" role="tablist" aria-label="设置分类">
+        {sections.map(([id, label], index) => <button className="tab-button lg:justify-start lg:text-start" type="button" role="tab" key={id}
           id={"tab-" + id} aria-controls={"panel-" + id} aria-selected={section === id}
           tabIndex={section === id ? 0 : -1} ref={(button) => { buttons.current[index] = button; }}
           onKeyDown={(event) => move(event, index)} onClick={() => onSection(id)}>{label}</button>)}

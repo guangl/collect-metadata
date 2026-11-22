@@ -6,7 +6,7 @@
 
 **给本地文件夹和 Emby 媒体库用的自托管元数据刮削工具。** 在一个工作台里预览作品、提交后台任务、查看结果并导出资料。工作台不移动或改写原视频；Emby 插件另有默认关闭的散文件整理。
 
-[项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md)
+[项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md) · [日志与排查](docs/TROUBLESHOOTING.md)
 
 - **导入**：自动读取 Emby 全部媒体库，也可扫描本地文件夹、服务端挂载目录或手动输入作品清单。
 - **后台采集**：支持暂停、继续和重试；有多个匹配时可手动确认。任务与历史保存在 PostgreSQL。
@@ -342,6 +342,8 @@ cargo run --locked --no-default-features --features web --bin collect-metadata-w
 4. 验证 `/readyz`、历史列表和一个测试作品的写回预览。需要回退时，固定原镜像或重装原安装包，并把升级前的备份恢复到独立的数据库和配置副本后再切换。
 
 ### NAS 健康检查
+
+桌面版和 Web 版可在「设置 → 日志与排查」查看日志位置和下载排查手册。用诊断编号或批次编号查找相关事件。详见[报错排查手册](docs/TROUBLESHOOTING.md)。
 
 - `GET /healthz` 返回 204，代表 Web 进程可以响应。
 - `GET /readyz` 在限时检查 PostgreSQL 后返回 204 或 503。Docker 镜像用它报告容器健康状态；NAS 上的外部监控也可请求这个地址。

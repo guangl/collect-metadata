@@ -1,8 +1,9 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{Row, types::Json};
 
 use crate::{
     batch::Claim,
+    diagnostics,
     output::{PreparedWriteback, WritebackJob, WritebackState},
 };
 
@@ -112,12 +113,19 @@ impl Store {
         let (state, report) = tokio::task::spawn_blocking(move || output.publish(&id, state))
             .await
             .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        let details = json!({"written": report.written, "failed": report.failed});
+        let failed = report.failed > 0;
         sqlx::query(
             "UPDATE collect_metadata_batch_rows
              SET stage=$2, writeback_state=$3, output_report=$4, writeback_job=NULL, lease_until=NULL, updated_at=now()
              WHERE id=$1",
         ).bind(claim.id).bind(&job.stage).bind(Json(state)).bind(Json(report)).execute(&mut *tx).await?;
         tx.commit().await?;
+        if failed {
+            diagnostics::warn("batch_writeback_finished", details);
+        } else {
+            diagnostics::info("batch_writeback_finished", details);
+        }
         Ok(true)
     }
 }

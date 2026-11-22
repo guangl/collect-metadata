@@ -3,9 +3,12 @@ pub(crate) mod media;
 
 use reqwest::{Client, RequestBuilder, StatusCode, Url, header};
 use scraper::ElementRef;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::collect::{Fields, Source};
+use crate::{
+    collect::{Fields, Source},
+    diagnostics,
+};
 
 #[derive(Clone)]
 enum Failure {
@@ -47,7 +50,21 @@ async fn request_with_auth(
 }
 
 async fn request_text(url: &Url, build: impl Fn(Url) -> RequestBuilder) -> Result<String, Failure> {
+    let provider = match url.host_str() {
+        Some("api.bgm.tv") => "Bangumi",
+        Some("api.themoviedb.org") => "TMDB",
+        Some("api.tvmaze.com") => "TVmaze",
+        Some("www.wikidata.org") => "Wikidata",
+        Some("r18.dev") => "R18.dev",
+        Some("www.javdatabase.com") => "JAVDatabase",
+        Some("javdb.com") => "JavDB",
+        _ => "metadata_source",
+    };
     let unavailable = |error: reqwest::Error| {
+        diagnostics::warn(
+            "source_request_failed",
+            json!({"provider": provider, "reason": diagnostics::http_reason(&error)}),
+        );
         Failure::Unavailable(
             if error.is_timeout() {
                 "请求超时。"
@@ -62,6 +79,13 @@ async fn request_text(url: &Url, build: impl Fn(Url) -> RequestBuilder) -> Resul
     for _ in 0..4 {
         let mut response = build(current.clone()).send().await.map_err(unavailable)?;
         let status = response.status();
+        if status != StatusCode::NOT_FOUND && (status.is_client_error() || status.is_server_error())
+        {
+            diagnostics::warn(
+                "source_request_failed",
+                json!({"provider": provider, "status": status.as_u16()}),
+            );
+        }
         match status {
             StatusCode::NOT_FOUND => return Err(Failure::NotFound),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
@@ -113,6 +137,9 @@ impl Source {
     }
 
     fn failure(provider: &'static str, url: &Url, error: Failure) -> Self {
+        if matches!(error, Failure::Unavailable(_)) {
+            diagnostics::warn("source_detail_unavailable", json!({"provider": provider}));
+        }
         Self {
             provider,
             url: url.to_string(),

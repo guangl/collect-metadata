@@ -30,14 +30,45 @@ declare global {
 const invoke = window.__TAURI__?.core?.invoke;
 export const isDesktop = Boolean(invoke);
 
+function httpHint(status: number): string {
+  if (status === 401 || status === 403) return "请确认登录状态和访问权限。";
+  if (status === 404 || status === 405) return "请检查反向代理路径，并确认页面与服务端版本一致。";
+  if (status === 413) return "请缩小本次提交范围，或检查反向代理的请求大小限制。";
+  if (status === 429) return "请求过于频繁，请稍后重试。";
+  if (status >= 500) return "请检查 Web 服务、反向代理及应用日志。";
+  return "请刷新页面后重试，仍失败时查看应用日志。";
+}
+
 async function request<T>(route: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(route, options);
+  let response: Response;
+  try {
+    response = await fetch(route, options);
+  } catch {
+    throw new Error("无法连接 Collect Metadata Web。请确认服务在线、网络可达，恢复后重新操作。");
+  }
+  const id = response.headers.get("x-request-id") ?? "";
+  const reference = /^[a-f0-9]{32}$/.test(id) ? `（诊断编号 ${id}）` : "";
   if (!response.ok) {
-    const result: { error?: string } = await response.json().catch(() => ({}));
-    throw new Error(result.error || "服务请求失败（HTTP " + response.status + "）。");
+    const result = await response.json().catch(() => null);
+    const message = typeof result?.error === "string" && result.error.trim()
+      ? result.error
+      : `服务请求失败（HTTP ${response.status}）。${httpHint(response.status)}`;
+    throw new Error(message + reference);
   }
   if (response.status === 204) return undefined as T;
-  return response.json();
+  try {
+    return await response.json();
+  } catch {
+    throw new Error("Web 返回了无效的响应。请检查反向代理是否转到了登录页，并确认服务端版本。" + reference);
+  }
+}
+
+export function desktopLogDirectory(): Promise<string> {
+  return invoke!("desktop_log_directory");
+}
+
+export function openDesktopLogs(): Promise<void> {
+  return invoke!("open_desktop_logs");
 }
 
 function post<T>(path: string, data: unknown) {

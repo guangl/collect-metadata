@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, types::Json};
 
 use crate::{
@@ -7,6 +7,7 @@ use crate::{
         BatchAction, BatchItemInput, BatchRow, BatchStatus, BatchSummary, BatchView,
         CandidateChoice, Claim, MatchMode, Outcome,
     },
+    diagnostics,
     output::{ExportPlan, WritebackJob, WritebackState, emby_source},
 };
 
@@ -553,12 +554,13 @@ impl Store {
             Ok(prepared) => prepared.publish(),
             Err(report) => report,
         });
-        let stage =
-            if outcome.stage == "success" && report.as_ref().is_some_and(OutputReport::has_issue) {
-                "partial"
-            } else {
-                outcome.stage
-            };
+        let output_issue = report.as_ref().is_some_and(OutputReport::has_issue);
+        let output_counts = report.as_ref().map(|report| json!({"written": report.written, "failed": report.failed}));
+        let stage = if outcome.stage == "success" && output_issue {
+            "partial"
+        } else {
+            outcome.stage
+        };
         sqlx::query(
             "UPDATE collect_metadata_batch_rows SET stage=$2, message=$3, candidates=$4,
                  snapshot_id=coalesce($5, snapshot_id), result=$6, output_report=$7,
@@ -576,6 +578,12 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        let details = json!({"stage": stage, "output_issue": output_issue, "output": output_counts});
+        if stage == "failed" || stage == "partial" {
+            diagnostics::warn("batch_row_finished", details);
+        } else {
+            diagnostics::info("batch_row_finished", details);
+        }
         Ok(true)
     }
 

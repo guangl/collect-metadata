@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
 
 use super::MediaKind;
-use crate::{collect::Source, providers::field_map};
+use crate::{collect::Source, diagnostics, providers::field_map};
 
 const FIELDS: &str = concat!(
     "Path,Overview,People,ProviderIds,Genres,Studios,Tags,TagItems,Taglines,OriginalTitle,SortName,",
@@ -312,12 +312,30 @@ impl Emby {
             .header("X-Emby-Token", self.authorization.clone())
             .send()
             .await
-            .map_err(|_| "无法连接 Emby。")?;
+            .map_err(|error| {
+                let reason = diagnostics::http_reason(&error);
+                diagnostics::warn("emby_request_failed", json!({"reason": reason}));
+                if error.is_timeout() {
+                    "Emby 请求超时。请检查 Emby 负载和应用到 Emby 的网络。"
+                } else {
+                    "无法连接 Emby。请确认应用能访问设置中的 Emby 地址。"
+                }
+            })?;
         if !response.status().is_success() || response.url() != &url {
-            return Err(format!(
-                "Emby 请求失败（HTTP {}）。",
-                response.status().as_u16()
-            ));
+            let status = response.status();
+            if status != reqwest::StatusCode::NOT_FOUND {
+                diagnostics::warn(
+                    "emby_request_failed",
+                    json!({"status": status.as_u16()}),
+                );
+            }
+            let hint = match status.as_u16() {
+                401 | 403 => "请在「家庭 Emby」中测试 API 密钥和权限。",
+                404 => "请检查服务地址、代理子路径或媒体条目是否存在。",
+                301..=399 => "请填写可直接访问的 Emby 地址，确认协议和代理子路径。",
+                _ => "请查看 Emby 服务端日志。",
+            };
+            return Err(format!("Emby 请求失败（HTTP {}）。{hint}", status.as_u16()));
         }
         Ok(response)
     }

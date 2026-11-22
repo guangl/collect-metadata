@@ -7,6 +7,7 @@ async fn desktop_commands_work_without_a_database_and_keep_preferences() {
     let app = tauri::test::mock_app();
     let files = tempfile::tempdir().unwrap();
     let root = files.path();
+    diagnostics::init_desktop(root.join("logs"));
     let tmdb = Arc::new(TmdbSettings::from_file(root.join("token")).unwrap());
     let emby = Arc::new(EmbySettings::load(root.join("emby.json")).unwrap());
     let output = Arc::new(OutputSettings::load(root.join("output.json"), None).unwrap());
@@ -26,7 +27,20 @@ async fn desktop_commands_work_without_a_database_and_keep_preferences() {
     let state = || app.state::<DesktopState>();
 
     assert!(!storage_configured(state()));
-    assert!(check_storage(state()).await.is_err());
+    let connection_error = check_storage(state()).await.unwrap_err();
+    let id = connection_error
+        .rsplit_once("诊断编号 ")
+        .unwrap()
+        .1
+        .trim_end_matches('）');
+    assert!(uuid::Uuid::parse_str(id).is_ok());
+    let log_directory = desktop_log_directory().await.unwrap();
+    let log =
+        fs::read_to_string(PathBuf::from(log_directory).join("collect-metadata.log")).unwrap();
+    let entry: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["event"], "desktop_command_failed");
+    assert_eq!(entry["request_id"], id);
+    assert_eq!(entry["details"]["command"], "check_storage");
     assert!(configure_database(state(), "  ".into()).await.is_err());
     assert!(history(state(), None, None, None).await.unwrap().is_empty());
     assert!(history_languages(state()).await.unwrap().is_empty());

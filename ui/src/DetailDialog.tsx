@@ -44,7 +44,7 @@ export function DetailDialog({ response, opener, closeLabel, onDismiss }: {
         </button>
       </header>
       <div className="detail-content">
-        {notice && <p className="detail-notice" role="status" data-kind={notice.error ? "error" : undefined}>{notice.message}</p>}
+        {notice && <p className="detail-notice" role={notice.error ? "alert" : "status"} data-kind={notice.error ? "error" : undefined}>{notice.message}</p>}
         <Movie response={response} onNotice={showInfo} onError={showError} />
       </div>
     </dialog>

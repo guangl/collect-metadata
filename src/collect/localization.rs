@@ -5,6 +5,8 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::diagnostics;
+
 pub(super) mod records;
 
 pub(crate) const DEFAULT: &str = "zh-CN";
@@ -304,24 +306,13 @@ impl Translator {
         target: &str,
         batch: &[(&String, &String)],
     ) -> Option<Texts> {
-        let result = client.post(self.endpoint.clone()).bearer_auth(&self.token)
-            .timeout(Duration::from_secs(18))
-            .json(&json!({"target_language":target,"texts":batch.iter().map(|(_, text)| text).collect::<Vec<_>>()}))
-            .send().await.ok()?.error_for_status().ok()?;
-        const MAX_RESPONSE: usize = 160_000;
-        let mut body = Vec::new();
-        let mut chunks = result.bytes_stream();
-        while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.ok()?;
-            if body.len() + chunk.len() > MAX_RESPONSE {
-                return None;
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let result: TranslationResult = serde_json::from_slice(&body).ok()?;
-        if result.translations.len() != batch.len() {
-            return None;
-        }
+        let result = self
+            .send(client, target, batch)
+            .await
+            .map_err(|details| {
+                diagnostics::warn("translation_request_failed", details);
+            })
+            .ok()?;
         Some(
             batch
                 .iter()
@@ -334,6 +325,37 @@ impl Translator {
                 })
                 .collect(),
         )
+    }
+    async fn send(
+        &self,
+        client: &Client,
+        target: &str,
+        batch: &[(&String, &String)],
+    ) -> Result<TranslationResult, Value> {
+        let response = client.post(self.endpoint.clone()).bearer_auth(&self.token)
+            .timeout(Duration::from_secs(18))
+            .json(&json!({"target_language":target,"texts":batch.iter().map(|(_, text)| text).collect::<Vec<_>>()}))
+            .send().await.map_err(|error| json!({"reason": diagnostics::http_reason(&error)}))?;
+        if !response.status().is_success() {
+            return Err(json!({"status": response.status().as_u16()}));
+        }
+        const MAX_RESPONSE: usize = 160_000;
+        let mut body = Vec::new();
+        let mut chunks = response.bytes_stream();
+        while let Some(chunk) = chunks.next().await {
+            let chunk =
+                chunk.map_err(|error| json!({"reason": diagnostics::http_reason(&error)}))?;
+            if body.len() + chunk.len() > MAX_RESPONSE {
+                return Err(json!({"reason": "response_too_large"}));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let result: TranslationResult =
+            serde_json::from_slice(&body).map_err(|_| json!({"reason": "invalid_json"}))?;
+        if result.translations.len() != batch.len() {
+            return Err(json!({"reason": "unexpected_translation_count"}));
+        }
+        Ok(result)
     }
 }
 

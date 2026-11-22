@@ -225,5 +225,6 @@ export const mediaLabels: Record<MediaType, string> = {
 };
 
 export function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return message.trim() || "操作失败。请重试，仍失败时查看「设置 → 日志与排查」。";
 }

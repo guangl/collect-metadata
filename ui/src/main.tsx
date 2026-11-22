@@ -100,6 +100,7 @@ function History({ storage, onStorage, onOpen, onError }: {
   const [kind, setKind] = useState<MediaType | "">("");
   const [language, setLanguage] = useState("");
   const [codes, setCodes] = useState<string[]>([]);
+  const [languageError, setLanguageError] = useState<string | null>(null);
   const sequence = useRef(0);
   const openingSequence = useRef(0);
   const canRead = storage !== "none" && storage !== "pending";
@@ -133,8 +134,12 @@ function History({ storage, onStorage, onOpen, onError }: {
   }, [canRead, refresh]);
 
   useEffect(() => {
-    if (canRead) getHistoryLanguages().then(setCodes, () => {});
-    return () => { openingSequence.current += 1; };
+    let active = true;
+    if (canRead) getHistoryLanguages().then(
+      (codes) => { if (active) { setCodes(codes); setLanguageError(null); } },
+      (error) => { if (active) setLanguageError(errorText(error)); },
+    );
+    return () => { active = false; openingSequence.current += 1; };
   }, [canRead]);
 
   async function open(id: number, opener: HTMLButtonElement) {
@@ -150,8 +155,8 @@ function History({ storage, onStorage, onOpen, onError }: {
     }
   }
 
-  const status = storage === "none" ? "连接 PostgreSQL 后即可查看采集历史。" :
-    busy || storage === "pending" ? "正在读取采集历史…" : error || (!items.length ? "没有符合条件的采集记录。" : "");
+  const status = error ? "" : storage === "none" ? "连接 PostgreSQL 后即可查看采集历史。" :
+    busy || storage === "pending" ? "正在读取采集历史…" : !items.length ? "没有符合条件的采集记录。" : "";
 
   return (
     <section aria-labelledby="history-title">
@@ -169,6 +174,8 @@ function History({ storage, onStorage, onOpen, onError }: {
         <LanguageSelect codes={codes} value={language} onChange={setLanguage} disabled={!canRead} />
         <button type="button" className="secondary sm:ms-auto" onClick={() => refresh()} disabled={busy || !canRead}>刷新</button>
       </div>
+      {languageError && <p className="batch-error" role="alert">{languageError}</p>}
+      {error && <p className="batch-error" role="alert">{error}</p>}
       {status && <p className="catalog-empty" role="status">{status}</p>}
       <div className="poster-grid">
         {items.map((item) => <PosterCard key={item.id} title={item.title || item.code}
@@ -195,7 +202,10 @@ export function App() {
   const showError = (message: string) => setNotice({ message, kind: "error" });
 
   useEffect(() => {
-    getStorageStatus().then(setStorage, () => setStorage("failed"));
+    getStorageStatus().then(setStorage, (error) => {
+      setStorage("failed");
+      setNotice({ message: errorText(error), kind: "error" });
+    });
   }, []);
 
   function navigate(next: View) {
@@ -218,11 +228,19 @@ export function App() {
     navigate("settings");
   }
 
+  function openDiagnostics() {
+    setSettingsSection("diagnostics");
+    navigate("settings");
+  }
+
   return (
     <div className="min-h-screen">
       <WorkspaceHeader view={view} setView={navigate} storage={storage} openStorage={openStorage} theme={theme} setTheme={setTheme} />
       <main className="min-w-0">
-        {notice && <div className="mx-auto max-w-workspace px-gutter pt-3 text-sm text-accent [overflow-wrap:anywhere] data-[kind=error]:text-danger" role="status" data-kind={notice.kind}>{notice.message}</div>}
+        {notice && <div className="mx-auto max-w-workspace px-gutter pt-3 text-sm text-accent [overflow-wrap:anywhere] data-[kind=error]:text-danger" role={notice.kind === "error" ? "alert" : "status"} data-kind={notice.kind}>
+          {notice.message}
+          {notice.kind === "error" && <button type="button" className="ms-2 underline" onClick={openDiagnostics}>日志与排查</button>}
+        </div>}
         <div className="mx-auto max-w-workspace px-gutter pb-14 pt-6 sm:pt-9 lg:pt-12">
           <div hidden={view !== "batch"}><Batch key={databaseVersion} active={view === "batch"} storage={storage}
             folderSelection={folderSelection} setFolderSelection={setFolderSelection} onConfigure={openStorage}

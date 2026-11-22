@@ -4,6 +4,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY *.config.ts tsconfig.json ./
 COPY ui ui
+COPY docs/TROUBLESHOOTING.md docs/TROUBLESHOOTING.md
 RUN npm run build
 
 FROM rust:1.100-bookworm AS build

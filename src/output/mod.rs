@@ -24,8 +24,8 @@ pub use settings::{OutputOptions, OutputSettings, OutputSettingsView};
 #[derive(Clone, Deserialize, Serialize)]
 pub struct OutputReport {
     directory: Option<String>,
-    written: usize,
-    failed: usize,
+    pub(crate) written: usize,
+    pub(crate) failed: usize,
     message: Option<String>,
 }
 

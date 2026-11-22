@@ -25,6 +25,11 @@ services:
     volumes:
       - tmdb_config:/var/lib/collect-metadata
       - "${SCRAPE_OUTPUT_MOUNT:-scrape_output}:/output"
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
   db:
     image: postgres:17-bookworm

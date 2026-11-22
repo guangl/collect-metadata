@@ -4,7 +4,7 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{Collector, MediaKind, providers::media::Candidate};
+use crate::{Collector, MediaKind, diagnostics, providers::media::Candidate};
 
 pub(crate) struct Ai {
     endpoint: Url,
@@ -135,12 +135,19 @@ impl Ai {
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);
         }
-        let mut response = request
-            .send()
-            .await
-            .map_err(|_| "AI 服务连接失败或超时。")?;
+        let mut response = request.send().await.map_err(|error| {
+            diagnostics::warn(
+                "ai_request_failed",
+                json!({"reason": diagnostics::http_reason(&error)}),
+            );
+            "无法连接 AI 服务或请求超时。请检查 AI 接口地址和网络。"
+        })?;
         if !response.status().is_success() {
-            return Err(format!("AI 服务返回 HTTP {}。", response.status().as_u16()));
+            let status = response.status().as_u16();
+            diagnostics::warn("ai_request_failed", json!({"status": status}));
+            return Err(format!(
+                "AI 服务返回 HTTP {status}。请检查服务地址、模型和 API Key。"
+            ));
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| "无法读取 AI 响应。")? {
@@ -224,6 +231,7 @@ impl Collector {
             .ok_or("未配置 AI 服务。")?
             .suggest(&self.client, kind, title, year, candidates)
             .await
+            .inspect_err(|_| diagnostics::warn("ai_match_failed", json!({})))
     }
 }
 
