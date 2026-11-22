@@ -8,6 +8,7 @@ fn extracts_exact_editions_and_retains_artwork_and_credit_roles() {
           <div class="panel-block first-block"><strong>番号:</strong><span class="value">ZZZ - 005</span></div>
           <div class="panel-block"><strong>評分:</strong><span class="value">4.25 分 (12 人)</span></div>
           <div class="panel-block"><strong>時長:</strong><span class="value">80 分鐘</span></div>
+          <div class="panel-block"><strong>簡介:</strong><span class="value">这是一段中文简介。</span></div>
           <div class="panel-block"><strong>演員:</strong><span class="value">
             <a href="/actors/1" class="cast actor-female">演员甲</a>
             <a href="/actors/2" class="actor-male">演员乙</a>
@@ -21,6 +22,11 @@ fn extracts_exact_editions_and_retains_artwork_and_credit_roles() {
     let id = Identifier::parse("ZZZ-005").unwrap();
     let work = parse(detail, &url, &id).ok().unwrap();
     assert_eq!(work.fields["title_original"], "原片名");
+    assert_eq!(work.data["chinese_metadata"]["title"], "站点标题");
+    assert_eq!(
+        work.data["chinese_metadata"]["description"],
+        "这是一段中文简介。"
+    );
     assert_eq!(work.fields["runtime_minutes"], 80);
     assert_eq!(
         work.fields["rating"],

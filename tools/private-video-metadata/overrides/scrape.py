@@ -21,7 +21,7 @@ from .catalog import VIDEO_EXT, normalize
 from .filesystem import atomic_write_bytes
 from .nfo import build_nfo, supplement_nfo
 from .publisher import fetch_publisher, merge_publisher
-from .sources import fetch_javbus, fetch_javdb, merge_sources
+from .sources import fetch_javbus, fetch_javdb, fetch_r18_text, merge_sources
 
 
 def do_inspect(folders):
@@ -48,6 +48,7 @@ def do_inspect(folders):
 
 
 def collect_metadata(fetcher, code, *, include_digital=True):
+    # Collect the catalog fields before generating any localized display text.
     bus = fetch_javbus(fetcher, code)
     db = fetch_javdb(fetcher, code)
     data = merge_sources(bus, db)
@@ -56,7 +57,14 @@ def collect_metadata(fetcher, code, *, include_digital=True):
             source for source, found in (("javbus", bus), ("javdb", db)) if found
         )
     publisher = fetch_publisher(fetcher, code, include_digital=include_digital)
-    return merge_publisher(data, publisher)
+    data = merge_publisher(data, publisher) or {}
+    if data and not data.get("plot"):
+        fallback = fetch_r18_text(fetcher, code) or {}
+        missing = {key: value for key, value in fallback.items() if not data.get(key)}
+        if missing:
+            data.update(missing)
+            data["source"] = "+".join(filter(None, [data.get("source"), "r18"]))
+    return data or None
 
 
 def probe_video(path):

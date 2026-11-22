@@ -10,6 +10,7 @@ from xml.etree import ElementTree as ET
 from javlibrarian import localize, scrape
 from javlibrarian.nfo import build_nfo
 from javlibrarian.publisher import fetch_publisher
+from javlibrarian.sources import JAVBUS, JAVDB, R18
 
 
 OFFICIAL = 'https://ideapocket.com/works/detail/idpc032'
@@ -40,6 +41,56 @@ class FakeFetcher:
 
 
 class PrivateMetadataTest(TestCase):
+    def test_catalog_chinese_wins_per_field_and_short_tags_skip_the_model(self):
+        search = f'{JAVDB}/search?q=IDPC-032&f=all'
+        primary = f'{JAVDB}/v/matching?locale=zh'
+        bus = f'{JAVBUS}/IDPC-032'
+        fetcher = FakeFetcher({
+            search: '<a href="/v/matching"><strong>IDPC-032</strong></a>',
+            primary: '''
+                <h2 class="title"><strong>IDPC-032</strong>
+                  <strong class="current-title">青春的中文標題</strong>
+                  <span class="origin-title">青春のタイトル</span>
+                </h2>
+                <div><strong>簡介:</strong><span class="value">這是中文簡介。</span></div>
+            ''',
+            bus: '''
+                <a class="bigImage" href="/cover.jpg"></a><h3>青春のタイトル</h3>
+                <div class="col-md-3 info">
+                  <p><span class="header">識別碼:</span> IDPC-032</p>
+                  <span class="genre"><a href="/genre/1">苗條</a></span>
+                </div>
+            ''',
+            OFFICIAL: PAGE.replace("FIRST IMPRESSION 197 ", "")
+                          .replace('<a>FIRST IMPRESSION</a>', '') + """
+                <meta name="description" content="通用網站文案">
+            """,
+        })
+        data = scrape.collect_metadata(fetcher, 'IDPC-032', include_digital=False)
+        data["genres"] += ["スレンダー", "アクメ・オーガズム", "未登録の分類"]
+        with patch.object(localize, 'load_model', side_effect=AssertionError('catalog text exists')):
+            nfo = ET.fromstring(build_nfo(data, [], 'IDPC-032'))
+        self.assertEqual(nfo.findtext('title'), 'IDPC-032 青春的中文标题')
+        self.assertEqual(nfo.findtext('originaltitle'), '青春のタイトル')
+        self.assertEqual(nfo.findtext('plot'), '这是中文简介。')
+        self.assertEqual(nfo.findtext('originalplot'), '最初の文章。次の文章。')
+        self.assertEqual([e.text for e in nfo.findall('genre')], ['苗条', '高潮', '未登録の分類'])
+
+    def test_r18_text_fills_missing_original_plot_only_for_a_verified_id(self):
+        bus = f'{JAVBUS}/SNOS-384'
+        dvd = f'{R18}/dvd_id=SNOS-384/json'
+        combined = f'{R18}/combined=snos00384/json'
+        pages = {
+            bus: '<a class="bigImage" href="/cover.jpg"></a><h3>カタログタイトル</h3>',
+            dvd: '{"content_id":"snos00384"}',
+            combined: '{"content_id":"snos00384","title_ja":"別表記","comment_ja":"元の説明です。"}',
+        }
+        data = scrape.collect_metadata(FakeFetcher(pages), 'SNOS-384')
+        self.assertEqual((data['source'], data['title'], data['plot']),
+                         ('javbus+r18', 'カタログタイトル', '元の説明です。'))
+        pages[combined] = pages[combined].replace('snos00384', 'snos00385')
+        self.assertNotIn('plot', scrape.collect_metadata(FakeFetcher(pages), 'SNOS-384'))
+
     def test_publisher_and_retailer_supply_separate_dates(self):
         fetcher = FakeFetcher({
             OFFICIAL: PAGE,
@@ -83,6 +134,9 @@ class PrivateMetadataTest(TestCase):
             self.assertEqual(localize.title_chinese(source), '把青春献给舞台的歌手')
         with patch.object(localize, 'chinese', return_value='完全不相关'):
             self.assertEqual(localize.title_chinese(source), source)
+        with patch.object(localize, 'chinese', return_value='最强女主角的皮士利和手可乐'):
+            title = '最強ヒロインのパイズリと手コキ'
+            self.assertEqual(localize.title_chinese(title), title)
 
     def test_publisher_rejects_a_different_catalog_number(self):
         page = PAGE.replace('IDPC032</p>', 'IDPC033</p>') + '<p><span>DVD</span>IDPC032</p>'

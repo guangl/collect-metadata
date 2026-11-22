@@ -1,12 +1,15 @@
 """JavBus and JavDB metadata adapters and merge policy."""
 
 import html
+import json
 import re
 
 
 JAVBUS = "https://www.javbus.com"
 JAVDB = "https://javdb.com"
-KANA = re.compile(r"[぀-ヿ]")
+R18 = "https://r18.dev/videos/vod/movies/detail/-"
+KANA = re.compile(r"[\u3040-\u30ff\uff66-\uff9d]")
+HAN = re.compile(r"[\u3400-\u9fff]")
 
 
 def _clean(text):
@@ -23,6 +26,12 @@ def _same_code(left, right):
         return (value or "").upper()
 
     return normalize(left) == normalize(right)
+
+
+def _chinese_catalog_text(value):
+    if value and HAN.search(value) and not KANA.search(value):
+        return value
+    return None
 
 
 def parse_javbus(page_html, code):
@@ -56,6 +65,16 @@ def parse_javbus(page_html, code):
     data["dvdid"] = page_id or code
     if page_id:
         data["javbusid"] = f"{JAVBUS}/{code}"
+        for key, label in (
+            ("title_cn", r"中文(?:標題|标题|片名)"),
+            ("plot_cn", r"(?:中文)?(?:簡介|简介|劇情簡介|剧情简介)"),
+        ):
+            match = re.search(
+                rf'<span class="header">{label}\s*[:：]\s*</span>(.*?)</p>',
+                block, re.S,
+            )
+            if match and (value := _chinese_catalog_text(_clean(match[1]))):
+                data[key] = value
     data["release"] = field("發行日期")
     data["studio"] = field("製作商")
     data["label"] = field("發行商")
@@ -149,10 +168,21 @@ def fetch_javdb(fetcher, code):
         return None
     parts = re.findall(r"<strong[^>]*>(.*?)</strong>", match.group(1), re.S)
     page_id = _clean(parts[0]) if parts else None
-    if page_id and not _same_code(page_id, code):
+    if not _same_code(page_id, code):
         return None
-    data["dvdid"] = page_id or code
-    data["title"] = _clean(parts[1]) if len(parts) > 1 else code
+    data["dvdid"] = page_id
+    current_title = _clean(parts[1]) if len(parts) > 1 else code
+    original = re.search(r'<[^>]+class="[^"]*\borigin-title\b[^"]*"[^>]*>(.*?)</[^>]+>', match[1], re.S)
+    original_title = _clean(original[1]) if original else None
+    data["title"] = original_title or current_title
+    if original_title and original_title != current_title:
+        data["title_cn"] = _chinese_catalog_text(current_title)
+    synopsis = _javdb_field(page, "簡介", "简介", "劇情簡介", "剧情简介", "Synopsis")
+    if synopsis:
+        if localized := _chinese_catalog_text(synopsis):
+            data["plot_cn"] = localized
+        else:
+            data["plot"] = synopsis
 
     data["release"] = _javdb_field(page, "日期")
     data["studio"] = _javdb_field(page, "片商")
@@ -201,11 +231,8 @@ def merge_sources(bus, db):
     if not db:
         return data
 
-    db_title = (db.get("title") or "").strip()
-    if db_title and not KANA.search(db_title):
-        data["title_cn"] = db_title
-
-    for field in ("release", "runtime", "studio", "label", "series", "director"):
+    for field in ("release", "runtime", "studio", "label", "series", "director",
+                  "title_cn", "plot_cn", "plot"):
         if not data.get(field) and db.get(field):
             data[field] = db[field]
 
@@ -225,3 +252,37 @@ def merge_sources(bus, db):
         else:
             data["samples"] = db["samples"]
     return data
+
+
+def fetch_r18_text(fetcher, code):
+    """Use the verified digital catalog as a fallback for missing Japanese text."""
+    if not re.fullmatch(r"[A-Z]+-\d+", code, re.I):
+        return None
+
+    def lookup(kind, ident):
+        status, body = fetcher.get(f"{R18}/{kind}={ident}/json", max_retry=1)
+        if status != 200 or not body:
+            return None
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    entry = lookup("dvd_id", code) or {}
+    content_id = entry.get("content_id")
+    if not isinstance(content_id, str) or not re.fullmatch(r"[a-zA-Z0-9]+", content_id):
+        return None
+    dvd_id = entry.get("dvd_id")
+    if not _same_code(content_id, code) and not (
+        isinstance(dvd_id, str) and _same_code(dvd_id, code)
+    ):
+        return None
+    details = lookup("combined", content_id) or {}
+    if details.get("content_id") != content_id:
+        return None
+    return {
+        output: value.strip()
+        for output, key in (("title", "title_ja"), ("plot", "comment_ja"))
+        if isinstance(value := details.get(key), str) and value.strip()
+    }

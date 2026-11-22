@@ -6,4 +6,6 @@ The worker saves the original `Samples/sampleN.jpg` and copies each image to the
 
 For supported publishers, the worker verifies the catalog number on the publisher's product page and uses it for the original title, studio, series, label and physical release date. It keeps retailer streaming dates separate from physical and catalog dates. It preserves numbered series names when translating a title and keeps the original synopsis alongside its localized text. New per-video NFOs use the measured runtime and stream details from `ffprobe` when available. Shared folder NFOs use the catalog runtime when there are multiple videos.
 
+The worker checks JavBus, JavDB and the supported publisher before localizing each field. It uses a matching catalog's Chinese title and synopsis when available and checks R18.dev for a missing Japanese synopsis. The local model translates display text only where no Chinese catalog text is available. Category labels use existing catalog wording and fixed term mappings. Unrecognized labels and text that fails translation checks retain their source wording.
+
 The Python overlays derive from [JavLibrarian](https://github.com/syy674998887/JavLibrarian) at `13d1b6a` and the NAS's existing customizations. The upstream files are available under the [Apache 2.0 license](https://github.com/syy674998887/JavLibrarian/blob/13d1b6a/LICENSE).

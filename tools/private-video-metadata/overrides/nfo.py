@@ -66,7 +66,7 @@ def build_nfo(data, tags, folder_name, video_info=None):
     add(root, "title", f"{code} {display_title}".strip())
     add(root, "originaltitle", original_title or display_title)
     add(root, "sorttitle", code)
-    add(root, "plot", data.get("plot"))
+    add(root, "plot", data.get("plot_cn") or data.get("plot"))
     add(root, "originalplot", data.get("plot"))
     add(root, "website", data.get("website"))
     add(root, "num", code)
@@ -135,7 +135,7 @@ def build_nfo(data, tags, folder_name, video_info=None):
     add(root, "source", data.get("source"))
     add(root, "originalfolder", folder_name)
 
-    localize(root)
+    localize(root, catalog_title=bool(data.get("title_cn")), catalog_plot=bool(data.get("plot_cn")))
     _add_supplemental_fields(root, data)
     raw = ET.tostring(root, encoding="utf-8")
     return minidom.parseString(raw).toprettyxml(indent="  ", encoding="UTF-8")

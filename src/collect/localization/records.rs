@@ -231,7 +231,25 @@ fn official_catalog(record: &Value, targets: &[String]) -> (Translations, Transl
     }
     let fields = &record["fields"];
     if record["media_type"] == "av" {
+        let javdb = record["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|source| source["provider"] == "JavDB");
         for target in targets {
+            if language_base(target) == "zh"
+                && let Some(javdb) = javdb
+            {
+                let editions = javdb["data"]["alternate_editions"].as_array();
+                for field in ["title", "description"] {
+                    if let Some(value) = std::iter::once(javdb)
+                        .chain(editions.into_iter().flatten())
+                        .find_map(|source| text(&source["data"]["chinese_metadata"][field]))
+                    {
+                        insert(target, field, value, "JavDB");
+                    }
+                }
+            }
             if let Some(key) = match language_base(target) {
                 "ja" => Some("title_ja"),
                 "en" => Some("title_en"),
@@ -369,6 +387,25 @@ pub(crate) async fn sync_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uses_av_catalog_chinese_per_field_across_matching_editions() {
+        let record = json!({
+            "media_type":"av",
+            "fields":{"title_ja":"日本語の題名"},
+            "field_sources":{"title_ja":"R18.dev"},
+            "sources":[{"provider":"JavDB","data":{
+                "chinese_metadata":{"title":"中文片名"},
+                "alternate_editions":[{"data":{"chinese_metadata":{"description":"中文简介"}}}]
+            }}]
+        });
+        let (variants, origins) = official_catalog(&record, &["zh-CN".into(), "ja".into()]);
+        assert_eq!(variants["zh-CN"]["title"], "中文片名");
+        assert_eq!(variants["zh-CN"]["description"], "中文简介");
+        assert_eq!(origins["zh-CN"]["description"], "JavDB");
+        assert_eq!(variants["ja"]["title"], "日本語の題名");
+        assert!(!variants["ja"].contains_key("description"));
+    }
 
     #[test]
     fn episode_overview_prefers_target_catalog_and_preserves_emby_chinese() {

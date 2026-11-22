@@ -7,7 +7,8 @@ pub(super) async fn lookup(client: &Client, code: &Identifier) -> Source {
     search_url
         .query_pairs_mut()
         .append_pair("q", &code.search_candidate())
-        .append_pair("f", "all");
+        .append_pair("f", "all")
+        .append_pair("locale", "zh");
     let pages = match request(client, &search_url, "text/html")
         .await
         .and_then(|html| exact_matches(&html, &search_url, code))
@@ -18,7 +19,9 @@ pub(super) async fn lookup(client: &Client, code: &Identifier) -> Source {
     let mut first_error = None;
     let mut sources = Vec::new();
     let details = futures_util::future::join_all(pages.iter().take(4).map(|url| async {
-        request(client, url, "text/html")
+        let mut localized_url = url.clone();
+        localized_url.query_pairs_mut().append_pair("locale", "zh");
+        request(client, &localized_url, "text/html")
             .await
             .and_then(|html| parse(&html, url, code))
     }))
@@ -138,6 +141,14 @@ fn parse(html: &str, url: &Url, code: &Identifier) -> Result<Source, Failure> {
     let current_title = first_text(&document, ".video-detail .current-title");
     let original_title = first_text(&document, ".video-detail .origin-title");
     let title = original_title.as_ref().or(current_title.as_ref());
+    let chinese_title = current_title.as_deref().filter(|&current| {
+        original_title
+            .as_deref()
+            .is_some_and(|original| original != current)
+            && chinese_catalog_text(current)
+    });
+    let synopsis = value(&["簡介", "简介", "劇情簡介", "剧情简介", "Synopsis"]);
+    let chinese_synopsis = synopsis.as_str().filter(|text| chinese_catalog_text(text));
     let image = |selector, name| {
         attribute(&document, selector, name).and_then(|value| web_url(url, &value))
     };
@@ -223,7 +234,7 @@ fn parse(html: &str, url: &Url, code: &Identifier) -> Result<Source, Failure> {
             "genres",
             names(Some(&json!(row_links(&["類別", "类别", "Tags", "Genres"])))),
         ),
-        ("description", value(&["簡介", "简介", "Synopsis"])),
+        ("description", synopsis.clone()),
         (
             "rating",
             score
@@ -240,11 +251,19 @@ fn parse(html: &str, url: &Url, code: &Identifier) -> Result<Source, Failure> {
             "rows": rows,
             "current_title": current_title,
             "original_title": original_title,
+            "chinese_metadata": {"title": chinese_title, "description": chinese_synopsis},
             "cover_url": cover,
             "gallery": gallery,
             "community_activity": first_text(&document, ".movie-panel-info > .panel-block > .has-text-grey"),
         }),
     ))
+}
+
+fn chinese_catalog_text(value: &str) -> bool {
+    value.chars().any(|c| matches!(c, '\u{3400}'..='\u{9fff}'))
+        && !value
+            .chars()
+            .any(|c| matches!(c, '\u{3040}'..='\u{30ff}' | '\u{ff66}'..='\u{ff9d}'))
 }
 
 #[cfg(test)]

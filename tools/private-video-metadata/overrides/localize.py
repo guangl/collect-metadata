@@ -13,6 +13,20 @@ HAN = re.compile(r'[\u3400-\u9fff]')
 CONVERTER = OpenCC('t2s')
 BROKEN_TEXT = re.compile(r'[�⁇]|[?？]{2,}')
 KANJI_PAIRS = re.compile(r'(?=([\u3400-\u9fff]{2}))')
+GENRE_NAMES = {
+    'アクメ・オーガズム': '高潮',
+    'おもちゃ': '玩具',
+    'スレンダー': '苗条',
+    'パイズリ': '乳交',
+    'ブルーレイ': '蓝光',
+    'blu-ray（ブルーレイ）': '蓝光',
+    '単体作品': '单体作品',
+}
+TITLE_TERMS = {
+    'チアガール': ('啦啦',),
+    'パイズリ': ('乳交',),
+    '手コキ': ('手淫', '用手'),
+}
 
 
 @lru_cache(maxsize=1)
@@ -29,11 +43,14 @@ def load_model():
 @lru_cache(maxsize=256)
 def chinese(text):
     if KANA.search(text):
-        translator, tokenizer = load_model()
-        tokens = ['jpn_Jpan', *tokenizer.encode(text, out_type=str), '</s>']
-        result = translator.translate_batch([tokens], target_prefix=[['zho_Hans']],
-                                            beam_size=4, max_decoding_length=512)
-        translated = tokenizer.decode(result[0].hypotheses[0][1:]).strip()
+        try:
+            translator, tokenizer = load_model()
+            tokens = ['jpn_Jpan', *tokenizer.encode(text, out_type=str), '</s>']
+            result = translator.translate_batch([tokens], target_prefix=[['zho_Hans']],
+                                                beam_size=4, max_decoding_length=512)
+            translated = tokenizer.decode(result[0].hypotheses[0][1:]).strip()
+        except (ImportError, OSError, RuntimeError, ValueError):
+            return text
         if not HAN.search(translated) or KANA.search(translated) or BROKEN_TEXT.search(translated):
             return text
         text = translated
@@ -47,7 +64,7 @@ def synopsis_chinese(text):
     translated = [chinese(sentence.strip()) for sentence in sentences if sentence.strip()]
     if any(KANA.search(sentence) or BROKEN_TEXT.search(sentence) for sentence in translated):
         return text
-    return ''.join(translated)
+    return ''.join(translated) or text
 
 
 def numbered_series(title, series):
@@ -76,6 +93,9 @@ def translate_title_part(text):
             continue
         if len(anchors) >= 2 and not anchors.intersection(KANJI_PAIRS.findall(localized)):
             continue
+        if any(term in text and not any(word in localized for word in words)
+               for term, words in TITLE_TERMS.items()):
+            continue
         return localized.rstrip('.。') if variant != expanded else localized
     return text
 
@@ -94,7 +114,7 @@ def title_chinese(text):
     return ' '.join(translated)
 
 
-def localize(root):
+def localize(root, *, catalog_title=False, catalog_plot=False):
     code = (root.findtext('num') or root.findtext('sorttitle') or '').strip()
     actors = {name.text for name in root.findall('actor/name') if name.text}
     title = root.find('title')
@@ -112,22 +132,35 @@ def localize(root):
                 text = text[display_number.end():].lstrip()
             else:
                 text = original[original_number.end():].lstrip()
-        names = '|'.join(re.escape(name) for name in sorted(actors, key=lambda name: (-len(name), name)))
-        parts = re.split(f'({names})', text) if names else [text]
-        translated = ''.join(
-            part if part in actors or not part.strip()
-            else part.replace(part.strip(), title_chinese(part.strip()), 1)
-            for part in parts
-        )
-        if BROKEN_TEXT.search(translated) or ('チアガール' in text and '啦啦' not in translated):
-            translated = text
+                catalog_title = False
+        if catalog_title:
+            translated = CONVERTER.convert(text)
+        else:
+            names = '|'.join(re.escape(name) for name in sorted(actors, key=lambda name: (-len(name), name)))
+            parts = re.split(f'({names})', text) if names else [text]
+            localized = [
+                part if part in actors or not part.strip()
+                else part.replace(part.strip(), title_chinese(part.strip()), 1)
+                for part in parts
+            ]
+            if any(KANA.search(part) for part in localized if part not in actors):
+                translated = text
+            else:
+                translated = ''.join(localized)
         title.text = ((prefix if code else '') + series_title + translated).strip()
     for field in ('plot', 'outline', 'tagline', 'genre', 'tag', 'set/name'):
         seen = set()
         for element in root.findall(field):
             if element.text:
-                if field in ('plot', 'outline'):
+                if field == 'plot' and catalog_plot:
+                    element.text = CONVERTER.convert(element.text)
+                elif field in ('plot', 'outline'):
                     element.text = synopsis_chinese(element.text)
+                elif field == 'genre' or (field == 'tag' and element.text not in actors):
+                    value = element.text.strip()
+                    element.text = GENRE_NAMES.get(value.casefold()) or (
+                        value if KANA.search(value) else CONVERTER.convert(value)
+                    )
                 elif field != 'tag' or element.text not in actors:
                     element.text = chinese(element.text)
                 if field in ('genre', 'tag'):
