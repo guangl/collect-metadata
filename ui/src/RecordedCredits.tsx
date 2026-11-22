@@ -11,6 +11,9 @@ const list = (value: unknown) => Array.isArray(value) ? value.map(record) : [];
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
 const voice = (value?: string) => value && /\(voice|声优|声優|配音/i.test(value);
 function job(name?: string): Role {
+  if (name && /^(导演|监督)$/.test(name)) return "导演";
+  if (name && /^(脚本|编剧|系列构成)$/.test(name)) return "编剧";
+  if (name && /^(制片人|执行制片人)$/.test(name)) return "制片人";
   if (name && /\bdirector\b/i.test(name) && !/art director|casting director|director of photography/i.test(name)) return "导演";
   if (name && /writer|screenplay|screenwriter|series composition|teleplay/i.test(name)) return "编剧";
   if (name && /producer/i.test(name)) return "制片人";
@@ -51,6 +54,22 @@ function collect(sources: Source[], fields: Fields) {
         const detail = kind === "cast" ? text(record(credit.character).name) : text(credit.type);
         add(kind === "crew" ? job(detail) : credit.voice === true ? "声优" : "演员", text(person.name), detail,
           path && new URL(path).hostname === "static.tvmaze.com" ? path : undefined);
+      }
+    } else if (source.provider === "Bangumi") {
+      const actorRole = record(data.subject).type === 2 ? "声优" : "演员";
+      const image = (person: Record<string, unknown>) => {
+        const images = record(person.images);
+        const path = safeUrl(text(images.medium) ?? text(images.large));
+        return path && new URL(path).hostname === "lain.bgm.tv" ? path : undefined;
+      };
+      for (const character of list(data.characters)) for (const actor of list(character.actors)) {
+        add(actorRole, text(actor.name), text(character.name), image(actor));
+      }
+      for (const person of list(data.persons)) {
+        if (person.type !== 1) continue;
+        const detail = text(person.relation);
+        const role = actorRole === "演员" && detail && /^(主演|演员|配角)$/.test(detail) ? "演员" : job(detail);
+        add(role, text(person.name), detail, image(person));
       }
     }
   }

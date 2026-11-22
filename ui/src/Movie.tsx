@@ -17,6 +17,7 @@ const providerInfo: Record<string, string> = {
   Wikidata: "多语言片名、原始语言、演职员和发行资料",
   TVmaze: "剧集简介、平台、演员、季及分集资料",
   TMDB: "电影和剧集简介、演职员、发行资料、图片与分集",
+  Bangumi: "译名、简介、评分、演职员、封面和分集资料",
 };
 const sourceStatus = {
   ok: "已采集",
@@ -179,7 +180,7 @@ export function Sources({ kind, sources, loading, onError }: {
 }) {
   const titleId = useId();
   const names = sources?.map(({ provider }) => provider) ??
-    (kind === "av" ? ["R18.dev", "JAVDatabase", "JavDB"] : kind === "movie" ? ["Wikidata"] : ["Wikidata", "TVmaze"]);
+    (kind === "av" ? ["R18.dev", "JAVDatabase", "JavDB"] : kind === "movie" ? ["Wikidata", "Bangumi"] : ["Wikidata", "TVmaze", "Bangumi"]);
   const successes = sources?.filter((item) => ["ok", "partial"].includes(item.status)).length;
   return (
     <section aria-labelledby={titleId}>
@@ -284,7 +285,7 @@ export function Movie({ response, onNotice, onError }: { response: LookupRespons
             premiere={origins.release_date === "Emby" ? emby?.item?.PremiereDate : undefined} onError={onError} />
           <FactList fields={fields} origins={origins} keys={additionalFacts} className="full-facts" onError={onError} />
         </div> },
-        ...(fields.episodes?.length ? [{ id: "episodes", label: "季与分集", retain: true, content: <div className="movie-body"><Episodes episodes={fields.episodes} premiereDates={episodePremieres} onError={onError} /></div> }] : []),
+        ...(fields.episodes?.length ? [{ id: "episodes", label: "季与分集", retain: true, content: <div className="movie-body"><Episodes episodes={fields.episodes} premiereDates={episodePremieres} subjectEpisodes={origins.episodes === "Bangumi"} onError={onError} /></div> }] : []),
         { id: "credits", label: "演职员", retain: true, content: liveCredits ? <EmbyCredits id={liveCredits} fallback={<RecordedCredits sources={sources} fields={fields} />} /> : <RecordedCredits sources={sources} fields={fields} /> },
         { id: "sources", label: "数据来源", retain: true, content: <div className="movie-body"><Sources kind={kind} sources={sources} loading={false} onError={onError} /></div> },
       ]} />

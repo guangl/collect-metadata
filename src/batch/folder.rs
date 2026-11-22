@@ -137,7 +137,7 @@ static YEAR: LazyLock<Regex> =
 static TRAILING_YEAR: LazyLock<Regex> =
     LazyLock::new(|| pattern(r"^(.*?) \(((?:19[0-9]|20[0-3])[0-9])\)$"));
 static ID: LazyLock<Regex> =
-    LazyLock::new(|| pattern(r"(?i)\b(?:tmdb[-_:= ]+)([1-9][0-9]{0,9})\b"));
+    LazyLock::new(|| pattern(r"(?i)\b(tmdb|bangumi)[-_:= ]+([1-9][0-9]{0,9})\b"));
 static NUMBERED_AV: LazyLock<Regex> =
     LazyLock::new(|| pattern(r"(?i)^\s*([a-z]{2,8})[-_－]([0-9]{3,6})(?:$|[^a-z0-9])"));
 static COMPACT_AV: LazyLock<Regex> =
@@ -292,8 +292,8 @@ fn identify(dirs: &[&str], stem: &str) -> Option<(MediaKind, String)> {
         .and_then(|position| position.checked_sub(1).map(|i| dirs[i]))
         .or_else(|| dirs.last().copied().filter(|dir| !SEASON.is_match(dir)));
     let title_stem = episode.map_or(stem.as_ref(), |marker| &stem[..marker.start()]);
-    if let Some(id) = tmdb_id(raw_stem).or_else(|| work_dir.and_then(tmdb_id)) {
-        return Some((kind, format!("tmdb:{id}")));
+    if let Some(query) = catalog_query(raw_stem).or_else(|| work_dir.and_then(catalog_query)) {
+        return Some((kind, query));
     }
     // Season and episode markers take precedence over a release code inside the show name.
     if !series
@@ -372,8 +372,14 @@ fn year_digits(value: &str) -> bool {
     matches!(value.parse::<u16>(), Ok(1900..=2039)) && value.len() == 4
 }
 
-fn tmdb_id(stem: &str) -> Option<i32> {
-    ID.captures(stem)?.get(1)?.as_str().parse().ok()
+fn catalog_query(stem: &str) -> Option<String> {
+    let matches = ID.captures(stem)?;
+    let id = matches.get(2)?.as_str();
+    if matches[1].eq_ignore_ascii_case("bangumi") {
+        crate::providers::media::bangumi::id(id).map(|id| format!("bangumi:{id}"))
+    } else {
+        id.parse::<i32>().ok().map(|id| format!("tmdb:{id}"))
+    }
 }
 
 fn release_title(stem: &str) -> Cow<'_, str> {
@@ -395,7 +401,7 @@ fn release_title(stem: &str) -> Cow<'_, str> {
             || RELEASING
                 .find(value)
                 .is_some_and(|marker| marker.start() == 0)
-            || tmdb_id(value).is_some()
+            || catalog_query(value).is_some()
         {
             has_release_tags |= title.is_some();
         } else if !has_release_tags && !generic_file(value) {
@@ -475,6 +481,8 @@ mod tests {
             "Media/films/Parasite (2019) [1080p].mp4",
             "Media/films/Blade.Runner.2049.2017.1080p.mkv",
             "Media/films/[tmdb-550].mp4",
+            "Media/films/[bangumi-160209].mkv",
+            "Media/星际牛仔 [bangumi-253]/Season 01/S01E02.mkv",
             "Media/av/[Release] ssis-001-C.mkv",
             "Media/av/SSIS001.mp4",
             "Media/av/FC2-PPV-1234567.mp4",
@@ -486,8 +494,8 @@ mod tests {
         .to_vec();
         let (items, info) = classify_paths(paths).unwrap();
         let get = |query| items.iter().find(|item| item.query == query).unwrap();
-        assert_eq!(info.works, 6);
-        assert_eq!(info.files, 9);
+        assert_eq!(info.works, 8);
+        assert_eq!(info.files, 11);
         assert_eq!(info.skipped, 3);
         assert_eq!(get("Dark (2017)").kind, MediaKind::Series);
         assert_eq!(get("Dark (2017)").source_files.len(), 2);
@@ -495,6 +503,8 @@ mod tests {
         assert_eq!(get("Parasite (2019)").source_files.len(), 2);
         assert_eq!(get("Blade Runner 2049 (2017)").kind, MediaKind::Movie);
         assert_eq!(get("tmdb:550").kind, MediaKind::Movie);
+        assert_eq!(get("bangumi:160209").kind, MediaKind::Movie);
+        assert_eq!(get("bangumi:253").kind, MediaKind::Series);
         assert_eq!(get("SSIS-001").source_files.len(), 2);
         assert_eq!(get("FC2-PPV-1234567").kind, MediaKind::Av);
         assert_eq!(info.unrecognized, ["Media/films/123.mp4"]);
