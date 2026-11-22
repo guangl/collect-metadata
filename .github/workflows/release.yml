@@ -162,9 +162,9 @@ jobs:
           exe="collect-metadata-$version-windows-x64-setup.exe"
           plugin=CollectMetadata.Emby.dll
           test -s "$dmg" && test -s "$exe" && test -s "$plugin"
-          sha256sum "$dmg" "$exe" "$plugin" > SHA256SUMS
           image="ghcr.io/${GITHUB_REPOSITORY,,}:$version"
           docs="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/README.md"
+          changelog="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md"
           cat > notes.md <<EOF
           ## 安装与升级
 
@@ -172,10 +172,21 @@ jobs:
           - **Windows**：下载 $exe 并按提示安装。安装器未使用商业证书签名。
           - **Docker Web**：使用 \`$image\`（amd64 / arm64）。
           - **Emby 插件**：将 $plugin 放进 Emby 的 plugins 目录，然后重启 Emby。
-          - 用 SHA256SUMS 校验下载的安装包和插件。
 
           升级既有部署前，参阅[升级说明]($docs#升级)和[备份与恢复]($docs#备份与恢复)。
+
+          [版本更新日志]($changelog)
           EOF
-          gh release create "$GITHUB_REF_NAME" "$dmg" "$exe" "$plugin" SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --latest \
+          gh release create "$GITHUB_REF_NAME" "$dmg" "$exe" "$plugin" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "Collect Metadata $GITHUB_REF_NAME" --notes-file notes.md
+
+  latest:
+    name: Update the latest Docker tag
+    needs: publish
+    uses: ./.github/workflows/container.yml
+    with:
+      promote_latest: true
+    permissions:
+      contents: read
+      packages: write

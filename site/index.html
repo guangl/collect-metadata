@@ -13,6 +13,7 @@
     <a class="brand" href="./"><span class="brand-mark" aria-hidden="true">CM</span> Collect Metadata</a>
     <nav aria-label="项目导航">
       <a href="#install">安装</a>
+      <a href="https://github.com/guangl/collect-metadata/blob/main/CHANGELOG.md">更新日志</a>
       <a href="https://github.com/guangl/collect-metadata">GitHub</a>
     </nav>
   </header>
@@ -30,22 +31,22 @@
       <h2 id="workflow-title">从媒体文件到可导出的资料</h2>
       <ol>
         <li><span aria-hidden="true">01</span><h3>导入与预览</h3><p>按文件名识别作品与分集，也可选择 Emby 媒体库或手动清单。</p></li>
-        <li><span aria-hidden="true">02</span><h3>后台采集</h3><p>任务可暂停、继续或重试；遇到同名作品时，可以手动确认匹配。</p></li>
+        <li><span aria-hidden="true">02</span><h3>后台采集</h3><p>可筛选并勾选缺资料的 Emby 作品。遇到有歧义的匹配，可手动确认或启用 AI 辅助判断。</p></li>
         <li><span aria-hidden="true">03</span><h3>查看与导出</h3><p>通过历史海报查看详情与来源，按需导出 JSON、图片和 Emby NFO。</p></li>
       </ol>
     </section>
     <section id="install" class="install" aria-labelledby="install-title">
       <div>
-        <p class="eyebrow">GET STARTED</p>
         <h2 id="install-title">安装与升级</h2>
         <p>桌面版无需 Docker 或 Linux。安装后即可预览本地文件夹；提交后台批次和查看历史需要连接 PostgreSQL。</p>
+        <p>从 v0.11.0 起，支持通过 MCP 查询或提交任务。Emby 写回可先预览，再确认并保留备份。</p>
         <a class="button" href="https://github.com/guangl/collect-metadata/releases/latest">查看最新 Release</a>
       </div>
       <ul class="downloads" aria-label="支持的安装包">
         <li><strong>macOS · Apple Silicon</strong><span>下载 <code>macos-arm64.dmg</code>，将 App 拖入「应用程序」。</span></li>
         <li><strong>Windows · x64</strong><span>下载并运行 <code>windows-x64-setup.exe</code>。</span></li>
-        <li><strong>Docker Web · amd64 / arm64</strong><a href="https://github.com/guangl/collect-metadata#docker-web-版">部署版本镜像</a></li>
-        <li><strong>Emby Server 插件</strong><a href="https://github.com/guangl/collect-metadata#emby-入库自动刮削插件">安装 CollectMetadata.Emby.dll</a></li>
+        <li><strong>Docker Web · amd64 / arm64</strong><span><code>ghcr.io/guangl/collect-metadata:latest</code></span><a href="https://github.com/guangl/collect-metadata#docker-web-%E7%89%88">查看 Compose 部署说明</a></li>
+        <li><strong>Emby Server 插件</strong><a href="https://github.com/guangl/collect-metadata/releases/latest/download/CollectMetadata.Emby.dll">下载 CollectMetadata.Emby.dll</a><a href="https://github.com/guangl/collect-metadata#emby-%E5%85%A5%E5%BA%93%E8%87%AA%E5%8A%A8%E5%88%AE%E5%89%8A%E6%8F%92%E4%BB%B6">查看插件安装说明</a></li>
       </ul>
     </section>
   </main>

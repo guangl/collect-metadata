@@ -6,7 +6,7 @@
 
 **给本地文件夹和 Emby 媒体库用的自托管元数据刮削工具。** 在一个工作台里预览作品、提交后台任务、查看结果并导出资料。工作台不移动或改写原视频；Emby 插件另有默认关闭的散文件整理。
 
-[项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md)
+[项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全报告](SECURITY.md)
 
 - **导入**：自动读取 Emby 全部媒体库，也可扫描本地文件夹、服务端挂载目录或手动输入作品清单。
 - **后台采集**：支持暂停、继续和重试；有多个匹配时可手动确认。任务与历史保存在 PostgreSQL。
@@ -21,7 +21,7 @@
 | macOS（Apple Silicon / ARM64） | 下载 `macos-arm64.dmg`，打开后将 App 拖入「应用程序」 |
 | Windows（x64） | 下载 `windows-x64-setup.exe`，运行安装程序 |
 
-macOS 版未经过 Apple 公证，Windows 安装器未使用商业证书签名。请从本仓库下载，并可用 Release 随附的 `SHA256SUMS` 校验。
+macOS 版未经过 Apple 公证，Windows 安装器未使用商业证书签名。请从本仓库下载，并可用 GitHub Release 资产旁显示的 SHA-256 摘要校验。
 
 打开应用后，选择本地媒体文件夹即可预览作品。提交后台批次和查看历史需要在「设置 → PostgreSQL」连接数据库，详见 [Tauri 桌面版](#tauri-桌面版)。同一版本也提供 [Docker Web 镜像](#docker-web-版) 和 [Emby 插件](#emby-入库自动刮削插件)。已有部署请先查看 [从 v0.9.0 升级](#从-v090-升级)。
 
@@ -159,7 +159,7 @@ EMBY_WRITEBACK_MOUNT=/宿主机/媒体目录 docker compose -f compose.yaml -f c
 
 [`emby-plugin/`](emby-plugin/) 是独立安装在 Emby Server 里的原生插件。Emby 扫描发现新电影、剧集、季、分集或私人影片后，插件会通过 Emby 的后台队列刷新该条目的元数据和图片。给已有剧集添加新分集时，只对新入库的条目提交刷新。插件不会对已有条目做批量回填，也不会请求「替换所有元数据」或「替换所有图片」；已锁定的条目会被跳过。
 
-从 v0.10.0 起，可以直接从 [GitHub Releases](https://github.com/guangl/collect-metadata/releases/latest) 下载 `CollectMetadata.Emby.dll`，并用同一版本的 `SHA256SUMS` 校验。插件使用 [Emby Server 4.9.1.90 的 SDK](https://www.nuget.org/packages/MediaBrowser.Server.Core/4.9.1.90) 构建，已在 4.10.2.0 Docker 镜像中验证同步。其他版本请先验证兼容性。开发时可用 .NET 8 SDK 构建 `dotnet build emby-plugin/CollectMetadata.Emby.csproj -c Release`。
+从 v0.11.0 起，可以直接从 [GitHub Releases](https://github.com/guangl/collect-metadata/releases/latest) 下载 `CollectMetadata.Emby.dll`，并用该资产旁显示的 SHA-256 摘要校验。插件使用 [Emby Server 4.9.1.90 的 SDK](https://www.nuget.org/packages/MediaBrowser.Server.Core/4.9.1.90) 构建，已在 4.10.2.0 Docker 镜像中验证同步。其他版本请先验证兼容性。开发时可用 .NET 8 SDK 构建 `dotnet build emby-plugin/CollectMetadata.Emby.csproj -c Release`。
 
 1. 将 `CollectMetadata.Emby.dll` 复制到 **Emby 服务端数据目录**的 `plugins/`（官方 Docker 镜像中通常是 `/config/plugins/`）。源码构建的 DLL 位于 `emby-plugin/bin/Release/netstandard2.0/`。确保 Emby 进程能读取 DLL，然后重启 Emby。
 2. 在 Emby 控制台的「媒体库」为电影和剧集分别启用所需的元数据下载器、图片下载器和首选语言。插件沿用这些设置，不需要 Collect Metadata Web、PostgreSQL 或本应用里配置的 TMDB 密钥。如果未开启实时监控，文件要等计划扫描或手动扫描才会入库。
@@ -307,7 +307,7 @@ EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --all-features --summary-onl
 
 从 [`.env.example`](.env.example) 复制本地 `.env` 并设置 `POSTGRES_PASSWORD`。以下两种部署方式都会启动 Web 应用和 PostgreSQL，并把数据库数据保存在 `postgres_data` 卷中。
 
-**使用预构建镜像（Compose v2.24.4+）：** [GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata) 镜像供可选的 Docker 部署使用。从 v0.10.0 起，发布流程同时构建 amd64 和 arm64 版本镜像。按 Release 给出的版本固定镜像，例如在 `.env` 设置 `COLLECT_METADATA_IMAGE=ghcr.io/guangl/collect-metadata:0.10.0`。可以继续使用手动构建的 `latest`，或使用镜像摘要固定到具体构建。
+**使用预构建镜像（Compose v2.24.4+）：** 从 v0.11.0 起，发布流程为 amd64 和 arm64 构建镜像。`ghcr.io/guangl/collect-metadata:latest` 随最新 GitHub Release 更新。需要固定部署版本时，在 `.env` 设置 `COLLECT_METADATA_IMAGE=ghcr.io/guangl/collect-metadata:0.11.0`，也可用镜像摘要固定到具体构建。[GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata)
 
 ```sh
 docker compose -f compose.yaml -f compose.ghcr.yaml pull
