@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.12.2 · 2026-11-22
+
+- **Emby 自动刮削**按配置的时区比较分集首播日。日期仍有冲突时，依据 PostgreSQL 中已核对的官方放送记录和季集映射补齐缺少的 Bangumi ID，保留原日期、TVDB ID、其他资料和旁挂文件。
+
+[与 v0.12.1 的完整差异](https://github.com/guangl/collect-metadata/compare/v0.12.1...v0.12.2)
+
 ## v0.12.1 · 2026-11-22
 
 - **Emby 自动刮削**可根据 PostgreSQL 中已核对的季集映射，为已有标题、简介和缩略图的分集补写缺少的 Bangumi 分集 ID。保留已有 TVDB 等来源 ID、元数据和旁挂文件。
