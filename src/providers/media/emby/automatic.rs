@@ -4,7 +4,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{Client, Response, Url};
 use serde_json::{Value, json};
 
-use super::{Emby, has_provider_id, is_item_id, list, nonempty_text};
+use super::{Emby, has_provider_id, is_item_id, list, nonempty_text, provider_id};
 use crate::output::download_image;
 use crate::providers::media::episode_title::{field_locked, needs_title, usable};
 
@@ -156,9 +156,11 @@ impl Emby {
                 "IndexNumber",
                 "IndexNumberEnd",
                 "PremiereDate",
+                "Name",
             ]
             .iter()
             .any(|&field| current[field] != item[field])
+            || provider_id(&current, "Tvdb") != provider_id(item, "Tvdb")
         {
             return Err("Emby 分集在核对映射期间发生变化，请重试。".into());
         }

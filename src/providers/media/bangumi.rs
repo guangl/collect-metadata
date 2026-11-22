@@ -11,6 +11,27 @@ use super::*;
 use super::episode_title::calendar_date;
 use crate::providers::{field_map, request_text};
 
+#[cfg(feature = "web")]
+#[derive(Clone, Copy)]
+pub(crate) enum MappedAirdate {
+    Legacy,
+    Local(Option<jiff::civil::Date>),
+}
+
+#[cfg(feature = "web")]
+impl MappedAirdate {
+    fn matches(self, item: &Value, source: &Value) -> bool {
+        match self {
+            Self::Legacy => calendar_date(&item["PremiereDate"])
+                .zip(calendar_date(source))
+                .is_none_or(|(local, source)| (local - source).whole_days().abs() <= 1),
+            Self::Local(local) => local
+                .zip(text(source))
+                .is_none_or(|(local, source)| source.parse().ok() == Some(local)),
+        }
+    }
+}
+
 const NAME: &str = "Bangumi";
 const PAGE_SIZE: usize = 200;
 
@@ -309,12 +330,13 @@ impl Bangumi {
         subjects: &[u32],
         archived: &[Value],
         item: &Value,
+        airdate: MappedAirdate,
         language: &str,
     ) -> Result<Source, String> {
-        if let Some(cached) = mapped_episode_match(archived, item)
+        if let Some(cached) = mapped_episode_match(archived, item, airdate)
             && let Some(id) = cached["id"].as_u64().filter(|&id| id > 0)
             && let Ok(live) = self.api(client, &format!("episodes/{id}"), None).await
-            && catalog_episode_matches_live(cached, &live, item)
+            && catalog_episode_matches_live(cached, &live, item, airdate)
             && let Some(source) = automatic_episode_source(&live, item, language)
         {
             return Ok(source);
@@ -333,7 +355,7 @@ impl Bangumi {
             .flatten()
             .filter(|episode| episode["type"] == 0)
             .collect();
-        let episode = mapped_episode_match(&episodes, item)
+        let episode = mapped_episode_match(&episodes, item, airdate)
             .ok_or("无法用已核对的 Bangumi 分季映射唯一匹配此分集。")?;
         automatic_episode_source(episode, item, language)
             .ok_or_else(|| "Bangumi 分集 ID 无效。".into())
@@ -520,26 +542,31 @@ fn automatic_episode_source(episode: &Value, item: &Value, language: &str) -> Op
 }
 
 #[cfg(feature = "web")]
-fn catalog_episode_matches_live(cached: &Value, live: &Value, item: &Value) -> bool {
+fn catalog_episode_matches_live(
+    cached: &Value,
+    live: &Value,
+    item: &Value,
+    airdate: MappedAirdate,
+) -> bool {
     live["type"] == 0
         && ["id", "subject_id", "sort"].iter().all(|key| {
             cached[key].as_u64().is_some_and(|expected| live[key].as_u64() == Some(expected))
         })
-        && calendar_date(&item["PremiereDate"])
-            .zip(calendar_date(&live["airdate"]))
-            .is_none_or(|(local, source)| (local - source).whole_days().abs() <= 1)
+        && airdate.matches(item, &live["airdate"])
 }
 
 #[cfg(feature = "web")]
-pub(crate) fn mapped_archive_episode_id(episodes: &[Value], item: &Value) -> Option<u32> {
-    mapped_episode_match(episodes, item)?["id"]
-        .as_u64()
-        .and_then(|id| u32::try_from(id).ok())
-        .filter(|&id| id > 0)
+fn mapped_episode_match<'a>(
+    episodes: &'a [Value],
+    item: &Value,
+    airdate: MappedAirdate,
+) -> Option<&'a Value> {
+    let episode = mapped_episode_candidate(episodes, item)?;
+    airdate.matches(item, &episode["airdate"]).then_some(episode)
 }
 
 #[cfg(feature = "web")]
-fn mapped_episode_match<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
+pub(crate) fn mapped_episode_candidate<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
     let number = item["IndexNumber"].as_u64().filter(|&number| number > 0)?;
     if item["IndexNumberEnd"]
         .as_u64()
@@ -560,14 +587,8 @@ fn mapped_episode_match<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a V
         return None;
     }
     let episode = episodes.get(usize::try_from(number - 1).ok()?)?;
-    if let Some(expected) = text(&item["ProviderIds"]["Bangumi"]).and_then(id)
+    if let Some(expected) = super::emby::provider_id(item, "Bangumi").and_then(id)
         && episode["id"].as_u64() != Some(u64::from(expected))
-    {
-        return None;
-    }
-    if calendar_date(&item["PremiereDate"])
-        .zip(calendar_date(&episode["airdate"]))
-        .is_some_and(|(local, source)| (local - source).whole_days().abs() > 1)
     {
         return None;
     }
@@ -640,13 +661,19 @@ async fn mapped_episode_validates_archive_and_falls_back_to_the_live_season() {
         json!({"id":202,"subject_id":12,"sort":27,"type":0}),
     ];
     let item = json!({"Type":"Episode","IndexNumber":1,"PremiereDate":"2026-04-01T16:00:00Z"});
-    let source = bangumi.mapped_episode(&client, &[11, 12], &archived, &item, "zh-CN").await.unwrap();
+    let source = bangumi
+        .mapped_episode(&client, &[11, 12], &archived, &item, MappedAirdate::Legacy, "zh-CN")
+        .await
+        .unwrap();
     assert_eq!(source.fields["description"], "实时简介");
     assert_eq!(list_requests.load(Ordering::Relaxed), 0);
 
     archived[1]["id"] = json!(99);
     let item = json!({"Type":"Episode","IndexNumber":2});
-    let source = bangumi.mapped_episode(&client, &[11, 12], &archived, &item, "zh-CN").await.unwrap();
+    let source = bangumi
+        .mapped_episode(&client, &[11, 12], &archived, &item, MappedAirdate::Legacy, "zh-CN")
+        .await
+        .unwrap();
     assert_eq!(source.fields["bangumi_id"], "202");
     assert_eq!(list_requests.load(Ordering::Relaxed), 2);
     server.abort();
@@ -661,24 +688,30 @@ fn mapped_episode_uses_continuous_sort_across_cours_and_rejects_conflicts() {
         json!({"id":120,"sort":28,"ep":1,"airdate":"2021-01-06"}),
     ];
     let mut item = json!({"IndexNumber":3,"ParentIndexNumber":2});
-    assert_eq!(mapped_archive_episode_id(&episodes, &item), Some(120));
-    assert!(mapped_episode_match(&episodes[1..], &item).is_none());
+    let legacy = MappedAirdate::Legacy;
+    assert_eq!(mapped_episode_match(&episodes, &item, legacy).unwrap()["id"], 120);
+    assert!(mapped_episode_match(&episodes[1..], &item, legacy).is_none());
     assert!(
         mapped_episode_match(
             &[episodes[0].clone(), episodes[2].clone()],
-            &json!({"IndexNumber":2})
+            &json!({"IndexNumber":2}),
+            legacy
         )
         .is_none()
     );
     item["ProviderIds"]["Bangumi"] = json!("90");
-    assert!(mapped_episode_match(&episodes, &item).is_none());
+    assert!(mapped_episode_match(&episodes, &item, legacy).is_none());
     item["ProviderIds"]["Bangumi"] = json!("120");
     item["PremiereDate"] = json!("2020-07-08");
-    assert!(mapped_episode_match(&episodes, &item).is_none());
+    assert!(mapped_episode_match(&episodes, &item, legacy).is_none());
     item["PremiereDate"] = json!("2021-01-05T16:00:00Z");
-    assert!(mapped_episode_match(&episodes, &item).is_some());
+    assert!(mapped_episode_match(&episodes, &item, legacy).is_some());
+    let local = MappedAirdate::Local(Some("2021-01-05".parse().unwrap()));
+    assert!(mapped_episode_match(&episodes, &item, local).is_none());
+    let local = MappedAirdate::Local(Some("2021-01-06".parse().unwrap()));
+    assert!(mapped_episode_match(&episodes, &item, local).is_some());
     item["IndexNumberEnd"] = json!(4);
-    assert_eq!(mapped_archive_episode_id(&episodes, &item), None);
+    assert!(mapped_episode_match(&episodes, &item, local).is_none());
 }
 
 #[cfg(all(test, feature = "web"))]

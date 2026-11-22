@@ -9,7 +9,7 @@ default-run = "collect-metadata"
 default = ["desktop"]
 desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener"]
 custom-protocol = ["desktop", "tauri/custom-protocol"]
-web = ["dep:axum", "tokio/net", "tokio/rt-multi-thread"]
+web = ["dep:axum", "dep:jiff", "tokio/net", "tokio/rt-multi-thread"]
 
 [[bin]]
 name = "collect-metadata"
@@ -26,6 +26,7 @@ axum = { version = "0.8", optional = true }
 base64 = "0.22"
 cap-std = "4"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+jiff = { version = "1", optional = true, default-features = false, features = ["std", "tzdb-bundle-always"] }
 quick-xml = "0.42"
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "query", "rustls", "stream", "system-proxy"] }
 regex = "1"

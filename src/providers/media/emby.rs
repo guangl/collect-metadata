@@ -39,14 +39,18 @@ const MAX_RESPONSE: usize = 12 * 1024 * 1024;
 
 #[cfg(feature = "web")]
 pub(crate) fn has_provider_id(item: &Value, provider: &str) -> bool {
+    provider_id(item, provider).is_some()
+}
+
+#[cfg(feature = "web")]
+pub(crate) fn provider_id<'a>(item: &'a Value, provider: &str) -> Option<&'a str> {
     item["ProviderIds"]
         .as_object()
         .into_iter()
         .flatten()
-        .any(|(key, id)| {
-            key.eq_ignore_ascii_case(provider)
-                && id.as_str().is_some_and(|id| !id.trim().is_empty())
-        })
+        .filter(|(key, _)| key.eq_ignore_ascii_case(provider))
+        .filter_map(|(_, id)| id.as_str().map(str::trim))
+        .find(|id| !id.is_empty())
 }
 
 #[derive(Serialize)]

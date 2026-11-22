@@ -21,6 +21,24 @@ WHERE quarter_start = DATE '2026-10-01'
 ORDER BY quarter_date, title;
 ```
 
+## 记录官方放送日
+
+Web 启动时创建 `collect_metadata_anime_verified_episode_airdates`。核对过制作方、电视台或授权放送平台的集号、标题和日期后，可在 PostgreSQL 给该 Emby 分集登记一条证据。填写实际的剧集和分集条目 ID，以及按 `EMBY_AUTO_SCRAPE_TIMEZONE` 换算后的 Emby 日期。Emby 有 TVDB ID 时一并登记，以便写回前核对。
+
+```sql
+INSERT INTO collect_metadata_anime_verified_episode_airdates (
+    server_id, emby_episode_id, emby_series_id, season_number, episode_number,
+    bangumi_episode_id, emby_title, tvdb_id, emby_local_airdate, official_airdate, evidence_url
+) VALUES (
+    'emby-server-id', '9', '7', 2, 15,
+    994751, '奥托·苏文／相信的理由', '7955731',
+    DATE '2021-01-12', DATE '2021-01-13', 'https://re-zero-anime.jp/tv/onair/tv2.html'
+)
+ON CONFLICT (server_id, emby_episode_id) DO NOTHING;
+```
+
+季集归属、Emby 标题、已登记的 TVDB ID、本地日期、Bangumi ID 和存档日期必须都与记录一致。季度导入不会改动这些复核记录。记录缺失或无法和当前资料对上时，自动刮削继续等待复核。
+
 ## 更新
 
 运行 `python3 tools/anime-catalog/fetch_snapshots.py <cache>` 获取并校验发布数据，再运行 `python3 tools/anime-catalog/import_catalog.py <cache> | psql -X -v ON_ERROR_STOP=1`。设置 `pipefail`，并通过 PostgreSQL 连接环境将导入指向 Collect Metadata 数据库。更新使用单事务和稳定来源 ID，重跑同版本不会创建重复记录。初次迁移可以通过 `--verified-seasons <json>` 提供已核对映射。以后刷新不会覆盖已核对行。每次导入的 URL、版本和摘要保存在 `collect_metadata_anime_imports`。

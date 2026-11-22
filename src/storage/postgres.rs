@@ -73,6 +73,26 @@ impl Store {
             )
             .execute(&mut *transaction)
             .await?;
+            #[cfg(feature = "web")]
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS collect_metadata_anime_verified_episode_airdates (
+                    server_id text NOT NULL,
+                    emby_episode_id text NOT NULL,
+                    emby_series_id text NOT NULL,
+                    season_number integer NOT NULL CHECK (season_number > 0),
+                    episode_number integer NOT NULL CHECK (episode_number > 0),
+                    bangumi_episode_id integer NOT NULL CHECK (bangumi_episode_id > 0),
+                    emby_title text NOT NULL CHECK (length(btrim(emby_title)) > 0),
+                    tvdb_id text CHECK (tvdb_id ~ '^[0-9]+$'),
+                    emby_local_airdate date NOT NULL,
+                    official_airdate date NOT NULL,
+                    evidence_url text NOT NULL CHECK (left(evidence_url, 8) = 'https://' AND length(evidence_url) > 8),
+                    verified_at timestamptz NOT NULL DEFAULT now(),
+                    PRIMARY KEY (server_id, emby_episode_id)
+                )",
+            )
+            .execute(&mut *transaction)
+            .await?;
             super::batch::migrate(&mut transaction).await?;
             sqlx::query(
                 "ALTER TABLE collect_metadata_snapshots
@@ -87,6 +107,46 @@ impl Store {
             "无法初始化 PostgreSQL 的采集表。请检查账号是否能创建和修改应用表。"
         })?;
         Ok(Self { pool })
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn verified_episode_airdate(
+        &self,
+        server: &str,
+        item: &Value,
+        bangumi_episode_id: u32,
+        local: jiff::civil::Date,
+        official: jiff::civil::Date,
+    ) -> Result<bool, String> {
+        use crate::providers::media::emby::provider_id;
+
+        let bangumi_episode_id = i32::try_from(bangumi_episode_id)
+            .map_err(|_| "Bangumi 分集 ID 超出 PostgreSQL 的可用范围。")?;
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM collect_metadata_anime_verified_episode_airdates
+                WHERE server_id=$1 AND emby_episode_id=$2 AND emby_series_id=$3
+                  AND season_number=$4 AND episode_number=$5 AND bangumi_episode_id=$6
+                  AND emby_local_airdate=$7::text::date AND official_airdate=$8::text::date
+                  AND emby_title=$9 AND tvdb_id IS NOT DISTINCT FROM $10
+            )",
+        )
+        .bind(server)
+        .bind(item["Id"].as_str())
+        .bind(item["SeriesId"].as_str())
+        .bind(item["ParentIndexNumber"].as_i64())
+        .bind(item["IndexNumber"].as_i64())
+        .bind(bangumi_episode_id)
+        .bind(local.to_string())
+        .bind(official.to_string())
+        .bind(item["Name"].as_str())
+        .bind(provider_id(item, "Tvdb"))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            diagnostics::postgres_error("postgres_anime_episode_airdate_read_failed", &error);
+            "读取 PostgreSQL 的已核对分集放送日失败。".to_owned()
+        })
     }
 
     pub(crate) async fn emby_item(&self, server: &str, id: &str) -> Result<Option<Value>, String> {

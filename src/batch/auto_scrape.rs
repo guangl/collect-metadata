@@ -7,6 +7,11 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream};
+use jiff::{
+    Timestamp,
+    civil::{Date, DateTime},
+    tz::TimeZone,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -15,8 +20,8 @@ use crate::{
     Collector, MediaKind, MediaProvider,
     output::write_automatic,
     providers::media::{
-        bangumi::mapped_archive_episode_id,
-        emby::{EPISODE_QUERY_PREFIX, has_provider_id, is_item_id},
+        bangumi::{MappedAirdate, mapped_episode_candidate},
+        emby::{EPISODE_QUERY_PREFIX, Emby, has_provider_id, is_item_id},
         episode_title::{needs_title, usable},
     },
 };
@@ -70,6 +75,7 @@ enum Outcome {
     Skipped,
     Written(usize),
     AwaitingTitle,
+    AwaitingAirdateReview,
     MissingItem,
 }
 
@@ -81,6 +87,7 @@ pub struct AutoScrape {
     central_metadata: bool,
     season_map: SeasonMap,
     database_season_map: bool,
+    emby_timezone: TimeZone,
 }
 
 struct Event {
@@ -135,6 +142,9 @@ impl AutoScrape {
             .filter(|value| !value.trim().is_empty());
         let central_metadata = env::var("EMBY_AUTO_SCRAPE_CENTRAL_METADATA")
             .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+        let timezone = env::var("EMBY_AUTO_SCRAPE_TIMEZONE").unwrap_or_else(|_| "UTC".into());
+        let emby_timezone = TimeZone::get(timezone.trim())
+            .map_err(|_| "EMBY_AUTO_SCRAPE_TIMEZONE 必须是有效的 IANA 时区。")?;
         let season_map =
             match env::var_os("EMBY_AUTO_SCRAPE_SEASON_MAP").filter(|path| !path.is_empty()) {
                 Some(path) => SeasonMap::parse(
@@ -152,6 +162,7 @@ impl AutoScrape {
             season_map,
             database_season_map: env::var("EMBY_AUTO_SCRAPE_DB_SEASON_MAP")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
+            emby_timezone,
         }))
     }
 
@@ -191,11 +202,15 @@ impl AutoScrape {
                 })
                 .buffer_unordered(4);
             while let Some((event, result)) = results.next().await {
-                let mut title_pending = false;
+                let mut awaiting_review = false;
                 let (error, archive) = match result {
                     Ok(Outcome::AwaitingTitle) => {
-                        title_pending = true;
+                        awaiting_review = true;
                         ("来源尚未提供可核对的分集标题。".into(), None)
+                    }
+                    Ok(Outcome::AwaitingAirdateReview) => {
+                        awaiting_review = true;
+                        ("Emby 首播日与目录不一致，等待核对官方放送日。".into(), None)
                     }
                     Ok(Outcome::MissingItem) => (
                         "Emby 未返回此入库条目。".into(),
@@ -236,7 +251,7 @@ impl AutoScrape {
                     }
                 }
                 let attempt = retries.get(&event.path).map_or(1, |(count, _)| count + 1);
-                let delay = if title_pending {
+                let delay = if awaiting_review {
                     Duration::from_secs(if attempt == 1 { 1800 } else { 6 * 3600 })
                 } else {
                     Duration::from_secs((5 * 2_u64.pow(attempt.min(9) - 1)).min(1800))
@@ -344,41 +359,64 @@ impl AutoScrape {
             }
             server_id = Some(server);
         }
-        if episode_complete
+        let mut archived = Vec::new();
+        let mut mapped_airdate = MappedAirdate::Legacy;
+        if event.item_type == "Episode"
             && let (Some(server), Some(subjects)) = (&server_id, &database_subjects)
         {
-            let fresh;
-            let item = if !has_provider_id(item, "Bangumi")
-                && let Some(id) = mapped_archive_episode_id(
-                    &collector
-                        .require_store()
-                        .await?
-                        .archived_bangumi_episodes(subjects)
-                        .await?,
-                    item,
-                )
-            {
-                if emby
-                    .fill_episode_bangumi_id(&collector.client, item, id)
-                    .await?
-                {
-                    eprintln!(
-                        "Automatic scrape Episode {} filled Bangumi ID {} from PostgreSQL.",
-                        event.id, id
-                    );
-                }
-                fresh = emby
-                    .automatic_item(&collector.client, &event.id, item_type)
-                    .await?
-                    .ok_or("Emby 条目在写入期间已消失。")?;
-                &fresh.data["item"]
-            } else {
-                item
+            if episode_complete && has_provider_id(item, "Bangumi") {
+                return sync_mapped_episode(collector, &emby, server, item, None).await;
+            }
+            let store = collector.require_store().await?;
+            archived = match store.archived_bangumi_episodes(subjects).await {
+                Ok(episodes) => episodes,
+                Err(error) if episode_complete => return Err(error),
+                Err(_) => Vec::new(),
             };
-            // A retry can see the ID saved by a previous attempt. Keep this route
-            // limited to Emby's provider ID and the normal index sync.
-            collector.upsert_emby_item(server, &event.id, item, None).await?;
-            return Ok(Outcome::Skipped);
+            let local = emby_airdate(&item["PremiereDate"], &self.emby_timezone)?;
+            mapped_airdate = MappedAirdate::Local(local);
+            let candidate = mapped_episode_candidate(&archived, item);
+            let bangumi_id = candidate
+                .and_then(|episode| episode["id"].as_u64())
+                .and_then(|id| u32::try_from(id).ok())
+                .filter(|&id| id > 0);
+            let catalog_date = candidate
+                .and_then(|episode| episode["airdate"].as_str())
+                .and_then(|date| date.parse::<Date>().ok());
+            if central
+                && let Some((local, catalog_date)) = local.zip(catalog_date)
+                && local != catalog_date
+            {
+                let Some(id) = bangumi_id else {
+                    return Ok(Outcome::AwaitingAirdateReview);
+                };
+                if usable(&item["Name"], item).is_none()
+                    || !store
+                        .verified_episode_airdate(server, item, id, local, catalog_date)
+                        .await?
+                {
+                    return Ok(Outcome::AwaitingAirdateReview);
+                }
+                eprintln!(
+                    "Automatic scrape Episode {} confirmed by official airdate {catalog_date}.",
+                    event.id
+                );
+                return sync_mapped_episode(collector, &emby, server, item, Some(id)).await;
+            }
+            // Preserve the ID-only route when conversion resolves an apparent
+            // conflict, even if Emby is missing other metadata.
+            let timezone_resolved_conflict = central
+                && local.zip(catalog_date).is_some_and(|(local, catalog)| {
+                    local == catalog
+                        && item["PremiereDate"]
+                            .as_str()
+                            .and_then(|date| date.trim().get(..10))
+                            .and_then(|date| date.parse::<Date>().ok())
+                            .is_some_and(|stored| stored != local)
+                });
+            if episode_complete || timezone_resolved_conflict {
+                return sync_mapped_episode(collector, &emby, server, item, bangumi_id).await;
+            }
         }
         let settings = collector.output_settings().ok_or("自动写回设置不可用。")?;
         let paths = settings.media_paths();
@@ -418,7 +456,8 @@ impl AutoScrape {
                     &query,
                     &event.id,
                     mapped_subjects,
-                    database_subjects.is_some(),
+                    &archived,
+                    mapped_airdate,
                 )
                 .await?
         } else if matches!(event.item_type, "Season" | "Episode") {
@@ -524,6 +563,77 @@ impl AutoScrape {
         }
         Ok(Outcome::Written(written))
     }
+}
+
+async fn sync_mapped_episode(
+    collector: &Collector,
+    emby: &Emby,
+    server: &str,
+    item: &Value,
+    bangumi_id: Option<u32>,
+) -> Result<Outcome, String> {
+    let item_id = item["Id"].as_str().ok_or("Emby 条目缺少 ID。")?;
+    let fresh;
+    let item = if !has_provider_id(item, "Bangumi")
+        && let Some(id) = bangumi_id
+    {
+        if emby.fill_episode_bangumi_id(&collector.client, item, id).await? {
+            eprintln!("Automatic scrape Episode {item_id} filled Bangumi ID {id} from PostgreSQL.");
+        }
+        fresh = emby
+            .automatic_item(&collector.client, item_id, "Episode")
+            .await?
+            .ok_or("Emby 条目在写入期间已消失。")?;
+        &fresh.data["item"]
+    } else {
+        item
+    };
+    collector.upsert_emby_item(server, item_id, item, None).await?;
+    Ok(Outcome::Skipped)
+}
+
+fn emby_airdate(value: &Value, timezone: &TimeZone) -> Result<Option<Date>, String> {
+    if value.is_null() || value.as_str().is_some_and(|date| date.trim().is_empty()) {
+        return Ok(None);
+    }
+    let parsed = value.as_str().map(str::trim).and_then(|date| {
+        if date.len() == 10 {
+            date.parse::<Date>().ok()
+        } else if let Ok(timestamp) = date.parse::<Timestamp>() {
+            Some(timezone.to_datetime(timestamp).date())
+        } else if date
+            .get(10..)
+            .is_some_and(|time| !time.contains(['+', '-', 'Z', 'z']))
+        {
+            // A timestamp without an offset already represents local wall time.
+            date.parse::<DateTime>().ok().map(|local| local.date())
+        } else {
+            None
+        }
+    });
+    parsed
+        .map(Some)
+        .ok_or_else(|| "Emby 首播日格式无效，无法核对分集。".into())
+}
+
+#[cfg(test)]
+#[test]
+fn emby_airdate_uses_the_configured_calendar_day() {
+    let shanghai = TimeZone::get("Asia/Shanghai").unwrap();
+    let new_york = TimeZone::get("America/New_York").unwrap();
+    for (input, zone, day) in [
+        ("2021-01-11T16:00:00.0000000Z", &shanghai, "2021-01-12"),
+        ("2026-11-01", &shanghai, "2026-11-01"),
+        ("2026-11-01T01:00:00+09:00", &shanghai, "2026-11-01"),
+        ("2026-11-01T00:00:00", &shanghai, "2026-11-01"),
+        ("2026-07-01T04:30:00Z", &new_york, "2026-07-01"),
+        ("2026-01-01T04:30:00Z", &new_york, "2025-12-31"),
+    ] {
+        assert_eq!(emby_airdate(&json!(input), zone), Ok(Some(day.parse().unwrap())));
+    }
+    assert_eq!(emby_airdate(&Value::Null, &shanghai), Ok(None));
+    assert!(emby_airdate(&json!("2021-01-11T16:00:00+99:00"), &shanghai).is_err());
+    assert!(emby_airdate(&json!("2021-02-30"), &shanghai).is_err());
 }
 
 async fn event_age(path: &Path) -> std::io::Result<Duration> {

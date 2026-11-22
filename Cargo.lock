@@ -677,6 +677,7 @@ dependencies = [
  "cap-std",
  "futures-util",
  "isolang",
+ "jiff 1.0.1",
  "quick-xml",
  "regex",
  "reqwest",
@@ -2315,6 +2316,7 @@ checksum = "ed5d126d72eb017f10b302e73bdeca446bea405ee449af4d9e7866d6b082d83e"
 dependencies = [
  "jiff-core 1.0.1",
  "jiff-static 1.0.1",
+ "jiff-tzdb 1.0.0",
  "jiff-tzdb-platform 1.0.0",
  "log",
  "portable-atomic",
