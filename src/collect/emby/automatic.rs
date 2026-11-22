@@ -168,6 +168,7 @@ impl Collector {
                     .await?
                     .archived_bangumi_episodes(subjects)
                     .await
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };

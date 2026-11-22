@@ -531,6 +531,14 @@ fn catalog_episode_matches_live(cached: &Value, live: &Value, item: &Value) -> b
 }
 
 #[cfg(feature = "web")]
+pub(crate) fn mapped_archive_episode_id(episodes: &[Value], item: &Value) -> Option<u32> {
+    mapped_episode_match(episodes, item)?["id"]
+        .as_u64()
+        .and_then(|id| u32::try_from(id).ok())
+        .filter(|&id| id > 0)
+}
+
+#[cfg(feature = "web")]
 fn mapped_episode_match<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
     let number = item["IndexNumber"].as_u64().filter(|&number| number > 0)?;
     if item["IndexNumberEnd"]
@@ -653,7 +661,7 @@ fn mapped_episode_uses_continuous_sort_across_cours_and_rejects_conflicts() {
         json!({"id":120,"sort":28,"ep":1,"airdate":"2021-01-06"}),
     ];
     let mut item = json!({"IndexNumber":3,"ParentIndexNumber":2});
-    assert_eq!(mapped_episode_match(&episodes, &item).unwrap()["id"], 120);
+    assert_eq!(mapped_archive_episode_id(&episodes, &item), Some(120));
     assert!(mapped_episode_match(&episodes[1..], &item).is_none());
     assert!(
         mapped_episode_match(
@@ -670,7 +678,7 @@ fn mapped_episode_uses_continuous_sort_across_cours_and_rejects_conflicts() {
     item["PremiereDate"] = json!("2021-01-05T16:00:00Z");
     assert!(mapped_episode_match(&episodes, &item).is_some());
     item["IndexNumberEnd"] = json!(4);
-    assert!(mapped_episode_match(&episodes, &item).is_none());
+    assert_eq!(mapped_archive_episode_id(&episodes, &item), None);
 }
 
 #[cfg(all(test, feature = "web"))]

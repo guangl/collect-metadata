@@ -150,19 +150,20 @@ impl Store {
     }
 
     #[cfg(feature = "web")]
-    pub(crate) async fn archived_bangumi_episodes(&self, subjects: &[u32]) -> Vec<Value> {
-        let Ok(ids) = subjects
+    pub(crate) async fn archived_bangumi_episodes(
+        &self,
+        subjects: &[u32],
+    ) -> Result<Vec<Value>, String> {
+        let ids = subjects
             .iter()
             .copied()
             .map(i32::try_from)
             .collect::<Result<Vec<_>, _>>()
-        else {
-            return Vec::new();
-        };
+            .map_err(|_| "Bangumi 季条目 ID 超出 PostgreSQL 的可用范围。".to_owned())?;
         // An incomplete part could shift the offsets of subsequent parts.
         // Trust the archive only if it lists every declared regular episode
         // for every verified part, using the same snapshot for both tables.
-        let result = sqlx::query_scalar(
+        sqlx::query_scalar(
             "WITH complete_parts AS (
                 SELECT requested.id, requested.part_order, subject.archive_version
                 FROM unnest($1::int[]) WITH ORDINALITY AS requested(id, part_order)
@@ -187,10 +188,10 @@ impl Store {
         )
         .bind(ids)
         .fetch_all(&self.pool)
-        .await;
-        result.unwrap_or_else(|error| {
+        .await
+        .map_err(|error| {
             diagnostics::postgres_error("postgres_anime_archive_read_failed", &error);
-            Vec::new()
+            "读取 PostgreSQL 的 Bangumi 分集目录失败。".to_owned()
         })
     }
 

@@ -37,6 +37,18 @@ const EPISODE_DETAIL_FIELDS: &str = concat!(
 pub(crate) const EPISODE_QUERY_PREFIX: &str = "emby-episode:";
 const MAX_RESPONSE: usize = 12 * 1024 * 1024;
 
+#[cfg(feature = "web")]
+pub(crate) fn has_provider_id(item: &Value, provider: &str) -> bool {
+    item["ProviderIds"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .any(|(key, id)| {
+            key.eq_ignore_ascii_case(provider)
+                && id.as_str().is_some_and(|id| !id.trim().is_empty())
+        })
+}
+
 #[derive(Serialize)]
 pub struct EmbyLibrary {
     pub(crate) id: String,

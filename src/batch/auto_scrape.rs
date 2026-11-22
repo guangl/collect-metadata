@@ -14,7 +14,11 @@ use super::{CandidateChoice, folder};
 use crate::{
     Collector, MediaKind, MediaProvider,
     output::write_automatic,
-    providers::media::{emby::{EPISODE_QUERY_PREFIX, is_item_id}, episode_title::{needs_title, usable}},
+    providers::media::{
+        bangumi::mapped_archive_episode_id,
+        emby::{EPISODE_QUERY_PREFIX, has_provider_id, is_item_id},
+        episode_title::{needs_title, usable},
+    },
 };
 
 const RETRY_WINDOW: Duration = Duration::from_secs(7 * 24 * 3600);
@@ -304,11 +308,10 @@ impl AutoScrape {
         {
             return Ok(Outcome::Skipped);
         }
-        let settings = collector.output_settings().ok_or("自动写回设置不可用。")?;
-        let paths = settings.media_paths();
         if event.item_type == "Video" && !private {
             return Ok(Outcome::Skipped);
         }
+        let central = self.central_metadata && !private;
         let episode_complete = event.item_type == "Episode" && complete_episode(item);
         let season_field = if event.item_type == "Episode" {
             "ParentIndexNumber"
@@ -319,7 +322,7 @@ impl AutoScrape {
         let mut database_subjects = None;
         if self.database_season_map
             && !private
-            && !episode_complete
+            && (!episode_complete || central)
             && matches!(event.item_type, "Season" | "Episode")
             && let Some(series) = item["SeriesId"].as_str()
             && let Some(season) = item[season_field]
@@ -341,6 +344,44 @@ impl AutoScrape {
             }
             server_id = Some(server);
         }
+        if episode_complete
+            && let (Some(server), Some(subjects)) = (&server_id, &database_subjects)
+        {
+            let fresh;
+            let item = if !has_provider_id(item, "Bangumi")
+                && let Some(id) = mapped_archive_episode_id(
+                    &collector
+                        .require_store()
+                        .await?
+                        .archived_bangumi_episodes(subjects)
+                        .await?,
+                    item,
+                )
+            {
+                if emby
+                    .fill_episode_bangumi_id(&collector.client, item, id)
+                    .await?
+                {
+                    eprintln!(
+                        "Automatic scrape Episode {} filled Bangumi ID {} from PostgreSQL.",
+                        event.id, id
+                    );
+                }
+                fresh = emby
+                    .automatic_item(&collector.client, &event.id, item_type)
+                    .await?
+                    .ok_or("Emby 条目在写入期间已消失。")?;
+                &fresh.data["item"]
+            } else {
+                item
+            };
+            // A retry can see the ID saved by a previous attempt. Keep this route
+            // limited to Emby's provider ID and the normal index sync.
+            collector.upsert_emby_item(server, &event.id, item, None).await?;
+            return Ok(Outcome::Skipped);
+        }
+        let settings = collector.output_settings().ok_or("自动写回设置不可用。")?;
+        let paths = settings.media_paths();
         let mapped_subjects = database_subjects
             .as_deref()
             .unwrap_or_else(|| self.season_map.subjects(item));
@@ -406,7 +447,6 @@ impl AutoScrape {
                 .gather_automatic_work(kind, event.id.clone(), &query, home, &candidate)
                 .await?
         };
-        let central = self.central_metadata && !private;
         if central {
             collector.require_store().await?;
             let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;

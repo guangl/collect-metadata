@@ -4,7 +4,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{Client, Response, Url};
 use serde_json::{Value, json};
 
-use super::{Emby, is_item_id, list, nonempty_text};
+use super::{Emby, has_provider_id, is_item_id, list, nonempty_text};
 use crate::output::download_image;
 use crate::providers::media::episode_title::{field_locked, needs_title, usable};
 
@@ -37,14 +37,7 @@ impl Emby {
             .ok_or("Emby 条目缺少媒体路径。")?;
         let root = self.internal_storage_root(client, path).await?;
         let fields = &record["fields"];
-        let admin = self.extras_user(client).await?;
-        let mut url = self.endpoint(&format!("Users/{admin}/Items/{id}"));
-        url.query_pairs_mut()
-            .append_pair("Fields", "ChannelMappingInfo")
-            .append_pair(
-                "ExcludeFields",
-                "Chapters,MediaSources,MediaStreams,Subviews",
-            );
+        let url = self.automatic_edit_url(client, id).await?;
         let mut current = self.read_json(client, url.clone()).await?;
         if current["Path"].as_str() != path.to_str()
             || current["Type"] != item["Type"]
@@ -136,6 +129,77 @@ impl Emby {
         Ok(())
     }
 
+    pub(crate) async fn fill_episode_bangumi_id(
+        &self,
+        client: &Client,
+        item: &Value,
+        bangumi_id: u32,
+    ) -> Result<bool, String> {
+        let id = item["Id"]
+            .as_str()
+            .filter(|id| is_item_id(id))
+            .ok_or("Emby 条目 ID 无效。")?;
+        let path = item["Path"]
+            .as_str()
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .ok_or("Emby 条目缺少媒体路径。")?;
+        self.internal_storage_root(client, path).await?;
+        let url = self.automatic_edit_url(client, id).await?;
+        let mut current = self.read_json(client, url.clone()).await?;
+        if current["Type"] != "Episode"
+            || [
+                "Id",
+                "Path",
+                "SeriesId",
+                "ParentIndexNumber",
+                "IndexNumber",
+                "IndexNumberEnd",
+                "PremiereDate",
+            ]
+            .iter()
+            .any(|&field| current[field] != item[field])
+        {
+            return Err("Emby 分集在核对映射期间发生变化，请重试。".into());
+        }
+        if current["LockData"] == true
+            || current["LockData"]["Enabled"] == true
+            || current["IsLocked"] == true
+            || !merge_missing_provider_id(&mut current, "Bangumi", Some(&bangumi_id.to_string()))
+        {
+            return Ok(false);
+        }
+        self.automatic_post(
+            client,
+            self.endpoint(&format!("Items/{id}")),
+            "application/json",
+            current.to_string(),
+        )
+        .await?;
+        let saved = self.read_json(client, url).await?;
+        if current["ProviderIds"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .any(|(provider, id)| saved["ProviderIds"][provider] != *id)
+        {
+            return Err("Emby 没有保留全部分集来源 ID。".into());
+        }
+        Ok(true)
+    }
+
+    async fn automatic_edit_url(&self, client: &Client, id: &str) -> Result<Url, String> {
+        let admin = self.extras_user(client).await?;
+        let mut url = self.endpoint(&format!("Users/{admin}/Items/{id}"));
+        url.query_pairs_mut()
+            .append_pair("Fields", "ChannelMappingInfo")
+            .append_pair(
+                "ExcludeFields",
+                "Chapters,MediaSources,MediaStreams,Subviews",
+            );
+        Ok(url)
+    }
+
     async fn internal_storage_root(&self, client: &Client, path: &Path) -> Result<PathBuf, String> {
         let libraries = self
             .read_json(client, self.endpoint("Library/VirtualFolders"))
@@ -187,6 +251,24 @@ impl Emby {
     }
 }
 
+fn merge_missing_provider_id(item: &mut Value, key: &str, id: Option<&str>) -> bool {
+    if !has_provider_id(item, key)
+        && !list(&item["LockedFields"])
+            .any(|field| matches!(field.as_str(), Some("ProviderIds" | "ExternalIds")))
+        && let Some(id) = id.filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0))
+    {
+        let ids = &mut item["ProviderIds"];
+        let key = ids
+            .as_object()
+            .and_then(|ids| ids.keys().find(|name| name.eq_ignore_ascii_case(key)))
+            .cloned()
+            .unwrap_or_else(|| key.to_owned());
+        ids[key] = json!(id);
+        return true;
+    }
+    false
+}
+
 fn merge_missing(item: &mut Value, fields: &Value) -> bool {
     let mut changed = false;
     if needs_title(item) && let Some(title) = usable(&fields["title"], item) {
@@ -199,16 +281,7 @@ fn merge_missing(item: &mut Value, fields: &Value) -> bool {
         changed = true;
     }
     for (key, source) in [("Tmdb", "tmdb_id"), ("Bangumi", "bangumi_id")] {
-        if nonempty_text(&item["ProviderIds"][key]).is_none()
-            && !list(&item["LockedFields"])
-                .any(|field| matches!(field.as_str(), Some("ProviderIds" | "ExternalIds")))
-            && let Some(id) = fields[source]
-                .as_str()
-                .filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0))
-        {
-            item["ProviderIds"][key] = json!(id);
-            changed = true;
-        }
+        changed |= merge_missing_provider_id(item, key, fields[source].as_str());
     }
     for (key, locked, source) in [
         ("Overview", "Overview", "description"),
@@ -229,6 +302,28 @@ fn merge_missing(item: &mut Value, fields: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fills_only_the_missing_bangumi_id_for_a_complete_episode() {
+        let mut episode = json!({
+            "Type":"Episode", "Name":"原有标题", "Overview":"原有简介",
+            "ImageTags":{"Primary":"existing-image"}, "ProviderIds":{"Tvdb":"12006499"}
+        });
+        let mut expected = episode.clone();
+        expected["ProviderIds"]["Bangumi"] = json!("1749199");
+        assert!(merge_missing_provider_id(&mut episode, "Bangumi", Some("1749199")));
+        assert_eq!(episode, expected);
+        assert!(!merge_missing_provider_id(&mut episode, "Bangumi", Some("1749200")));
+        assert_eq!(episode, expected);
+
+        let mut legacy = json!({"ProviderIds":{"bangumi":"123456"}});
+        assert!(!merge_missing_provider_id(&mut legacy, "Bangumi", Some("1749199")));
+        assert_eq!(legacy["ProviderIds"], json!({"bangumi":"123456"}));
+
+        let mut locked = json!({"LockedFields":["ExternalIds"],"ProviderIds":{"Tvdb":"12006499"}});
+        assert!(!merge_missing_provider_id(&mut locked, "Bangumi", Some("1749199")));
+        assert_eq!(locked["ProviderIds"], json!({"Tvdb":"12006499"}));
+    }
 
     #[test]
     fn only_fills_absent_unlocked_fields() {

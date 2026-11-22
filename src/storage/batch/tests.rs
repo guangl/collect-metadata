@@ -41,15 +41,15 @@ async fn complete_bangumi_archives_keep_part_order_and_ignore_stale_rows() {
     .execute(&store.pool)
     .await
     .unwrap();
-    let episodes = store.archived_bangumi_episodes(&[12, 11]).await;
+    let episodes = store.archived_bangumi_episodes(&[12, 11]).await.unwrap();
     let sorts: Vec<_> = episodes.iter().map(|entry| entry["sort"].as_u64().unwrap()).collect();
     assert_eq!(sorts, [25, 26, 27]);
-    assert!(store.archived_bangumi_episodes(&[12, 99]).await.is_empty());
+    assert!(store.archived_bangumi_episodes(&[12, 99]).await.unwrap().is_empty());
     sqlx::query("UPDATE collect_metadata_anime_subjects SET expected_episodes=2 WHERE bangumi_id=11")
         .execute(&store.pool)
         .await
         .unwrap();
-    assert!(store.archived_bangumi_episodes(&[12, 11]).await.is_empty());
+    assert!(store.archived_bangumi_episodes(&[12, 11]).await.unwrap().is_empty());
     store.pool.close().await;
     sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
