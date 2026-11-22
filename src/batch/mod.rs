@@ -1,4 +1,6 @@
 pub(crate) mod ai;
+#[cfg(feature = "web")]
+mod auto_scrape;
 mod folder;
 #[cfg(feature = "web")]
 mod mounted;
@@ -19,6 +21,8 @@ use crate::{
 };
 
 pub use writeback::WritebackPreview;
+#[cfg(feature = "web")]
+pub use auto_scrape::AutoScrape;
 pub use folder::{
     FolderBatchResult, FolderPreview, FolderSelection, FolderWorkPreview, MAX_FOLDER_FILES,
     preview_folder,

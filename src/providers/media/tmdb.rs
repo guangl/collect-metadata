@@ -113,6 +113,13 @@ impl Tmdb {
             .collect())
     }
 
+    #[cfg(feature = "web")]
+    pub(crate) async fn automatic_candidates(
+        &self, client: &Client, kind: MediaKind, query: &str, language: &str,
+    ) -> Vec<Candidate> {
+        self.search(client, kind, query, language).await.unwrap_or_default()
+    }
+
     pub(super) async fn search_id(
         &self,
         client: &Client,
@@ -285,6 +292,32 @@ impl Tmdb {
         Some(source)
     }
 
+    #[cfg(feature = "web")]
+    pub(crate) async fn emby_season(
+        &self,
+        client: &Client,
+        series: u32,
+        number: u64,
+        language: &str,
+    ) -> Result<Source, String> {
+        let path = format!("tv/{series}/season/{number}");
+        let data = self.get(client, &self.endpoint(&path, language)).await
+            .map_err(|error| format!("TMDB：{}", error.description()))?;
+        if data["season_number"].as_u64() != Some(number) || data["name"].as_str().is_none() {
+            return Err("TMDB 返回的季号不匹配。".into());
+        }
+        let page = Url::parse(&format!("https://www.themoviedb.org/{path}")).unwrap();
+        let fields = field_map([
+            ("title", data["name"].clone()),
+            ("description", data["overview"].clone()),
+            ("poster_url", json!(image(&data["poster_path"], "w500"))),
+            ("release_date", data["air_date"].clone()),
+            ("season_number", json!(number)),
+            ("tmdb_id", json!(data["id"].as_u64().map(|id| id.to_string()))),
+        ]);
+        Ok(Source::found(NAME, &page, fields, data))
+    }
+
     async fn find_episode(
         &self,
         client: &Client,
@@ -338,6 +371,17 @@ impl Tmdb {
         id: u32,
         language: &str,
     ) -> Source {
+        self.work_details(client, kind, id, language, true).await
+    }
+
+    pub(crate) async fn work_details(
+        &self,
+        client: &Client,
+        kind: MediaKind,
+        id: u32,
+        language: &str,
+        include_episodes: bool,
+    ) -> Source {
         let namespace = namespace(kind);
         let page = Url::parse(&format!("https://www.themoviedb.org/{namespace}/{id}")).unwrap();
         let mut details = self.endpoint(&format!("{namespace}/{id}"), language);
@@ -346,9 +390,14 @@ impl Tmdb {
         } else {
             "aggregate_credits,content_ratings"
         };
+        let components = if include_episodes {
+            format!("{COMMON},{extra}")
+        } else {
+            format!("external_ids,images,keywords,translations,{extra}")
+        };
         details
             .query_pairs_mut()
-            .append_pair("append_to_response", &format!("{COMMON},{extra}"))
+            .append_pair("append_to_response", &components)
             .append_pair(
                 "include_image_language",
                 &format!("{},en,null", language.split('-').next().unwrap_or(language)),
@@ -363,7 +412,7 @@ impl Tmdb {
             Err(error) => return Source::failure(NAME, &page, error),
         };
 
-        if language.split('-').next() != Some("en")
+        if include_episodes && language.split('-').next() != Some("en")
             && !list(&data["videos"]["results"]).any(|video| video["type"] == "Trailer")
         {
             let endpoint = self.endpoint(&format!("{namespace}/{id}/videos"), "en-US");
@@ -376,7 +425,7 @@ impl Tmdb {
         }
 
         let mut stage_note = None;
-        if kind == MediaKind::Series {
+        if include_episodes && kind == MediaKind::Series {
             let season_numbers = data["seasons"]
                 .as_array()
                 .into_iter()

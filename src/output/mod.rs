@@ -62,6 +62,8 @@ pub(crate) fn emby_source(record: &Value) -> Option<&Value> {
 
 pub(crate) use emby::{PreparedWriteback, WritebackJob, WritebackState, plan as plan_writeback, prepare as prepare_writeback};
 pub use emby::WritebackPreviewFile;
+#[cfg(feature = "web")]
+pub(crate) use emby::write_automatic;
 
 pub(crate) struct BatchExport {
     temporary: tempfile::TempDir,

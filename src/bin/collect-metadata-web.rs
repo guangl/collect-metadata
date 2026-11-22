@@ -17,7 +17,7 @@ use axum::{
     routing::{get, post},
 };
 use collect_metadata::{
-    AiBatchInput, BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput,
+    AiBatchInput, AutoScrape, BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput,
     EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope, EmbySelectionInput, EmbySettings,
     HistoryItem, LanguageSettings, LookupResponse, MediaKind, MediaProvider, OutputOptions,
     OutputSettings, TmdbSettings, browse_mounted_folders, diagnostics, preview_folder,
@@ -162,6 +162,11 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         "web_listening",
         json!({"port": listener.local_addr()?.port()}),
     );
+    if let Some(automatic) =
+        diagnostics::startup_step("auto_scrape_config", AutoScrape::from_environment())?
+    {
+        tokio::spawn(automatic.run(Arc::clone(&collector)));
+    }
     tokio::spawn(collector.run_batch_worker());
     axum::serve(listener, app).await?;
     Ok(())

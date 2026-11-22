@@ -137,7 +137,7 @@ static YEAR: LazyLock<Regex> =
 static TRAILING_YEAR: LazyLock<Regex> =
     LazyLock::new(|| pattern(r"^(.*?) \(((?:19[0-9]|20[0-3])[0-9])\)$"));
 static ID: LazyLock<Regex> =
-    LazyLock::new(|| pattern(r"(?i)\b(tmdb|bangumi)[-_:= ]+([1-9][0-9]{0,9})\b"));
+    LazyLock::new(|| pattern(r"(?i)\b(tmdb|bangumi)(?:id)?[-_:= ]+([1-9][0-9]{0,9})\b"));
 static NUMBERED_AV: LazyLock<Regex> =
     LazyLock::new(|| pattern(r"(?i)^\s*([a-z]{2,8})[-_－]([0-9]{3,6})(?:$|[^a-z0-9])"));
 static COMPACT_AV: LazyLock<Regex> =
@@ -353,7 +353,7 @@ fn generic_file(value: &str) -> bool {
         )
 }
 
-fn av_code(stem: &str) -> Option<String> {
+pub(super) fn av_code(stem: &str) -> Option<String> {
     if let Some(code) = Identifier::special_filename(stem) {
         return Some(code);
     }
@@ -372,7 +372,7 @@ fn year_digits(value: &str) -> bool {
     matches!(value.parse::<u16>(), Ok(1900..=2039)) && value.len() == 4
 }
 
-fn catalog_query(stem: &str) -> Option<String> {
+pub(super) fn catalog_query(stem: &str) -> Option<String> {
     let matches = ID.captures(stem)?;
     let id = matches.get(2)?.as_str();
     if matches[1].eq_ignore_ascii_case("bangumi") {
@@ -481,6 +481,7 @@ mod tests {
             "Media/films/Parasite (2019) [1080p].mp4",
             "Media/films/Blade.Runner.2049.2017.1080p.mkv",
             "Media/films/[tmdb-550].mp4",
+            "Media/films/Example [tmdbid=550].mp4",
             "Media/films/[bangumi-160209].mkv",
             "Media/星际牛仔 [bangumi-253]/Season 01/S01E02.mkv",
             "Media/av/[Release] ssis-001-C.mkv",
@@ -495,7 +496,7 @@ mod tests {
         let (items, info) = classify_paths(paths).unwrap();
         let get = |query| items.iter().find(|item| item.query == query).unwrap();
         assert_eq!(info.works, 8);
-        assert_eq!(info.files, 11);
+        assert_eq!(info.files, 12);
         assert_eq!(info.skipped, 3);
         assert_eq!(get("Dark (2017)").kind, MediaKind::Series);
         assert_eq!(get("Dark (2017)").source_files.len(), 2);

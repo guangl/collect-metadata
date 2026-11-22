@@ -165,6 +165,14 @@ EMBY_WRITEBACK_MOUNT=/宿主机/媒体目录 docker compose -f compose.yaml -f d
 2. 在 Emby 控制台的「媒体库」为电影和剧集分别启用所需的元数据下载器、图片下载器和首选语言。插件沿用这些设置，不需要 Collect Metadata Web、PostgreSQL 或本应用里配置的 TMDB 密钥。如果未开启实时监控，文件要等计划扫描或手动扫描才会入库。
 3. 在测试库放入一部新电影或一个新分集，等 Emby 扫描和后台刷新完成。在 Emby 日志中可看到 `Collect Metadata - Auto Scrape` 记录的 `Requested metadata refresh for …`（表示提交刷新，不代表匹配成功）。元数据结果取决于文件命名、媒体库设置和下载器的连通性。
 
+### 由 Collect Metadata 刮削并写回
+
+部署插件和 Web 服务后，可以给两个容器挂载同一个可写队列目录，并在两边将 \`EMBY_AUTO_SCRAPE_SPOOL\` 设为各自看到的队列绝对路径。插件收到 Emby 新入库事件即入队。Web 服务采集公开来源、写入缺少的 NFO 和图片，再请求 Emby 读取。应用重启时会继续处理队列里的事件。Emby 保持启用本地 NFO 读取。
+
+Web 服务还需要可写的 \`EMBY_WRITEBACK_ROOT\` 和「Emby 媒体写回」路径映射。在 \`EMBY_AUTO_SCRAPE_ROOTS\` 中以分号列出 Emby 看到的普通媒体库根目录，私人影片库使用 \`EMBY_AUTO_SCRAPE_PRIVATE_ROOTS\`。同一 NAS 可以通过 \`EMBY_AUTO_SCRAPE_URL\` 为自动任务指定容器网络内的 Emby 地址，沿用已保存的 API 密钥。保留现有媒体文件和旁挂资料。
+
+文件或剧集目录附上 \`[tmdbid=123]\` 或 \`[bangumiid=123]\` 可以指定作品。遇到无法确认的匹配，查看 Web 服务日志。正式停用其他元数据和图片下载器之前，先在测试库验证新电影和新分集能自动生成资料并被 Emby 读取。
+
 ### 自动整理媒体库根目录（可选）
 
 升级 Emby 插件后，可以直接把电影或有明确季集号的分集放进对应的 Emby 媒体库根目录。插件默认每 2 分钟检查一次，只处理连续两次观察到大小和修改时间未变的视频；大文件建议先复制到库外，完成后再移入，避免复制暂停时被误判为已完成。
