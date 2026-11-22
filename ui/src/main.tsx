@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { clearHistory, getHistory, getHistoryLanguages, getStorageStatus, loadSnapshot } from "./api";
+import { BackgroundTasks } from "./batch/BackgroundTasks";
 import { Batch } from "./batch/Batch";
 import type { FolderSelection } from "./batch/engine";
 import { ExternalLink, LanguageSelect, languageText, PosterCard } from "./Catalog";
@@ -15,6 +16,7 @@ import "./style.css";
 
 const entries = [
   { name: "batch", label: "刮削工作台", icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" },
+  { name: "tasks", label: "后台任务", icon: "M9 5H5v14h14V5h-4M9 4h6v3H9zM8 11h8m-8 4h8" },
   { name: "history", label: "采集历史", icon: "M4 9h16v10H4zM3 5h18v4H3zM10 13h4" },
   { name: "settings", label: "设置", icon: "M4 7h5m4 0h7M4 12h10m4 0h2M4 17h2m4 0h10M9 5v4m5 1v4m-8 1v4" },
   { name: "about", label: "关于", icon: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 11v5m0-8h.01" },
@@ -37,9 +39,9 @@ function WorkspaceHeader({ view, setView, storage, openStorage, theme, setTheme 
           <img className="size-7 shrink-0 rounded-lg sm:size-[34px]" src="./icon.png" alt="" width="34" height="34" />
           <span>Collect <strong>Metadata</strong></span>
         </button>
-        <nav className="col-span-full row-start-2 grid grid-cols-4 gap-1 lg:col-auto lg:row-auto" aria-label="工作区">
+        <nav className="col-span-full row-start-2 flex flex-wrap gap-1 lg:col-auto lg:row-auto lg:flex-nowrap" aria-label="工作区">
           {entries.map(({ name, label, icon }) => (
-            <button type="button" className="nav-button px-1.5 text-[13px] sm:px-3 sm:text-sm" aria-current={view === name ? "page" : undefined}
+            <button type="button" className="nav-button grow whitespace-nowrap px-1 text-[13px] sm:px-3 sm:text-sm lg:grow-0" aria-current={view === name ? "page" : undefined}
               key={name} onClick={() => setView(name)}>
               <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65"
                 strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg>{label}
@@ -255,10 +257,12 @@ export function App() {
   const [current, setCurrent] = useState<{ response: LookupResponse; opener: HTMLButtonElement } | null>(null);
   const [theme, setTheme] = useTheme();
   const [storage, setStorage] = useState<StorageStatus>("pending");
-  const [notice, setNotice] = useState<{ message: string; kind?: "error" } | null>(null);
+  const [notice, setNotice] = useState<{ message: string; kind?: "error"; batch?: number } | null>(null);
+  const [selectedBatch, setSelectedBatch] = useState<number | null>(null);
   const [databaseVersion, setDatabaseVersion] = useState(0);
   const [folderSelection, setFolderSelection] = useState<FolderSelection | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("output");
+  const noticeBatch = notice?.batch;
 
   const showInfo = (message: string) => setNotice({ message });
   const showError = (message: string) => setNotice({ message, kind: "error" });
@@ -276,6 +280,16 @@ export function App() {
     setView(next);
     setCurrent(null);
     window.scrollTo(0, 0);
+  }
+
+  function batchCreated(id: number, message: string) {
+    setSelectedBatch(id);
+    setNotice({ message, batch: id });
+  }
+
+  function openBatch(id: number) {
+    setSelectedBatch(id);
+    navigate("tasks");
   }
 
   function open(response: LookupResponse, opener: HTMLButtonElement) {
@@ -301,17 +315,23 @@ export function App() {
       <main className="min-w-0">
         {notice && <div className="mx-auto max-w-workspace px-gutter pt-3 text-sm text-accent [overflow-wrap:anywhere] data-[kind=error]:text-danger" role={notice.kind === "error" ? "alert" : "status"} data-kind={notice.kind}>
           {notice.message}
+          {noticeBatch !== undefined && view !== "tasks" && <button type="button" className="ms-2 underline"
+            onClick={() => openBatch(noticeBatch)}>查看批次 #{noticeBatch}</button>}
           {notice.kind === "error" && <button type="button" className="ms-2 underline" onClick={openDiagnostics}>日志与排查</button>}
         </div>}
         <div className="mx-auto max-w-workspace px-gutter pb-14 pt-6 sm:pt-9 lg:pt-12">
           <div hidden={view !== "batch"}><Batch key={databaseVersion} active={view === "batch"} storage={storage}
             folderSelection={folderSelection} setFolderSelection={setFolderSelection} onConfigure={openStorage}
             onConfigureEmby={() => { setSettingsSection("emby"); navigate("settings"); }}
+            onNotice={showInfo} onBatchCreated={batchCreated} onOpenBatch={openBatch} /></div>
+          <div hidden={view !== "tasks"}><BackgroundTasks key={databaseVersion} active={view === "tasks"} storage={storage}
+            selected={selectedBatch} setSelected={setSelectedBatch} onConfigure={openStorage}
             onNotice={showInfo} onError={showError} /></div>
           {view === "settings" ? (
             <Settings section={settingsSection} onSection={setSettingsSection} storage={storage}
               onStorage={setStorage} onError={showError} onConnected={() => {
                 setStorage("ready");
+                setSelectedBatch(null);
                 setDatabaseVersion((version) => version + 1);
               }} />
           ) : view === "about" ? <About onError={showError} /> : view === "history" ? <>

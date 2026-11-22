@@ -105,11 +105,12 @@ function WorkPictures({ work }: { work: EmbyWorkPreview }) {
   </div>;
 }
 
-export function EmbyWorkPreviewDialog({ work, library, missingEpisodeIds, onClose, canScrape, usesQueue, onScrape }: ScrapeControls & {
+export function EmbyWorkPreviewDialog({ work, library, missingEpisodeIds, onClose, canScrape, usesQueue, onScrape, onOpenBatch }: ScrapeControls & {
   work: EmbyWorkPreview;
   library: string;
   missingEpisodeIds?: string[];
   onClose: () => void;
+  onOpenBatch: (id: number) => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const pressedBackdrop = useRef(false);
@@ -155,6 +156,11 @@ export function EmbyWorkPreviewDialog({ work, library, missingEpisodeIds, onClos
     onClose();
   }
 
+  function openBatch(id: number) {
+    close();
+    onOpenBatch(id);
+  }
+
   return <dialog className="work-preview" aria-labelledby={selected ? episodeTitle : title} ref={dialog}
     onCancel={(event) => { event.preventDefault(); close(); }}
     onPointerDown={(event) => { pressedBackdrop.current = clickedBackdrop(event); }}
@@ -184,7 +190,7 @@ export function EmbyWorkPreviewDialog({ work, library, missingEpisodeIds, onClos
             </dd></div>}
           </dl>
           <div className="mt-4"><EmbyScrapeActions target={{ type: "item", id: work.id, scope: work.kind }}
-            name={work.title} canScrape={canScrape} usesQueue={usesQueue} onScrape={onScrape} /></div>
+            name={work.title} canScrape={canScrape} usesQueue={usesQueue} onScrape={onScrape} onOpenBatch={openBatch} /></div>
         </div>
       </div>
       <Tabs label="作品资料" className="work-tabs" initialTab={missingEpisodeIds ? "episodes" : undefined} tabs={[
@@ -206,7 +212,7 @@ export function EmbyWorkPreviewDialog({ work, library, missingEpisodeIds, onClos
       <div className="mt-3"><EmbyScrapeActions key={selected.episode.id}
         target={{ type: "item", id: selected.episode.id, scope: "episode" }}
         name={`${work.title} · ${seasonLabel(selected.season)} · ${selected.episode.title}`}
-        canScrape={canScrape} usesQueue={usesQueue} onScrape={onScrape}
+        canScrape={canScrape} usesQueue={usesQueue} onScrape={onScrape} onOpenBatch={openBatch}
         onSubmitted={() => setEpisodeRevision((value) => value + 1)} /></div>
       <Tabs label="分集资料" className="mt-4" tabs={[{ id: "details", label: "分集简介", content: <div className="mt-4 grid items-start gap-4 sm:grid-cols-[minmax(0,45fr)_minmax(0,55fr)] sm:gap-5">
         <EmbyArtwork id={selected.episode.id} tag={selected.episode.image} image="episode" eager />

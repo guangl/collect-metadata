@@ -4,7 +4,7 @@
 [![桌面版下载](https://img.shields.io/github/v/release/guangl/collect-metadata?label=桌面版)](https://github.com/guangl/collect-metadata/releases/latest)
 [![Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**给本地文件夹和 Emby 媒体库用的自托管元数据刮削工具。** 在一个工作台里预览作品、提交后台任务、查看结果并导出资料。工作台不移动或改写原视频；Emby 插件另有默认关闭的散文件整理。
+**给本地文件夹和 Emby 媒体库用的自托管元数据刮削工具。** 在刮削工作台预览作品并提交采集，在「后台任务」查看进度、结果并导出资料。工作台不移动或改写原视频；Emby 插件另有默认关闭的散文件整理。
 
 [项目站](https://guangl.github.io/collect-metadata/) · [快速上手](#快速上手) · [桌面版](#tauri-桌面版) · [Emby 插件](#emby-入库自动刮削插件) · [更新日志](CHANGELOG.md) · [贡献指南](.github/CONTRIBUTING.md) · [安全报告](.github/SECURITY.md) · [日志与排查](docs/TROUBLESHOOTING.md)
 
@@ -235,7 +235,7 @@ mywife：Mywife-0123
 
 每批最多 100 条，同时处理 3 条。唯一精确匹配会自动采集。同名或相近候选会进入「待选择」，可按年份和原始语言确认。等待选择的条目会让出并发位置。失败的条目可单独重试，已有结果可展开或导出 JSON。
 
-后台服务会把批次、逐条阶段、候选和结果保存到 PostgreSQL。提交后可以关闭页面，重新打开「刮削工作台」即可在「后台任务」中选择原批次。完成的资料与任务状态在同一事务保存。
+后台服务会把批次、逐条阶段、候选和结果保存到 PostgreSQL。提交后可点击「查看批次」打开对应任务，也可稍后从主导航进入「后台任务」并选择原批次。完成的资料与任务状态在同一事务保存。
 
 - 「暂停批次」停止处理未完成条目。「继续批次」恢复排队，并恢复原有待选候选。
 - 「取消批次」永久停止该批次，已完成的结果仍可查看和导出。

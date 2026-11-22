@@ -175,7 +175,10 @@ function LibraryWorks({ library, canScrape, usesQueue, onScrape, aiConfigured, o
   </section>;
 }
 
-export const EmbyCatalog = memo(function EmbyCatalog({ libraries, ...controls }: ScrapeControls & SelectionControls & { libraries: EmbyLibraryPreview[] }) {
+export const EmbyCatalog = memo(function EmbyCatalog({ libraries, onOpenBatch, ...controls }: ScrapeControls & SelectionControls & {
+  libraries: EmbyLibraryPreview[];
+  onOpenBatch: (id: number) => void;
+}) {
   const [selected, setSelected] = useState<{ work: EmbyWorkPreview; library: string; missingEpisodeIds?: string[] }>();
 
   return <div className="min-w-0">
@@ -188,6 +191,6 @@ export const EmbyCatalog = memo(function EmbyCatalog({ libraries, ...controls }:
         onOpen={(work, missingEpisodeIds) => setSelected({ work, library: library.name, missingEpisodeIds })} />,
     }))} />
     {selected && <EmbyWorkPreviewDialog {...selected} canScrape={controls.canScrape} usesQueue={controls.usesQueue} onScrape={controls.onScrape}
-      onClose={() => setSelected(undefined)} />}
+      onOpenBatch={onOpenBatch} onClose={() => setSelected(undefined)} />}
   </div>;
 });

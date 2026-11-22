@@ -177,14 +177,14 @@ describe("外观", () => {
     const media = Object.assign(new EventTarget(), { matches: true });
     vi.stubGlobal("matchMedia", vi.fn(() => media));
     const { unmount } = render(<App />);
-    await screen.findByText("暂无后台任务。提交刮削后，可以在这里查看进度。");
+    await screen.findByRole("heading", { name: "刮削工作台" });
     expect(document.documentElement.dataset.theme).toBe("dark");
     act(() => { media.matches = false; media.dispatchEvent(new Event("change")); });
     expect(document.documentElement.dataset.theme).toBe("light");
     setLabel("外观主题", "dark");
     unmount();
     render(<App />);
-    await screen.findByText("暂无后台任务。提交刮削后，可以在这里查看进度。");
+    await screen.findByRole("heading", { name: "刮削工作台" });
     expect((screen.getByLabelText("外观主题") as HTMLSelectElement).value).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
     setLabel("外观主题", "system");
@@ -262,15 +262,21 @@ describe("海报与详情", () => {
     expect(within(screen.getByRole("region", { name: "编剧" })).getByText("编剧甲")).toBeTruthy();
   });
 
-  it("默认打开刮削工作台，导航不提供独立作品采集页", async () => {
-    harness();
+  it("默认打开刮削工作台，通过主导航单独打开后台任务", async () => {
+    const calls = harness();
     render(<App />);
     expect(screen.getByRole("heading", { name: "刮削工作台", level: 1 })).toBeTruthy();
     const nav = within(screen.getByRole("navigation", { name: "工作区" }));
     expect(nav.getAllByRole("button").map((item) => item.textContent)).toEqual([
-      "刮削工作台", "采集历史", "设置", "关于",
+      "刮削工作台", "后台任务", "采集历史", "设置", "关于",
     ]);
     expect(nav.getByRole("button", { name: "刮削工作台" }).getAttribute("aria-current")).toBe("page");
+    await screen.findByRole("button", { name: "选择媒体文件夹" });
+    expect(screen.queryByRole("heading", { name: "后台任务" })).toBeNull();
+    expect(calls.mock.calls.some(([route]) => route === "/api/batches")).toBe(false);
+    click("后台任务");
+    expect(nav.getByRole("button", { name: "后台任务" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { name: "后台任务", level: 1 })).toBe(document.activeElement);
     await screen.findByText("暂无后台任务。提交刮削后，可以在这里查看进度。");
     click("采集历史");
     expect(nav.getByRole("button", { name: "采集历史" }).getAttribute("aria-current")).toBe("page");
@@ -485,6 +491,7 @@ describe("后台批次", () => {
     harness([item, { ...item, id: 2, query: "选择条目", stage:"choice", candidates: [candidate], has_result: false, file_count: 0, output: null },
       { ...item, id: 3, query: "失败条目", stage: "failed", message: "来源连接超时。", has_result: false, file_count: 0, output: null }]);
     render(<App />);
+    click("后台任务");
     await screen.findByText("/output/film");
     expect(screen.getByText("【错误码 BATCH_ITEM_FAILED】来源连接超时。")).toBeTruthy();
     details("101 个关联文件");
@@ -511,6 +518,7 @@ describe("后台批次", () => {
   it("预览部分写回中的失败文件，确认后能查看原件备份", async () => {
     const calls = harness([{ ...item, writeback: "failed" }]);
     render(<App />);
+    click("后台任务");
     fireEvent.click(await screen.findByRole("button", { name: "查看失败并重试" }));
     const preview = await screen.findByRole("dialog", { name: "Emby 媒体写回" });
     await within(preview).findByText("替换并备份 ·", { exact: false });
@@ -536,6 +544,10 @@ describe("后台批次", () => {
     await screen.findByRole("list", { name: "待刮削作品" });
     expect((button("开始刮削元数据") as HTMLButtonElement).disabled).toBe(true);
     expect(calls.mock.calls.some(([route]) => route === "/api/folder-batches")).toBe(false);
+    click("后台任务");
+    expect(screen.getByText("PostgreSQL 连接异常，无法读取后台任务。")).toBeTruthy();
+    click("数据库设置");
+    expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeTruthy();
   });
 
   it("浏览服务器挂载目录，预览后才提交共享文件", async () => {
@@ -563,7 +575,12 @@ describe("后台批次", () => {
 
   it("提交文件夹和手动列表，并处理暂停、继续、取消", async () => {
     const calls = harness([{ ...item, stage: "queued", has_result: false, file_count: 0, output: null }]);
+    const defaultRequest = calls.getMockImplementation()!;
+    calls.mockImplementation((route, options) => route === "/api/batches" && options?.method === "POST"
+      ? Promise.resolve(response(10, 201))
+      : defaultRequest(route, options));
     const { container } = render(<App />);
+    click("后台任务");
     await screen.findByRole("button", { name: "暂停批次" });
     click("暂停批次");
     await screen.findByRole("button", { name: "继续批次" });
@@ -574,6 +591,8 @@ describe("后台批次", () => {
     click("取消批次");
     click("确认取消");
     await screen.findByText("已取消", { exact: true });
+    click("刮削工作台");
+    await screen.findByRole("button", { name: "选择媒体文件夹" });
     const files = container.querySelector<HTMLInputElement>("input[type=file]")!;
     const file = new File([""], "work.mkv");
     Object.defineProperty(file, "webkitRelativePath", { value: "媒体/work.mkv" });
@@ -594,12 +613,16 @@ describe("后台批次", () => {
     const submitted = calls.mock.calls.filter(([route]) => route === "/api/folder-batches");
     expect(submitted).toHaveLength(1);
     expect(JSON.parse(String(submitted[0][1]?.body))).toEqual(["媒体/work.mkv"]);
+    expect(screen.queryByRole("list", { name: "批次作品海报" })).toBeNull();
+    click("查看批次 #9");
     await screen.findByRole("list", { name: "批次作品海报" });
+    click("刮削工作台");
     details("手动输入作品");
     setLabel("作品清单", "电影：片名\n剧集：剧名\nABC-123");
     setLabel("默认类型", "av");
     click("提交后台采集");
-    await waitFor(() => expect(calls.mock.calls.some(([route, options]) => route === "/api/batches" && options?.method === "POST")).toBe(true));
+    fireEvent.click(await screen.findByRole("button", { name: "查看批次 #10" }));
+    expect(await screen.findByText("批次 #10")).toBeTruthy();
   });
 
   it("在媒体库海报的条目信息中链接站点 ID", async () => {
@@ -897,6 +920,7 @@ describe("后台批次", () => {
       original_languages: [], file_count: 1, output: null };
     const calls = harness([row]);
     render(<App />);
+    click("后台任务");
     fireEvent.click(await screen.findByRole("button", { name: "纠正匹配" }));
     setLabel("片名或 TMDB ID", "寄生虫");
     click("搜索作品");
@@ -948,7 +972,11 @@ describe("后台批次", () => {
     confirmScrape();
     await within(animatedFilm).findByText("Collect Metadata 已创建后台采集任务 #9。");
     expect(calls.mock.calls.find(([route]) => route === "/api/emby/items/30/scrape")?.[1]?.body).toBe('"movie"');
-    click("关闭详情");
+    fireEvent.click(within(animatedFilm).getByRole("button", { name: "查看批次 #9" }));
+    expect(animatedFilm.isConnected).toBe(false);
+    expect(await screen.findByRole("combobox", { name: "已提交批次" })).toHaveProperty("value", "9");
+    click("刮削工作台");
+    await screen.findByRole("tab", { name: "私人影片" });
 
     fireEvent.click(screen.getByRole("tab", { name: "私人影片" }));
     const privateLibrary = screen.getByRole("tabpanel", { name: "私人影片" });

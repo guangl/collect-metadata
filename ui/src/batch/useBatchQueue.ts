@@ -1,28 +1,32 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { getBatchView, listBatches } from "../api";
 import { errorText, type StorageStatus } from "../types";
 import type { BatchSummary, BatchView } from "./engine";
 
-export function useBatchQueue(active: boolean, storage: StorageStatus, setError: (message: string) => void) {
+export function useBatchQueue(active: boolean, storage: StorageStatus, selected: number | null,
+  setSelected: Dispatch<SetStateAction<number | null>>, setError: (message: string) => void) {
   const [summaries, setSummaries] = useState<BatchSummary[]>([]);
   const [listLoaded, setListLoaded] = useState(false);
   const [older, setOlder] = useState(false);
-  const [selected, setSelected] = useState<number | null>(null);
   const [batch, setBatch] = useState<{ id: number; view: BatchView } | null>(null);
   const [refresh, setRefresh] = useState(0);
   const [pollError, setPollError] = useState<string | null>(null);
+  const listRequest = useRef(0);
 
   const refreshList = useCallback(async (before: number | null = null) => {
+    const request = ++listRequest.current;
     const batches = await listBatches(before);
+    if (request !== listRequest.current) return;
     setSummaries((previous) => before === null ? batches : [...previous, ...batches]);
     setOlder(batches.length === 50);
     setSelected((current) => current ?? batches[0]?.id ?? null);
     setListLoaded(true);
-  }, []);
+  }, [setSelected]);
 
   useEffect(() => {
     if (!active || storage !== "ready") return;
     refreshList().catch((error) => setError(errorText(error)));
+    return () => { listRequest.current += 1; };
   }, [active, storage, refreshList, setError]);
 
   useEffect(() => {
@@ -64,5 +68,5 @@ export function useBatchQueue(active: boolean, storage: StorageStatus, setError:
     setRefresh((value) => value + 1);
   }
 
-  return { summaries, listLoaded, older, selected, setSelected, view, pollError, refreshList, refreshBatch };
+  return { summaries, listLoaded, older, view, pollError, refreshList, refreshBatch };
 }
