@@ -226,6 +226,17 @@ impl EmbySettings {
         Emby::new(&input, &self.imdb_ratings).ok().map(Arc::new)
     }
 
+    #[cfg(feature = "web")]
+    pub(crate) fn automatic_connection(&self, url: Option<&str>) -> Result<Arc<Emby>, String> {
+        let input = self.state.lock().expect("Emby settings lock");
+        if let Some(server) = url {
+            let local = EmbyInput { server: server.to_owned(), api_key: input.api_key.clone(), enabled: true };
+            Emby::new(&local, &self.imdb_ratings).map(Arc::new)
+        } else {
+            Emby::new(&input, &self.imdb_ratings).map(Arc::new)
+        }
+    }
+
     pub(crate) fn active(&self) -> Option<Arc<Emby>> {
         let input = self.state.lock().expect("Emby settings lock");
         input
@@ -369,6 +380,23 @@ impl Emby {
             .into_iter()
             .find(|library| library.id == id)
             .ok_or_else(|| "没有找到此 Emby 媒体库。".into())
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn refresh_sidecars(&self, client: &Client, id: &str) -> Result<(), String> {
+        if !is_item_id(id) {
+            return Err("Emby 条目 ID 无效。".into());
+        }
+        let mut url = self.endpoint(&format!("Items/{id}/Refresh"));
+        url.query_pairs_mut()
+            .append_pair("Recursive", "false")
+            .append_pair("MetadataRefreshMode", "FullRefresh")
+            .append_pair("ImageRefreshMode", "FullRefresh")
+            .append_pair("ReplaceAllMetadata", "true")
+            .append_pair("ReplaceAllImages", "false");
+        self.timed_response(client, Method::POST, url, Duration::from_secs(10))
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn overwrite_metadata(
@@ -579,6 +607,17 @@ impl Emby {
             })
             .map(Value::take)
             .ok_or_else(|| "未找到指定类型的 Emby 条目。".into())
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn automatic_item(
+        &self, client: &Client, id: &str, item_type: &str,
+    ) -> Result<Source, String> {
+        let requested = "Path,Overview,ProviderIds,OriginalTitle,ProductionYear,PremiereDate,Settings,LocationType";
+        let item = self.item(client, id, item_type, requested).await?;
+        let fields = if item_type == "Episode" { episode_fields(&item) } else { fields(&item, &[]) };
+        let source_url = self.endpoint(&format!("web/index.html#!/item?id={id}"));
+        Ok(Source::found("Emby", &source_url, fields, json!({"item":item})))
     }
 
     async fn details(&self, client: &Client, id: &str, item_type: &str) -> Option<Source> {

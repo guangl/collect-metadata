@@ -13,8 +13,9 @@ use super::{OutputFile, media, settings::OutputOptions};
 pub(super) fn work_xml(record: &Value, options: &OutputOptions, files: &[OutputFile]) -> String {
     let fields = &record["fields"];
     let episode = record["scope"] == "episode";
-    let series = record["media_type"] == "series" && !episode;
-    let root = if episode { "episodedetails" } else if series { "tvshow" } else { "movie" };
+    let season = record["scope"] == "season";
+    let series = record["media_type"] == "series" && !episode && !season;
+    let root = if episode { "episodedetails" } else if season { "season" } else if series { "tvshow" } else { "movie" };
     let mut body = String::new();
     let av = record["media_type"] == "av";
     let original_title = field(fields, &["title_original", "title_ja"]);
@@ -58,6 +59,9 @@ pub(super) fn work_xml(record: &Value, options: &OutputOptions, files: &[OutputF
                 .filter(|year| year.bytes().all(|byte| byte.is_ascii_digit()))
         }),
     );
+    if season {
+        number_tag(&mut body, "seasonnumber", fields["season_number"].as_u64());
+    }
     if episode {
         tag(&mut body, "showtitle", present(&fields["series"]));
         tag(&mut body, "aired", release);

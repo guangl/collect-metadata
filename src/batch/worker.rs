@@ -255,7 +255,7 @@ impl Collector {
         Some(outcome)
     }
 
-    async fn search_match(
+    pub(super) async fn search_match(
         &self,
         kind: MediaKind,
         query: &str,
@@ -346,7 +346,7 @@ fn match_key(claim: &Claim, import: bool, emby: Option<&Emby>) -> Option<String>
     })
 }
 
-fn normalize(value: &str) -> String {
+pub(super) fn normalize(value: &str) -> String {
     value
         .nfkc()
         .collect::<String>()

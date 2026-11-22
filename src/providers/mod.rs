@@ -101,7 +101,7 @@ async fn request_text(url: &Url, build: impl Fn(Url) -> RequestBuilder) -> Resul
 }
 
 impl Source {
-    fn found(provider: &'static str, url: &Url, fields: Fields, data: Value) -> Self {
+    pub(crate) fn found(provider: &'static str, url: &Url, fields: Fields, data: Value) -> Self {
         Self {
             provider,
             url: url.to_string(),
@@ -127,7 +127,7 @@ impl Source {
     }
 }
 
-fn field_map<const N: usize>(values: [(&'static str, Value); N]) -> Fields {
+pub(crate) fn field_map<const N: usize>(values: [(&'static str, Value); N]) -> Fields {
     values
         .into_iter()
         .filter(|(_, value)| match value {

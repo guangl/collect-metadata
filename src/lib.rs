@@ -21,6 +21,6 @@ pub use batch::{
     FolderSelection, FolderWorkPreview, MAX_FOLDER_FILES, WritebackPreview, preview_folder,
 };
 #[cfg(feature = "web")]
-pub use batch::{browse_mounted_folders, scan_mounted_folder};
+pub use batch::{AutoScrape, browse_mounted_folders, scan_mounted_folder};
 #[cfg(feature = "desktop")]
 pub use batch::{scan_folder_paths, scan_native_folder};

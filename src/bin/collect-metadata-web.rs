@@ -8,7 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use collect_metadata::{
-    AiBatchInput, BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput,
+    AiBatchInput, AutoScrape, BatchAction, BatchItemInput, CandidateChoice, Collector, EmbyInput,
     EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope, EmbySelectionInput, EmbySettings,
     HistoryItem, LanguageSettings, LookupResponse, MediaKind, MediaProvider, OutputOptions,
     OutputSettings, TmdbSettings, browse_mounted_folders, preview_folder, scan_mounted_folder,
@@ -119,6 +119,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = env::var("APP_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     eprintln!("Collect Metadata listening on {}", listener.local_addr()?);
+    if let Some(automatic) = AutoScrape::from_environment()? {
+        tokio::spawn(automatic.run(Arc::clone(&collector)));
+    }
     tokio::spawn(collector.run_batch_worker());
     axum::serve(listener, app).await?;
     Ok(())

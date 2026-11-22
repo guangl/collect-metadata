@@ -352,6 +352,8 @@ pub(crate) struct PlannedFile {
     target: Option<Target>,
     destinations: Vec<Destination>,
     blocked: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    create_only: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -451,13 +453,23 @@ pub(crate) fn plan(
     record: &Value,
     state: &WritebackState,
 ) -> (Vec<PlannedFile>, Vec<WritebackPreviewFile>, usize) {
+    plan_with_mode(paths, data, record, state, false)
+}
+
+fn plan_with_mode(
+    paths: &MediaPaths,
+    data: &Value,
+    record: &Value,
+    state: &WritebackState,
+    create_only: bool,
+) -> (Vec<PlannedFile>, Vec<WritebackPreviewFile>, usize) {
     let item = &data["item"];
     let series = item["Type"] == "Series";
     let children = data["children"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|child| series && child["Type"] == "Episode" && child["LocationType"] != "Virtual");
+        .filter(|child| !create_only && series && child["Type"] == "Episode" && child["LocationType"] != "Virtual");
     let fields = &record["fields"];
     let episodes: HashMap<_, _> = fields["episodes"]
         .as_array()
@@ -480,7 +492,7 @@ pub(crate) fn plan(
                 item["Name"].as_str().unwrap_or("")
             )
         });
-        let target = path.and_then(|path| paths.target(path, item["Type"] == "Series"));
+        let target = path.and_then(|path| paths.target(path, matches!(item["Type"].as_str(), Some("Series" | "Season"))));
         let directory = target.as_ref().and_then(|target| target.directory().ok());
         let blocked = if target.is_none() {
             Some("媒体路径缺失或未匹配写回映射。")
@@ -549,6 +561,8 @@ pub(crate) fn plan(
                     let names = match kind {
                         FileKind::Nfo => vec![if target.video.is_some() {
                             target.video_sidecar(".nfo")
+                        } else if item["Type"] == "Season" {
+                            "season.nfo".into()
                         } else {
                             "tvshow.nfo".into()
                         }],
@@ -557,6 +571,13 @@ pub(crate) fn plan(
                         } else {
                             "poster".into()
                         }),
+                        FileKind::Backdrop if create_only && !matches!(target.backdrop_stem().as_str(), "fanart") => {
+                            if let Some(stem) = target.stem() {
+                                image_names(format!("{stem}-fanart"))
+                            } else {
+                                image_names(target.backdrop_stem())
+                            }
+                        }
                         FileKind::Backdrop => image_names(target.backdrop_stem()),
                         FileKind::Still => image_names(target.video_sidecar("-thumb")),
                     };
@@ -579,6 +600,14 @@ pub(crate) fn plan(
                     )
                 })
                 .unwrap_or_default();
+            if create_only && let (Some(dir), Some(target)) = (directory.as_ref(), target.as_ref()) {
+                let alternates = automatic_alternates(kind, item, target);
+                if destinations.iter().any(|entry| entry.existing != Existing::Missing)
+                    || alternates.iter().any(|name| Existing::read(dir, name) != Existing::Missing)
+                {
+                    continue;
+                }
+            }
             let mut file = PlannedFile {
                 key,
                 source: source.clone(),
@@ -588,6 +617,7 @@ pub(crate) fn plan(
                 target: target.clone(),
                 destinations,
                 blocked: blocked.map(str::to_owned),
+                create_only,
             };
             if file.blocked.is_none()
                 && file
@@ -605,6 +635,67 @@ pub(crate) fn plan(
         }
     }
     (files, preview, writable)
+}
+
+fn automatic_alternates(kind: FileKind, item: &Value, target: &Target) -> Vec<String> {
+    let mut names = Vec::new();
+    let stem = target.stem();
+    let image_stems = match kind {
+        FileKind::Nfo => {
+            if item["Type"] == "Movie" && target.backdrop_stem() == "fanart" {
+                names.push("movie.nfo".into());
+            }
+            return names;
+        }
+        FileKind::Poster if item["Type"] != "Movie" || target.backdrop_stem() == "fanart" => {
+            vec!["folder".to_owned(), "poster".into(), "cover".into(), "default".into(), "movie".into(), "show".into()]
+        }
+        FileKind::Poster => Vec::new(),
+        FileKind::Backdrop if item["Type"] != "Movie" || target.backdrop_stem() == "fanart" => {
+            vec!["backdrop".to_owned(), "fanart".into(), "background".into(), "art".into()]
+        }
+        FileKind::Backdrop => Vec::new(),
+        FileKind::Still => stem.map(|stem| vec![format!("metadata/{stem}")]).unwrap_or_default(),
+    };
+    let mut image_stems = image_stems;
+    if matches!(kind, FileKind::Poster) && let Some(stem) = stem {
+        image_stems.extend(["", "-poster", "-cover", "-default", "-movie"].map(|suffix| format!("{stem}{suffix}")));
+    }
+    image_stems.into_iter().flat_map(|name| {
+        IMAGE_EXTENSIONS.iter().chain(["jpeg", "tbn"].iter())
+            .map(move |ext| format!("{name}.{ext}"))
+    }).collect()
+}
+
+#[cfg(feature = "web")]
+pub(crate) async fn write_automatic(
+    client: &Client,
+    emby: &Emby,
+    paths: &MediaPaths,
+    record: &Value,
+) -> Result<usize, String> {
+    let data = super::emby_source(record).ok_or("缺少 Emby 文件关联。")?;
+    let state = WritebackState::default();
+    let (files, _, _) = plan_with_mode(paths, data, record, &state, true);
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let job = WritebackJob {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        owner: String::new(),
+        stage: String::new(),
+        files,
+    };
+    let output = prepare(client, Some(emby), paths, &job, record, &state).await;
+    let (state, report) = tokio::task::spawn_blocking(move || output.publish(&job.id, state))
+        .await.map_err(|_| "无法保存自动写回资料。")?;
+    if let Some(error) = state.files.into_values().find_map(|file| match file {
+        FileResult::Failed { error } => Some(error),
+        _ => None,
+    }) {
+        return Err(error);
+    }
+    Ok(report.written)
 }
 
 fn image_names(stem: String) -> Vec<String> {
@@ -866,6 +957,18 @@ fn publish_file(
     let name = &staged.destination.name;
     let previous = &staged.destination.existing;
     let current = Existing::read(&dir, name);
+    if file.create_only {
+        if current == Existing::Missing {
+            write_atomic(
+                &dir, name,
+                fs::File::open(&staged.path).map_err(|_| "无法读取暂存资料。")?,
+                true, || true,
+            ).map_err(|_| "无法写入新资料，请检查挂载和权限。")?;
+        } else if current == Existing::Blocked {
+            return Err("目标在写回时已变更。".into());
+        }
+        return Ok(FileResult::Written { path: target.path(name), backup: None });
+    }
     let backup = format!("{BACKUP_DIRECTORY}/{backup_name}");
     let backup_exists = dir
         .symlink_metadata(&backup)
@@ -891,6 +994,7 @@ fn publish_file(
         &dir,
         name,
         fs::File::open(&staged.path).map_err(|_| "无法读取暂存资料。")?,
+        false,
         || Existing::read(&dir, name) == *previous,
     )
     .map_err(|error| {
@@ -950,7 +1054,7 @@ fn preserve_existing(
         Existing::Missing => {}
     }
     let input = dir.open(name)?;
-    write_atomic(&backups, backup_name, input, || {
+    write_atomic(&backups, backup_name, input, true, || {
         Existing::read(dir, name) == *previous
             && Existing::read(&backups, backup_name) == Existing::Missing
     })
@@ -960,6 +1064,7 @@ fn write_atomic(
     dir: &Dir,
     name: &str,
     mut input: impl io::Read,
+    create_only: bool,
     current: impl FnOnce() -> bool,
 ) -> io::Result<()> {
     let temporary = format!(".collect-metadata-{}.tmp", uuid::Uuid::new_v4().simple());
@@ -971,9 +1076,13 @@ fn write_atomic(
         if !current() {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
-        dir.rename(&temporary, dir, name)
+        if create_only {
+            dir.hard_link(&temporary, dir, name)
+        } else {
+            dir.rename(&temporary, dir, name)
+        }
     })();
-    if result.is_err() {
+    if create_only || result.is_err() {
         let _ = dir.remove_file(&temporary);
     }
     result
@@ -1055,6 +1164,34 @@ mod tests {
         let (files, _, _) = plan(&paths, &data, &record, &state);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].kind.label(), "nfo");
+    }
+
+    #[tokio::test]
+    async fn automatic_writeback_keeps_existing_aliases_and_never_replaces_a_new_sidecar() {
+        let root = tempfile::tempdir().unwrap();
+        let film = root.path().join("Film");
+        fs::create_dir(&film).unwrap();
+        fs::write(film.join("Film.mkv"), "video").unwrap();
+        fs::write(film.join("movie.nfo"), "local metadata").unwrap();
+        fs::write(film.join("poster.jpeg"), "local poster").unwrap();
+        let paths = MediaPaths::new(
+            vec![PathMapping { server: "/media".into(), local: String::new() }],
+            true,
+            Some(root.path().into()),
+        );
+        let data = json!({"item":{"Id":"1","Type":"Movie","Path":"/media/Film/Film.mkv"}});
+        let record = json!({"fields":{"poster_url":"https://image.tmdb.org/t/p/w500/p.jpg"}});
+        let state = WritebackState::default();
+        assert!(plan_with_mode(&paths, &data, &record, &state, true).0.is_empty());
+
+        fs::remove_file(film.join("movie.nfo")).unwrap();
+        let (files, _, _) = plan_with_mode(&paths, &data, &record, &state, true);
+        assert_eq!(files.len(), 1);
+        let staged = stage_file(root.path(), &files[0].destinations[0], "scraped").await.unwrap();
+        fs::write(film.join("Film.nfo"), "arrived during staging").unwrap();
+        publish_file(&files[0], &staged, "no-backup").unwrap();
+        assert_eq!(fs::read_to_string(film.join("Film.nfo")).unwrap(), "arrived during staging");
+        assert!(!film.join(BACKUP_DIRECTORY).exists());
     }
 
     #[tokio::test]
