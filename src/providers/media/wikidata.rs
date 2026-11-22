@@ -189,14 +189,46 @@ pub(super) async fn entity(
         "https://www.wikidata.org/wiki/Special:EntityData/{id}.json"
     ))
     .unwrap();
-    let mut data = get_json(client, &url).await?;
+    let primary = async { entity_from_response(get_json(client, &url).await?, id) };
+    let alternate = async {
+        let data = api(client, &[("action", "wbgetentities"), ("ids", id)]).await?;
+        entity_from_response(data, id)
+    };
+    let entity = entity_response(primary, alternate).await?;
+    let entity = Arc::new(entity);
+    cache.insert(id, Arc::clone(&entity));
+    Ok(entity)
+}
+
+fn entity_from_response(mut data: Value, id: &str) -> Result<Value, Failure> {
     let entity = data["entities"][id].take();
     if entity.is_null() || entity.get("missing").is_some() {
         return Err(Failure::NotFound);
     }
-    let entity = Arc::new(entity);
-    cache.insert(id, Arc::clone(&entity));
     Ok(entity)
+}
+
+async fn entity_response(
+    primary: impl Future<Output = Result<Value, Failure>>,
+    alternate: impl Future<Output = Result<Value, Failure>>,
+) -> Result<Value, Failure> {
+    tokio::pin!(primary);
+    // Special:EntityData and the Action API expose the same entity format.
+    // Give the cacheable endpoint a head start before querying the other endpoint.
+    if let Ok(result) = tokio::time::timeout(Duration::from_millis(1500), &mut primary).await {
+        return result;
+    }
+    tokio::pin!(alternate);
+    tokio::select! {
+        result = &mut primary => match result {
+            Ok(entity) => Ok(entity),
+            Err(error) => alternate.await.or(Err(error)),
+        },
+        result = &mut alternate => match result {
+            Ok(entity) => Ok(entity),
+            Err(_) => primary.await,
+        },
+    }
 }
 
 pub(super) fn matches_kind(entity: &Value, kind: MediaKind) -> bool {
@@ -527,11 +559,30 @@ mod tests {
         assert!(Arc::ptr_eq(&entity_data, &entry));
     }
 
+    #[tokio::test]
+    async fn a_slow_entity_download_can_use_the_action_api() {
+        let response = json!({"entities":{"Q155653":{"id":"Q155653","claims":{}}}});
+        let entity = entity_response(std::future::pending(), async {
+            entity_from_response(response, "Q155653")
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.description()));
+        assert_eq!(entity["id"], "Q155653");
+    }
+
+    #[tokio::test]
+    async fn a_completed_entity_response_does_not_query_the_action_api() {
+        let result = entity_response(async { Err(Failure::NotFound) }, async {
+            panic!("the alternate endpoint should not be requested");
+        })
+        .await;
+        assert!(matches!(result, Err(Failure::NotFound)));
+    }
+
     #[test]
     fn rejects_ambiguous_bangumi_links() {
-        let statement = |id: &str, rank: &str| {
-            json!({"rank": rank, "mainsnak": {"datavalue": {"value": id}}})
-        };
+        let statement =
+            |id: &str, rank: &str| json!({"rank": rank, "mainsnak": {"datavalue": {"value": id}}});
         let mut entity = json!({"claims": {"P5732": [
             statement("253", "normal"),
             statement("253", "preferred"),

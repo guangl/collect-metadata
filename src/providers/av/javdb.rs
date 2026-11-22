@@ -53,7 +53,7 @@ fn exact_matches(html: &str, search_url: &Url, code: &Identifier) -> Result<Vec<
     let list = Selector::parse(".movie-list").unwrap();
     let empty = Selector::parse(".empty-message").unwrap();
     if document.select(&list).next().is_none() && document.select(&empty).next().is_none() {
-        return Err(Failure::format_changed());
+        return Err(unexpected_page(html));
     }
     let mut pages = Vec::new();
     for card in document.select(&Selector::parse(".movie-list a.box[href]").unwrap()) {
@@ -98,7 +98,7 @@ fn parse(html: &str, url: &Url, code: &Identifier) -> Result<Source, Failure> {
         first_text(&document, ".movie-panel-info .first-block .value")
             .map(|value| value.replace(' ', ""))
     })
-    .ok_or(Failure::format_changed())?;
+    .ok_or_else(|| unexpected_page(html))?;
     if !code.matches(&dvd_id) {
         return Err(Failure::NotFound);
     }
@@ -259,6 +259,14 @@ fn parse(html: &str, url: &Url, code: &Identifier) -> Result<Source, Failure> {
     ))
 }
 
+fn unexpected_page(html: &str) -> Failure {
+    if html.contains("/cdn-cgi/challenge-platform/") {
+        Failure::Unavailable("JavDB 要求浏览器验证，暂无法自动读取。".into())
+    } else {
+        Failure::format_changed()
+    }
+}
+
 fn chinese_catalog_text(value: &str) -> bool {
     value.chars().any(|c| matches!(c, '\u{3400}'..='\u{9fff}'))
         && !value
@@ -273,6 +281,18 @@ mod detail_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_a_browser_challenge_as_unavailable() {
+        let url = Url::parse("https://javdb.com/search").unwrap();
+        let code = Identifier::parse("ABC-123").unwrap();
+        let html = r#"<script src="/cdn-cgi/challenge-platform/fixture.js"></script>"#;
+        let failure = exact_matches(html, &url, &code).err().unwrap();
+        assert_eq!(
+            failure.description(),
+            "JavDB 要求浏览器验证，暂无法自动读取。"
+        );
+    }
 
     #[test]
     fn matches_provider_spellings_of_special_ids() {
