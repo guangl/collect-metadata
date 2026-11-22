@@ -10,9 +10,16 @@ import type { EmbyCredit, EmbyEpisodePreview, EmbyLibraryPreview, EmbyScrapeTarg
 
 const artworkClasses: Record<EmbyImage, string> = {
   poster: "poster-art",
-  backdrop: "work-backdrop",
+  backdrop: "fanart-art",
   episode: "episode-art",
   portrait: "credit-art",
+};
+
+const artworkNames: Record<EmbyImage, string> = {
+  poster: "海报",
+  backdrop: "背景图",
+  episode: "剧照",
+  portrait: "头像",
 };
 
 const imageQueue: (() => Promise<void>)[] = [];
@@ -29,11 +36,12 @@ function loadNextImage() {
   });
 }
 
-function EmbyArtwork({ id, tag, image, eager = false }: {
+function EmbyArtwork({ id, tag, image, eager = false, alt }: {
   id: string;
   tag: string | null;
   image: EmbyImage;
   eager?: boolean;
+  alt?: string;
 }) {
   const host = useRef<HTMLSpanElement>(null);
   const imageKey = `${id}/${image}?v=${tag}`;
@@ -84,12 +92,11 @@ function EmbyArtwork({ id, tag, image, eager = false }: {
   }, [id, image, tag, eager, imageKey]);
 
   const unavailable = (local?.key === imageKey && !local.url) || (!!src && failed === src);
-  const emptyLabel = image === "poster" ? "无海报" : image === "portrait" ? "无头像" : "无剧照";
-  return <span ref={host} className={artworkClasses[image]} aria-hidden="true">
-    {image !== "backdrop" && (!src || loaded !== src) && <span className="poster-placeholder">
-      {!tag ? emptyLabel : unavailable ? "图片加载失败" : "正在加载图片…"}
+  return <span ref={host} className={artworkClasses[image]} aria-hidden={alt ? undefined : true}>
+    {(!src || loaded !== src) && <span className="poster-placeholder">
+      {!tag ? `无${artworkNames[image]}` : unavailable ? "图片加载失败" : "正在加载图片…"}
     </span>}
-    {src && failed !== src && <img src={src} alt="" loading={eager || isDesktop ? "eager" : "lazy"} decoding="async"
+    {src && failed !== src && <img src={src} alt={alt ?? ""} loading={eager || isDesktop ? "eager" : "lazy"} decoding="async"
       className={loaded === src ? undefined : "opacity-0"} onLoad={() => setLoaded(src)} onError={() => setFailed(src)} />}
   </span>;
 }
@@ -298,6 +305,41 @@ function EpisodeSynopsis({ episode, revision }: { episode: EmbyEpisodePreview; r
   </>;
 }
 
+function WorkSynopsis({ work }: { work: EmbyWorkPreview }) {
+  const hasDetails = work.official_rating || work.critic_rating != null || work.imdb_rating || work.bangumi_id || !!work.tags?.length;
+  return <div className="work-panel work-synopsis">
+    <div>
+      <h3>剧情简介</h3>
+      <p className="movie-description mt-2">{work.overview || "Emby 暂无剧情简介。"}</p>
+    </div>
+    {hasDetails && <div className="work-details">
+      <h3>条目信息</h3>
+      <dl>
+        {work.official_rating && <div><dt>内容分级</dt><dd>{work.official_rating}</dd></div>}
+        {work.critic_rating != null && <div><dt>影评人评分</dt><dd>{work.critic_rating} / 100</dd></div>}
+        {work.imdb_rating && <div><dt>IMDb 评分</dt><dd>{work.imdb_rating.value.toFixed(1)} / 10 · {work.imdb_rating.count.toLocaleString("zh-CN")} 人评价</dd></div>}
+        {work.bangumi_id && <div><dt>Bangumi ID</dt><dd>{work.bangumi_id}</dd></div>}
+        {!!work.tags?.length && <div><dt>标签</dt><dd>
+          <ul className="work-chips" role="list">{work.tags.map((tag) => <li key={tag}>{tag}</li>)}</ul>
+        </dd></div>}
+      </dl>
+    </div>}
+  </div>;
+}
+
+function WorkPictures({ work }: { work: EmbyWorkPreview }) {
+  return <div className="work-panel work-pictures">
+    <figure>
+      <figcaption>海报</figcaption>
+      <EmbyArtwork id={work.id} tag={work.poster} image="poster" alt={`《${work.title}》海报`} />
+    </figure>
+    <figure>
+      <figcaption>背景图（Fanart）</figcaption>
+      <EmbyArtwork id={work.id} tag={work.backdrop} image="backdrop" alt={`《${work.title}》背景图`} />
+    </figure>
+  </div>;
+}
+
 function WorkPreview({ work, library, missingEpisodeIds, onClose, canScrape, usesQueue, onScrape }: ScrapeControls & {
   work: EmbyWorkPreview;
   library: string;
@@ -332,8 +374,6 @@ function WorkPreview({ work, library, missingEpisodeIds, onClose, canScrape, use
       origin.current = null;
     }
   }, [selected]);
-  const facts = [mediaLabels[work.kind], work.year, work.runtime_minutes && `${work.runtime_minutes} 分钟`]
-    .filter(Boolean).join(" · ");
   const premiere = selected?.episode.premiere_at || selected?.episode.date;
 
   function close() {
@@ -353,39 +393,34 @@ function WorkPreview({ work, library, missingEpisodeIds, onClose, canScrape, use
       <button type="button" className="work-preview-close" aria-label="关闭详情" onClick={close}>×</button>
     </div>
     <div hidden={!!selected}>
-      <div className="work-hero">
-        {work.backdrop && <EmbyArtwork id={work.id} tag={work.backdrop} image="backdrop" eager />}
+      <div className="work-hero emby-work-hero">
         <div className="detail-poster"><EmbyArtwork id={work.id} tag={work.poster} image="poster" eager /></div>
         <div className="movie-intro">
-          <p className="work-context">{library}</p>
+          <p className="work-context">媒体库 · {library}</p>
           <h2 id={title}>{work.title}</h2>
-          {work.original_title && work.original_title !== work.title && <p className="work-original">{work.original_title}</p>}
-          <div className="work-meta">
-            <span>{facts}</span>
-            {work.rating != null && <span className="work-rating" aria-label={`评分 ${work.rating}，满分 10`}>★ {work.rating.toFixed(1)}</span>}
-          </div>
-          {!!work.genres.length && <p className="work-genres">{work.genres.join(" / ")}</p>}
-          <div className="mt-3"><ScrapeActions target={{ type: "item", id: work.id, scope: work.kind }}
+          <dl className="work-facts">
+            {work.original_title && work.original_title !== work.title &&
+              <div className="work-fact-wide"><dt>原名</dt><dd>{work.original_title}</dd></div>}
+            <div><dt>作品类型</dt><dd>{mediaLabels[work.kind]}</dd></div>
+            {work.year != null && <div><dt>年份</dt><dd>{work.year}</dd></div>}
+            {work.runtime_minutes != null && <div><dt>时长</dt><dd>{work.runtime_minutes} 分钟</dd></div>}
+            {work.rating != null && <div><dt>社区评分</dt><dd className="work-rating">{work.rating.toFixed(1)} / 10</dd></div>}
+            {!!work.genres.length && <div className="work-fact-wide"><dt>题材</dt><dd>
+              <ul className="work-chips" role="list">{work.genres.map((genre) => <li key={genre}>{genre}</li>)}</ul>
+            </dd></div>}
+          </dl>
+          <div className="mt-4"><ScrapeActions target={{ type: "item", id: work.id, scope: work.kind }}
             name={work.title} canScrape={canScrape} usesQueue={usesQueue} onScrape={onScrape} /></div>
         </div>
       </div>
       <Tabs label="作品资料" className="work-tabs" initialTab={missingEpisodeIds ? "episodes" : undefined} tabs={[
-        { id: "overview", label: "简介", content: <div className="work-panel">
-          <p className="movie-description">{work.overview || "Emby 暂无剧情简介。"}</p>
-          {(work.official_rating || work.critic_rating != null || work.imdb_rating || work.bangumi_id || !!work.tags?.length) &&
-            <dl className="episode-facts mt-4">
-              {work.official_rating && <div><dt>分级</dt><dd>{work.official_rating}</dd></div>}
-              {work.critic_rating != null && <div><dt>影评人评分</dt><dd>{work.critic_rating} / 100</dd></div>}
-              {work.imdb_rating && <div><dt>IMDb 评分</dt><dd>{work.imdb_rating.value.toFixed(1)} / 10 · {work.imdb_rating.count.toLocaleString("zh-CN")} 人评价</dd></div>}
-              {work.bangumi_id && <div><dt>Bangumi ID</dt><dd>{work.bangumi_id}</dd></div>}
-              {!!work.tags?.length && <div><dt>标签</dt><dd>{work.tags.join(" / ")}</dd></div>}
-            </dl>}
-        </div> },
+        { id: "overview", label: "简介", content: <WorkSynopsis work={work} /> },
         ...(work.kind === "series" ? [{ id: "episodes", label: "季与分集", retain: true, content: <SeriesEpisodes id={work.id} missingEpisodeIds={missingEpisodeIds} onOpen={(episode, season, button) => {
           origin.current = { button, scroll: dialog.current?.scrollTop ?? 0 };
           setSelected({ episode, season });
         }} /> }] : []),
         { id: "credits", label: "演职员", retain: true, content: <EmbyCredits id={work.id} /> },
+        { id: "pictures", label: "图片", retain: true, content: <WorkPictures work={work} /> },
       ]} />
     </div>
     {selected && <section className="episode-detail px-4 pb-8 pt-4 sm:px-7 sm:pt-6" aria-labelledby={episodeTitle}>

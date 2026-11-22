@@ -371,7 +371,7 @@ describe("设置", () => {
     setLabel("作品目录名", "{title} ({year})");
     setLabel("资料文件名前缀", "{id}");
     fireEvent.click(screen.getByLabelText("演员", { exact: true }));
-    fireEvent.click(screen.getByLabelText("背景图", { exact: true }));
+    fireEvent.click(screen.getByLabelText("背景图（Fanart）", { exact: true }));
     fireEvent.click(screen.getByLabelText("预告片与先导预告"));
     fireEvent.click(screen.getByLabelText("主题视频", { exact: true }));
     fireEvent.click(screen.getByLabelText("简介与宣传语", { exact: true }));
@@ -562,7 +562,7 @@ describe("后台批次", () => {
       runtime_minutes: 120, poster: "fixture", backdrop: "wide" };
     const calls = harness([], true, [
       { id: "12", name: "电影馆", works: [film] },
-      { id: "13", name: "剧集馆", works: [{ ...film, id: "31", title: "Emby 剧集", kind: "series", poster: null }] },
+      { id: "13", name: "剧集馆", works: [{ ...film, id: "31", title: "Emby 剧集", kind: "series", poster: null, backdrop: null }] },
       { id: "14", name: "空媒体库", works: [] },
     ]);
     const episode: EmbyEpisodePreview = { id: "34", number: 1, last_number: null, title: "第一集",
@@ -604,12 +604,20 @@ describe("后台批次", () => {
     fireEvent.click(filmButton);
     const detail = screen.getByRole("dialog", { name: "Emby 电影" });
     expect(within(detail).getByText("Emby 已有剧情简介")).toBeTruthy();
-    expect(within(detail).getByLabelText("评分 8.5，满分 10")).toBeTruthy();
+    expect(within(detail).getByText("社区评分").nextElementSibling?.textContent).toBe("8.5 / 10");
+    expect(within(detail).getByText("原名").nextElementSibling?.textContent).toBe("Poster Movie");
+    expect(within(detail).getByText("内容分级").nextElementSibling?.textContent).toBe("R");
     expect(within(detail).getByText("8.6 / 10 · 12,345 人评价")).toBeTruthy();
     expect(within(detail).getByText("96 / 100")).toBeTruthy();
     expect(within(detail).getByText("303162")).toBeTruthy();
     expect(within(detail).getByText("剧情")).toBeTruthy();
-    expect(detail.querySelector(".work-backdrop img")?.getAttribute("src")).toBe("/api/emby/images/30/backdrop?v=wide");
+    fireEvent.click(within(detail).getByRole("tab", { name: "图片" }));
+    const pictures = within(detail).getByRole("tabpanel", { name: "图片" });
+    expect(within(pictures).getByRole("img", { name: "《Emby 电影》海报" }).getAttribute("src")).toBe("/api/emby/images/30/poster?v=fixture");
+    const backdrop = within(pictures).getByRole("img", { name: "《Emby 电影》背景图" });
+    expect(backdrop.getAttribute("src")).toBe("/api/emby/images/30/backdrop?v=wide");
+    fireEvent.error(backdrop);
+    expect(within(pictures).getByText("图片加载失败")).toBeTruthy();
     expect(document.documentElement.style.overflow).toBe("hidden");
     fireEvent.click(within(detail).getByRole("tab", { name: "演职员" }));
     const director = await within(detail).findByText("测试导演");
@@ -626,6 +634,10 @@ describe("后台批次", () => {
     expect(screen.queryByRole("button", { name: /^Emby 电影/ })).toBeNull();
     expect(button(/^Emby 剧集/).closest("li")!.querySelector("img")).toBeNull();
     click(/^Emby 剧集/);
+    fireEvent.click(screen.getByRole("tab", { name: "图片" }));
+    const emptyPictures = screen.getByRole("tabpanel", { name: "图片" });
+    expect(within(emptyPictures).getByText("无海报")).toBeTruthy();
+    expect(within(emptyPictures).getByText("无背景图")).toBeTruthy();
     click("刮削此剧集");
     confirmScrape();
     await screen.findByText("Collect Metadata 已创建后台采集任务 #9。");

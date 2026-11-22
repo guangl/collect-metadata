@@ -13,7 +13,7 @@ const metadataFields = [
 
 const imageFields = [
   ["poster", "海报或封面"],
-  ["backdrop", "背景图"],
+  ["backdrop", "背景图（Fanart）"],
   ["stills", "剧照与分集截图"],
 ] as const;
 
