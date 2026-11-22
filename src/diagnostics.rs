@@ -30,6 +30,10 @@ pub async fn with_request<T>(id: String, work: impl Future<Output = T>) -> T {
     REQUEST_ID.scope(id, work).await
 }
 
+pub(crate) fn current_request_id() -> Option<String> {
+    REQUEST_ID.try_with(Clone::clone).ok()
+}
+
 pub(crate) async fn with_batch_row<T>(
     batch: i64,
     row: i64,
@@ -192,17 +196,18 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
 #[cfg(feature = "desktop")]
 pub async fn desktop_command<T>(
     command: &'static str,
+    code: crate::ErrorCode,
     work: impl Future<Output = Result<T, String>>,
-) -> Result<T, String> {
+) -> Result<T, crate::AppError> {
     let id = request_id();
     with_request(id, async {
         let start = Instant::now();
         work.await.map_err(|message| {
             warn(
                 "desktop_command_failed",
-                json!({ "command": command, "elapsed_ms": elapsed_ms(start) }),
+                json!({ "command": command, "code": code, "elapsed_ms": elapsed_ms(start) }),
             );
-            with_reference(message)
+            crate::AppError::new(code, message)
         })
     })
     .await

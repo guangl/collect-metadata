@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ReactNode, MouseEvent } from "react";
 import { isDesktop, openUrl } from "./api";
-import type { Episode } from "./types";
+import { errorText, type Episode } from "./types";
 
 const languageNames = new Intl.DisplayNames(["zh-Hans"], { type: "language" });
 const specificNames: Record<string, string> = {
@@ -73,7 +73,7 @@ export function ExternalLink({ value, children, className, onError }: {
     try {
       await openUrl(url);
     } catch {
-      onError("无法打开来源链接。");
+      onError(errorText("无法打开来源链接。", "LINK_OPEN_FAILED"));
     }
   }
 

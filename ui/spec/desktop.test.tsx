@@ -17,7 +17,10 @@ it("chooses and saves a native output directory and can reconnect PostgreSQL", a
   const choose = vi.fn().mockRejectedValueOnce("目录选择器打开失败").mockResolvedValueOnce(null).mockResolvedValue("/Volumes/Export");
   const selection = { folder: "/Volumes/Library", paths: ["Library/Movie.mkv"],
     preview: { works: [{ kind: "movie", query: "Movie", file_count: 1 }], files: 1, skipped: 0, unrecognized: [] } };
-  const establish = vi.fn().mockRejectedValueOnce("PostgreSQL 地址无效").mockResolvedValue(undefined);
+  const id = "1234567890abcdef1234567890abcdef";
+  const establish = vi.fn().mockRejectedValueOnce({
+    code: "STORAGE_SETTINGS_FAILED", error: "PostgreSQL 地址无效", diagnostic_id: id,
+  }).mockResolvedValue(undefined);
   const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
     switch (command) {
       case "output_settings": return { root: null, options: initial };
@@ -47,7 +50,7 @@ it("chooses and saves a native output directory and can reconnect PostgreSQL", a
   const path = screen.getByLabelText("输出路径") as HTMLInputElement;
   expect(path.readOnly).toBe(true);
   fireEvent.click(button);
-  expect(await screen.findByText("目录选择器打开失败")).toBeTruthy();
+  expect(await screen.findByText("【错误码 OPERATION_FAILED】目录选择器打开失败")).toBeTruthy();
   fireEvent.click(button);
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   expect(path.value).toBe("");
@@ -70,7 +73,8 @@ it("chooses and saves a native output directory and can reconnect PostgreSQL", a
   fireEvent.change(url, { target: { value: "postgresql://localhost/test" } });
   const save = screen.getByRole("button", { name: "测试连接并保存" });
   fireEvent.click(save);
-  expect(await screen.findByText("PostgreSQL 地址无效")).toBeTruthy();
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent",
+    `【错误码 STORAGE_SETTINGS_FAILED】PostgreSQL 地址无效（诊断编号 ${id}）`);
   fireEvent.click(save);
   expect(await screen.findByText("已测试并保存 PostgreSQL 连接。")).toBeTruthy();
   expect(establish).toHaveBeenLastCalledWith("postgresql://localhost/test");

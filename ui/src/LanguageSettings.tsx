@@ -71,6 +71,7 @@ export function LanguageSettings() {
         {busy ? "正在保存…" : "保存语言"}
       </button>
     </form>}
-    {message && <p role={message.error ? "alert" : "status"}>{message.text}</p>}
+    {message && <p className={message.error ? "batch-error" : undefined}
+      role={message.error ? "alert" : "status"}>{message.text}</p>}
   </section>;
 }

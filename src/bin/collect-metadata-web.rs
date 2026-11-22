@@ -9,7 +9,7 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, MatchedPath, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
@@ -17,17 +17,17 @@ use axum::{
     routing::{get, post},
 };
 use collect_metadata::{
-    AiBatchInput, AutoScrape, BangumiSettings, BatchAction, BatchItemInput, CandidateChoice, Collector,
-    EmbyInput, EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope, EmbyScrapeTarget,
-    EmbySelectionInput, EmbySettings, HistoryItem, LanguageSettings, LookupResponse, MediaKind,
-    MediaProvider, OutputOptions, OutputSettings, TmdbSettings, browse_mounted_folders,
-    diagnostics, preview_folder, scan_mounted_folder,
+    AiBatchInput, AppError, AutoScrape, BangumiSettings, BatchAction, BatchItemInput,
+    CandidateChoice, Collector, EmbyInput, EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope,
+    EmbyScrapeTarget, EmbySelectionInput, EmbySettings, ErrorCode, HistoryItem, LanguageSettings,
+    LookupResponse, MediaKind, MediaProvider, OutputOptions, OutputSettings, TmdbSettings,
+    browse_mounted_folders, diagnostics, preview_folder, scan_mounted_folder,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 type AppState = State<Arc<Collector>>;
-type ApiError = (StatusCode, Json<Value>);
+type ApiError = (StatusCode, Extension<ErrorCode>, Json<AppError>);
 
 #[derive(Deserialize)]
 struct LookupInput {
@@ -318,39 +318,28 @@ async fn api_diagnostics(request: Request, next: Next) -> Response {
         if (status.is_client_error() || status.is_server_error())
             && !(status == StatusCode::NOT_FOUND && route == "/api/emby/images/{id}/{image}")
         {
+            let code = response
+                .extensions()
+                .get::<ErrorCode>()
+                .copied()
+                .unwrap_or_else(|| {
+                    // Axum extraction and routing errors can contain submitted data. Prefer fixed messages.
+                    let (code, message) = framework_error(status);
+                    let safe = api_error(status, code, message).into_response();
+                    *response.body_mut() = safe.into_body();
+                    response.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static("application/json"),
+                    );
+                    response.headers_mut().remove(header::CONTENT_LENGTH);
+                    code
+                });
             let fields = json!({"method": method, "route": route, "status": status.as_u16(),
-                "elapsed_ms": diagnostics::elapsed_ms(start)});
+                "code": code, "elapsed_ms": diagnostics::elapsed_ms(start)});
             if status.is_server_error() {
                 diagnostics::error("web_request_failed", fields);
             } else {
                 diagnostics::warn("web_request_failed", fields);
-            }
-            // Axum extraction and routing errors can contain submitted data. Prefer fixed messages.
-            if response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                != Some("application/json")
-            {
-                let message = match status {
-                    StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
-                        "请求内容格式无效，请刷新页面后重试。"
-                    }
-                    StatusCode::NOT_FOUND => "找不到此接口，请确认 Web 页面和服务端版本一致。",
-                    StatusCode::METHOD_NOT_ALLOWED => {
-                        "接口不支持此操作，请确认客户端和服务端版本一致。"
-                    }
-                    StatusCode::PAYLOAD_TOO_LARGE => "提交内容超过大小限制，请缩小本次范围后重试。",
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE => "接口需要 JSON 请求，请刷新页面后重试。",
-                    _ => "服务端处理失败，请查看应用日志。",
-                };
-                let safe = api_error(status, message.into()).into_response();
-                *response.body_mut() = safe.into_body();
-                response.headers_mut().insert(
-                    header::CONTENT_TYPE,
-                    header::HeaderValue::from_static("application/json"),
-                );
-                response.headers_mut().remove(header::CONTENT_LENGTH);
             }
             response.headers_mut().insert(
                 header::CACHE_CONTROL,
@@ -364,6 +353,39 @@ async fn api_diagnostics(request: Request, next: Next) -> Response {
         response
     })
     .await
+}
+
+fn framework_error(status: StatusCode) -> (ErrorCode, &'static str) {
+    match status {
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => (
+            ErrorCode::InvalidInput,
+            "请求内容格式无效，请刷新页面后重试。",
+        ),
+        StatusCode::NOT_FOUND => (
+            ErrorCode::ResourceNotFound,
+            "找不到此接口，请确认 Web 页面和服务端版本一致。",
+        ),
+        StatusCode::METHOD_NOT_ALLOWED => (
+            ErrorCode::UnsupportedMethod,
+            "接口不支持此操作，请确认客户端和服务端版本一致。",
+        ),
+        StatusCode::PAYLOAD_TOO_LARGE => (
+            ErrorCode::RequestTooLarge,
+            "提交内容超过大小限制，请缩小本次范围后重试。",
+        ),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => (
+            ErrorCode::UnsupportedMediaType,
+            "接口需要 JSON 请求，请刷新页面后重试。",
+        ),
+        StatusCode::UNAUTHORIZED => (ErrorCode::Unauthorized, "请登录后重试。"),
+        StatusCode::FORBIDDEN => (ErrorCode::AccessDenied, "当前用户没有访问权限。"),
+        StatusCode::TOO_MANY_REQUESTS => (ErrorCode::RateLimited, "请求过于频繁，请稍后重试。"),
+        StatusCode::SERVICE_UNAVAILABLE => (
+            ErrorCode::ServiceUnavailable,
+            "服务暂不可用，请稍后重试或查看应用日志。",
+        ),
+        _ => (ErrorCode::InternalError, "服务端处理失败，请查看应用日志。"),
+    }
 }
 
 #[cfg(test)]
@@ -395,7 +417,13 @@ async fn create_ai_batch(
         .create_ai_batch(input)
         .await
         .map(Json)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::AiBatchCreateFailed,
+                error,
+            )
+        })
 }
 
 async fn import_emby_selection(
@@ -406,7 +434,7 @@ async fn import_emby_selection(
         .import_emby_selection(input)
         .await
         .map(Json)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyImportFailed, error))
 }
 
 async fn correct_batch_match(
@@ -418,7 +446,7 @@ async fn correct_batch_match(
         .correct_batch_match(batch, row, candidate)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::BatchMatchFailed, error))
 }
 
 async fn tmdb_status(State(collector): AppState) -> impl IntoResponse {
@@ -452,11 +480,18 @@ async fn save_languages(
         .map_err(|_| {
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "无法保存元数据语言。".into(),
+                ErrorCode::LanguageSettingsFailed,
+                "无法保存元数据语言。",
             )
         })?
         .map(Json)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::LanguageSettingsFailed,
+                error,
+            )
+        })
 }
 
 async fn emby_settings(State(collector): AppState) -> impl IntoResponse {
@@ -471,7 +506,7 @@ async fn emby_libraries(State(collector): AppState) -> Result<impl IntoResponse,
         .emby_libraries()
         .await
         .map(|items| ([(header::CACHE_CONTROL, "no-store")], Json(items)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyLibraryFailed, error))
 }
 
 async fn sync_emby_item(
@@ -485,7 +520,11 @@ async fn sync_emby_item(
         .filter(|t| !t.trim().is_empty())
         .ok_or_else(|| {
             diagnostics::warn("emby_sync_rejected", json!({"reason": "not_configured"}));
-            api_error(StatusCode::SERVICE_UNAVAILABLE, "未启用插件同步。".into())
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::EmbySyncFailed,
+                "未启用插件同步。",
+            )
         })?;
     if headers
         .get(header::AUTHORIZATION)
@@ -494,7 +533,11 @@ async fn sync_emby_item(
         != Some(token.as_str())
     {
         diagnostics::warn("emby_sync_rejected", json!({"reason": "unauthorized"}));
-        return Err(api_error(StatusCode::UNAUTHORIZED, "同步令牌无效。请核对插件和 Web 使用的同步令牌。".into()));
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::EmbySyncFailed,
+            "同步令牌无效。请核对插件和 Web 使用的同步令牌。",
+        ));
     }
     let id = doc["Id"].as_str().unwrap_or_default();
     if server.is_empty()
@@ -511,7 +554,8 @@ async fn sync_emby_item(
         diagnostics::warn("emby_sync_rejected", json!({"reason": "invalid_item"}));
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "同步请求中的 Emby 服务器或媒体条目无效。请到 Emby 日志中核对条目。".into(),
+            ErrorCode::EmbySyncFailed,
+            "同步请求中的 Emby 服务器或媒体条目无效。请到 Emby 日志中核对条目。",
         ));
     }
     let preference = headers
@@ -520,7 +564,13 @@ async fn sync_emby_item(
     collector
         .upsert_emby_item(&server, id, &doc, preference)
         .await
-        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))?;
+        .map_err(|error| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::EmbySyncFailed,
+                error,
+            )
+        })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -532,7 +582,7 @@ async fn preview_emby(
         .preview_emby_library(&library)
         .await
         .map(|works| ([(header::CACHE_CONTROL, "no-store")], Json(works)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyLibraryFailed, error))
 }
 
 async fn emby_catalog(State(collector): AppState) -> Result<impl IntoResponse, ApiError> {
@@ -540,7 +590,7 @@ async fn emby_catalog(State(collector): AppState) -> Result<impl IntoResponse, A
         .emby_catalog()
         .await
         .map(|catalog| ([(header::CACHE_CONTROL, "no-store")], Json(catalog)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyLibraryFailed, error))
 }
 
 async fn import_emby_catalog(State(collector): AppState) -> Result<impl IntoResponse, ApiError> {
@@ -548,7 +598,7 @@ async fn import_emby_catalog(State(collector): AppState) -> Result<impl IntoResp
         .import_emby_catalog()
         .await
         .map(|id| (StatusCode::CREATED, Json(id)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyImportFailed, error))
 }
 
 async fn import_emby_item(
@@ -560,7 +610,7 @@ async fn import_emby_item(
         .import_emby_item(&id, scope)
         .await
         .map(|id| (StatusCode::CREATED, Json(id)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyImportFailed, error))
 }
 
 async fn overwrite_emby(
@@ -571,7 +621,13 @@ async fn overwrite_emby(
         .overwrite_emby(input)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::EmbyOverwriteFailed,
+                error,
+            )
+        })
 }
 
 async fn refresh_emby_metadata(
@@ -582,7 +638,7 @@ async fn refresh_emby_metadata(
         .refresh_emby_metadata(target)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyRefreshFailed, error))
 }
 
 async fn emby_preview_image(
@@ -613,7 +669,7 @@ async fn emby_preview_image(
 async fn emby_credits(State(collector): AppState, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
     collector.emby_credits(&id).await
         .map(|people| ([(header::CACHE_CONTROL, "no-store")], Json(people)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyDetailsFailed, error))
 }
 
 async fn emby_missing_episode_overviews(
@@ -624,7 +680,7 @@ async fn emby_missing_episode_overviews(
         .emby_missing_episode_overviews(&id)
         .await
         .map(Json)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyDetailsFailed, error))
 }
 
 async fn emby_episode_overview(
@@ -635,7 +691,7 @@ async fn emby_episode_overview(
         .emby_episode_overview(&id)
         .await
         .map(|overview| ([(header::CACHE_CONTROL, "no-store")], Json(overview)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyDetailsFailed, error))
 }
 
 async fn emby_series_preview(
@@ -646,7 +702,7 @@ async fn emby_series_preview(
         .emby_series_preview(&id)
         .await
         .map(|series| ([(header::CACHE_CONTROL, "no-store")], Json(series)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyDetailsFailed, error))
 }
 
 async fn import_emby(
@@ -657,7 +713,7 @@ async fn import_emby(
         .import_emby_library(&library)
         .await
         .map(|id| (StatusCode::CREATED, Json(id)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::EmbyImportFailed, error))
 }
 
 async fn test_emby(
@@ -668,7 +724,13 @@ async fn test_emby(
         .test_emby(input)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::EmbyConnectionFailed,
+                error,
+            )
+        })
 }
 
 async fn save_emby(
@@ -679,7 +741,13 @@ async fn save_emby(
         .save_emby(input)
         .await
         .map(|view| ([(header::CACHE_CONTROL, "no-store")], Json(view)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::EmbySettingsFailed,
+                error,
+            )
+        })
 }
 
 async fn output_settings(State(collector): AppState) -> impl IntoResponse {
@@ -704,10 +772,17 @@ async fn save_output_settings(
         .map_err(|_| {
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "无法保存输出设置。".into(),
+                ErrorCode::OutputSettingsFailed,
+                "无法保存输出设置。",
             )
         })?
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::OutputSettingsFailed,
+                error,
+            )
+        })?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(view)))
 }
 
@@ -745,7 +820,13 @@ async fn check_storage(State(collector): AppState) -> Result<impl IntoResponse, 
         .check_storage()
         .await
         .map(|()| (cache, StatusCode::NO_CONTENT).into_response())
-        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::StorageCheckFailed,
+                error,
+            )
+        })
 }
 
 async fn test_tmdb(
@@ -756,7 +837,13 @@ async fn test_tmdb(
         .test_tmdb(input.credential.as_deref())
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::TmdbConnectionFailed,
+                error,
+            )
+        })
 }
 
 async fn save_tmdb(
@@ -767,7 +854,13 @@ async fn save_tmdb(
         .save_tmdb(input.credential.unwrap_or_default())
         .await
         .map(|status| ([(header::CACHE_CONTROL, "no-store")], Json(status)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::TmdbSettingsFailed,
+                error,
+            )
+        })
 }
 
 async fn test_bangumi(
@@ -778,7 +871,13 @@ async fn test_bangumi(
         .test_bangumi(input.credential.as_deref())
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::BangumiConnectionFailed,
+                error,
+            )
+        })
 }
 
 async fn save_bangumi(
@@ -789,7 +888,13 @@ async fn save_bangumi(
         .save_bangumi(input.credential.unwrap_or_default())
         .await
         .map(|status| ([(header::CACHE_CONTROL, "no-store")], Json(status)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::BangumiSettingsFailed,
+                error,
+            )
+        })
 }
 
 async fn lookup(
@@ -800,7 +905,7 @@ async fn lookup(
         .lookup(&input.query)
         .await
         .map(lookup_response)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::MediaLookupFailed, error))
 }
 
 async fn search_media(
@@ -811,7 +916,7 @@ async fn search_media(
         .search_media(input.kind, &input.query)
         .await
         .map(|results| ([(header::CACHE_CONTROL, "no-store")], Json(results)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::MediaSearchFailed, error))
 }
 
 async fn collect_media(
@@ -822,7 +927,13 @@ async fn collect_media(
         .collect_media(input.kind, input.provider, &input.id)
         .await
         .map(lookup_response)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::MediaCollectionFailed,
+                error,
+            )
+        })
 }
 
 async fn history_languages(State(collector): AppState) -> Result<impl IntoResponse, ApiError> {
@@ -830,7 +941,13 @@ async fn history_languages(State(collector): AppState) -> Result<impl IntoRespon
         .history_languages()
         .await
         .map(|languages| ([(header::CACHE_CONTROL, "no-store")], Json(languages)))
-        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::HistoryReadFailed,
+                error,
+            )
+        })
 }
 
 async fn history(
@@ -841,7 +958,13 @@ async fn history(
         .history(query.before, query.kind, query.language.as_deref())
         .await
         .map(|items: Vec<HistoryItem>| ([(header::CACHE_CONTROL, "no-store")], Json(items)))
-        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::HistoryReadFailed,
+                error,
+            )
+        })
 }
 
 async fn load_snapshot(
@@ -852,15 +975,15 @@ async fn load_snapshot(
         .load(id)
         .await
         .map(lookup_response)
-        .map_err(|error| api_error(StatusCode::NOT_FOUND, error))
+        .map_err(|error| api_error(StatusCode::NOT_FOUND, ErrorCode::HistoryReadFailed, error))
 }
 
 fn lookup_response(value: LookupResponse) -> impl IntoResponse {
     ([(header::CACHE_CONTROL, "no-store")], Json(value))
 }
 
-fn api_error(status: StatusCode, error: String) -> ApiError {
-    (status, Json(json!({ "error": error })))
+fn api_error(status: StatusCode, code: ErrorCode, error: impl Into<String>) -> ApiError {
+    (status, Extension(code), Json(AppError::new(code, error)))
 }
 
 async fn create_batch(
@@ -871,7 +994,7 @@ async fn create_batch(
         .create_batch(items)
         .await
         .map(|id| (StatusCode::CREATED, Json(id)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::BatchCreateFailed, error))
 }
 
 async fn browse_media_folders(
@@ -880,14 +1003,14 @@ async fn browse_media_folders(
     browse_mounted_folders(input.path)
         .await
         .map(|folders| ([(header::CACHE_CONTROL, "no-store")], Json(folders)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::FolderScanFailed, error))
 }
 
 async fn preview_mounted_folder(Json(path): Json<String>) -> Result<impl IntoResponse, ApiError> {
     scan_mounted_folder(path)
         .await
         .map(|selection| ([(header::CACHE_CONTROL, "no-store")], Json(selection)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::FolderScanFailed, error))
 }
 
 async fn scan_media_folder(Json(paths): Json<Vec<String>>) -> Result<impl IntoResponse, ApiError> {
@@ -896,11 +1019,12 @@ async fn scan_media_folder(Json(paths): Json<Vec<String>>) -> Result<impl IntoRe
         .map_err(|_| {
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "无法扫描所选文件夹。".into(),
+                ErrorCode::FolderScanFailed,
+                "无法扫描所选文件夹。",
             )
         })?
         .map(|preview| ([(header::CACHE_CONTROL, "no-store")], Json(preview)))
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::FolderScanFailed, error))
 }
 
 async fn create_folder_batch(
@@ -920,7 +1044,7 @@ async fn create_folder_batch(
                 Json(result),
             )
         })
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, ErrorCode::BatchCreateFailed, error))
 }
 
 async fn list_batches(
@@ -931,7 +1055,13 @@ async fn list_batches(
         .list_batches(input.before)
         .await
         .map(|items| ([(header::CACHE_CONTROL, "no-store")], Json(items)))
-        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::BatchReadFailed,
+                error,
+            )
+        })
 }
 
 async fn batch_rows(
@@ -942,7 +1072,13 @@ async fn batch_rows(
         .batch_rows(batch)
         .await
         .map(|items| ([(header::CACHE_CONTROL, "no-store")], Json(items)))
-        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::BatchReadFailed,
+                error,
+            )
+        })
 }
 
 async fn batch_view(
@@ -953,7 +1089,13 @@ async fn batch_view(
         .batch_view(batch)
         .await
         .map(|view| ([(header::CACHE_CONTROL, "no-store")], Json(view)))
-        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::BatchReadFailed,
+                error,
+            )
+        })
 }
 
 async fn control_batch(
@@ -965,7 +1107,7 @@ async fn control_batch(
         .control_batch(batch, action)
         .await
         .map(Json)
-        .map_err(|error| api_error(StatusCode::CONFLICT, error))
+        .map_err(|error| api_error(StatusCode::CONFLICT, ErrorCode::BatchUpdateFailed, error))
 }
 
 async fn preview_writeback(
@@ -975,7 +1117,13 @@ async fn preview_writeback(
 ) -> Result<impl IntoResponse, ApiError> {
     collector.preview_writeback(batch, selection.row).await
         .map(|preview| ([(header::CACHE_CONTROL, "no-store")], Json(preview)))
-        .map_err(|error| api_error(StatusCode::CONFLICT, error))
+        .map_err(|error| {
+            api_error(
+                StatusCode::CONFLICT,
+                ErrorCode::WritebackPreviewFailed,
+                error,
+            )
+        })
 }
 
 async fn queue_writeback(
@@ -985,7 +1133,7 @@ async fn queue_writeback(
 ) -> Result<Json<usize>, ApiError> {
     collector.queue_writeback(batch, confirmation.row, &confirmation.token).await
         .map(Json)
-        .map_err(|error| api_error(StatusCode::CONFLICT, error))
+        .map_err(|error| api_error(StatusCode::CONFLICT, ErrorCode::WritebackQueueFailed, error))
 }
 
 async fn batch_result(
@@ -996,7 +1144,7 @@ async fn batch_result(
         .batch_row_result(batch, row)
         .await
         .map(lookup_response)
-        .map_err(|error| api_error(StatusCode::NOT_FOUND, error))
+        .map_err(|error| api_error(StatusCode::NOT_FOUND, ErrorCode::BatchReadFailed, error))
 }
 
 async fn batch_files(
@@ -1007,7 +1155,7 @@ async fn batch_files(
         .batch_files(batch, row)
         .await
         .map(|files| ([(header::CACHE_CONTROL, "no-store")], Json(files)))
-        .map_err(|error| api_error(StatusCode::NOT_FOUND, error))
+        .map_err(|error| api_error(StatusCode::NOT_FOUND, ErrorCode::BatchReadFailed, error))
 }
 
 async fn retry_batch_row(
@@ -1018,7 +1166,7 @@ async fn retry_batch_row(
         .retry_batch_row(batch, row)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|error| api_error(StatusCode::CONFLICT, error))
+        .map_err(|error| api_error(StatusCode::CONFLICT, ErrorCode::BatchUpdateFailed, error))
 }
 
 async fn choose_batch_candidate(
@@ -1030,5 +1178,5 @@ async fn choose_batch_candidate(
         .select_batch_candidate(batch, row, candidate)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|error| api_error(StatusCode::CONFLICT, error))
+        .map_err(|error| api_error(StatusCode::CONFLICT, ErrorCode::BatchMatchFailed, error))
 }

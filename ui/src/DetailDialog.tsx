@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { Movie } from "./Movie";
-import type { LookupResponse } from "./types";
+import { errorText, type LookupResponse } from "./types";
 
 export function DetailDialog({ response, opener, closeLabel, onDismiss }: {
   response: LookupResponse;
@@ -12,7 +12,7 @@ export function DetailDialog({ response, opener, closeLabel, onDismiss }: {
   const closeButton = useRef<HTMLButtonElement>(null);
   const pressedBackdrop = useRef(false);
   const [notice, setNotice] = useState<{ message: string; error?: boolean } | null>(() => response.storage_error
-    ? { message: response.storage_error + " 可以导出本次结果。", error: true } : null);
+    ? { message: errorText(response.storage_error, "STORAGE_SAVE_FAILED") + " 可以导出本次结果。", error: true } : null);
   const showInfo = (message: string) => setNotice({ message });
   const showError = (message: string) => setNotice({ message, error: true });
 

@@ -435,9 +435,10 @@ describe("后台批次", () => {
     output: { written: 2, directory: "/output/film", failed: 0, message: null } };
   it("在批次中查看海报、候选、关联路径并执行控制操作", async () => {
     harness([item, { ...item, id: 2, query: "选择条目", stage:"choice", candidates: [candidate], has_result: false, file_count: 0, output: null },
-      { ...item, id: 3, query: "失败条目", stage: "failed", has_result: false, file_count: 0, output: null }]);
+      { ...item, id: 3, query: "失败条目", stage: "failed", message: "来源连接超时。", has_result: false, file_count: 0, output: null }]);
     render(<App />);
     await screen.findByText("/output/film");
+    expect(screen.getByText("【错误码 BATCH_ITEM_FAILED】来源连接超时。")).toBeTruthy();
     details("101 个关联文件");
     await screen.findByText("媒体/0.mkv");
     click("显示更多文件");
@@ -688,7 +689,7 @@ describe("后台批次", () => {
 
     setLabel("资料完整性", "episode-overview");
     expect(screen.getByText("正在检查分集简介…")).toBeTruthy();
-    await screen.findByText("分集资料暂不可用。");
+    await screen.findByText("【错误码 HTTP_400】分集资料暂不可用。");
     expect(screen.queryByText("没有符合筛选条件的作品。")).toBeNull();
     click("重试");
     const work = await screen.findByRole("button", { name: /^已有作品简介.*缺 1 集简介/ });
@@ -759,9 +760,10 @@ describe("后台批次", () => {
     }] }], true);
     const defaultRequest = calls.getMockImplementation()!;
     let failSeries = true;
+    const id = "1234567890abcdef1234567890abcdef";
     calls.mockImplementation((route, options) => route === "/api/emby/refresh"
       ? Promise.resolve(failSeries && JSON.parse(String(options?.body)).id === "31"
-        ? response({ error: "无法连接 Emby。" }, 400) : response(null, 204))
+        ? response({ code: "EMBY_REFRESH_FAILED", error: "无法连接 Emby。", diagnostic_id: id }, 400) : response(null, 204))
       : defaultRequest(route, options));
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /^红辣椒/ }));
@@ -777,7 +779,7 @@ describe("后台批次", () => {
     click("刮削所选");
     expect(screen.queryByRole("radio", { name: "Collect Metadata AI 刮削" })).toBeNull();
     confirmScrape();
-    await screen.findByText("1 部作品提交失败。无法连接 Emby。");
+    await screen.findByText(`1 部作品提交失败。【错误码 EMBY_REFRESH_FAILED】无法连接 Emby。（诊断编号 ${id}）`);
     expect(screen.getByRole("checkbox", { name: "选择 红辣椒" })).toHaveProperty("checked", false);
     expect(screen.getByRole("checkbox", { name: "选择 暗黑" })).toHaveProperty("checked", true);
     failSeries = false;
@@ -908,9 +910,9 @@ it("识别非法输入及旧版本接口失败", async () => {
   calls.mockResolvedValueOnce(new Response(JSON.stringify({ error: "数据库不可用" }), {
     status: 503, headers: { "x-request-id": id },
   }));
-  await expect(getBatchView(100)).rejects.toThrow("数据库不可用（诊断编号 " + id + "）");
+  await expect(getBatchView(100)).rejects.toThrow(`【错误码 HTTP_503】数据库不可用（诊断编号 ${id}）`);
   calls.mockRejectedValueOnce(new TypeError("failed to fetch"));
-  await expect(getBatchView(100)).rejects.toThrow("无法连接 Collect Metadata Web");
+  await expect(getBatchView(100)).rejects.toThrow("【错误码 NETWORK_UNREACHABLE】无法连接 Collect Metadata Web");
   calls.mockResolvedValueOnce(new Response("broken", { status: 503 }));
-  await expect(getBatchView(100)).rejects.toThrow("503");
+  await expect(getBatchView(100)).rejects.toThrow("【错误码 HTTP_503】服务请求失败（HTTP 503）");
 });

@@ -71,7 +71,7 @@ export function WritebackDialog({ batch, row, title, canQueue, onClose, onQueued
             <p><strong>{kinds[file.kind]}</strong> · <code>{file.source}</code></p>
             {file.path && <p className="muted">已写回 · <code>{file.path}</code></p>}
             {file.backup && <p className="muted">原文件备份 · <code>{file.backup}</code></p>}
-            {file.error && <p className="batch-error">{file.error}</p>}
+            {file.error && <p className="batch-error">{errorText(file.error, "WRITEBACK_FILE_FAILED")}</p>}
             {file.destinations.length > 0 && <ul className="mt-1 grid gap-1">
               {file.destinations.map((destination) => <li key={destination.path}>
                 {actions[destination.action]} · <code>{destination.path}</code>

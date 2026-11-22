@@ -1,4 +1,5 @@
 import type { BatchAction, BatchInput, BatchSummary, BatchView, FolderBatchResult, FolderPreview, FolderSelection, FolderWorkResult } from "./batch/engine";
+import { diagnosticId, errorText } from "./types";
 import type {
   Candidate,
   EmbyInput,
@@ -44,22 +45,29 @@ async function request<T>(route: string, options?: RequestInit): Promise<T> {
   try {
     response = await fetch(route, options);
   } catch {
-    throw new Error("无法连接 Collect Metadata Web。请确认服务在线、网络可达，恢复后重新操作。");
+    throw new Error(errorText("无法连接 Collect Metadata Web。请确认服务在线、网络可达，恢复后重新操作。", "NETWORK_UNREACHABLE"));
   }
-  const id = response.headers.get("x-request-id") ?? "";
-  const reference = /^[a-f0-9]{32}$/.test(id) ? `（诊断编号 ${id}）` : "";
+  const id = diagnosticId(response.headers.get("x-request-id"));
   if (!response.ok) {
     const result = await response.json().catch(() => null);
     const message = typeof result?.error === "string" && result.error.trim()
       ? result.error
       : `服务请求失败（HTTP ${response.status}）。${httpHint(response.status)}`;
-    throw new Error(message + reference);
+    throw new Error(errorText({
+      error: message,
+      code: result?.code,
+      diagnostic_id: diagnosticId(result?.diagnostic_id) ?? id,
+    }, `HTTP_${response.status}`));
   }
   if (response.status === 204) return undefined as T;
   try {
     return await response.json();
   } catch {
-    throw new Error("Web 返回了无效的响应。请检查反向代理是否转到了登录页，并确认服务端版本。" + reference);
+    throw new Error(errorText({
+      code: "INVALID_RESPONSE",
+      error: "Web 返回了无效的响应。请检查反向代理是否转到了登录页，并确认服务端版本。",
+      diagnostic_id: id,
+    }));
   }
 }
 
@@ -131,7 +139,7 @@ export async function exportJson(response: LookupResponse, code: string): Promis
 }
 
 export function configureDatabase(url: string): Promise<void> {
-  if (!invoke) return Promise.reject(new Error("请在服务端配置 PostgreSQL。"));
+  if (!invoke) return Promise.reject(new Error(errorText("请在服务端配置 PostgreSQL。", "STORAGE_SETTINGS_FAILED")));
   return invoke("configure_database", { url });
 }
 
@@ -264,7 +272,7 @@ export function getEmbyCredits(id: string): Promise<EmbyCredit[]> {
 export type EmbyImage = "poster" | "backdrop" | "episode" | "portrait";
 
 export async function loadEmbyImage(id: string, image: EmbyImage): Promise<string> {
-  if (!invoke) throw new Error("Emby 图片暂不可用。");
+  if (!invoke) throw new Error(errorText("Emby 图片暂不可用。", "EMBY_IMAGE_UNAVAILABLE"));
   const bytes = await invoke<ArrayBuffer | number[]>("emby_preview_image", { id, image });
   const data = Array.isArray(bytes) ? Uint8Array.from(bytes) : new Uint8Array(bytes);
   const type = data[0] === 0xff ? "image/jpeg" : data[0] === 0x89 ? "image/png"
@@ -300,7 +308,7 @@ export function previewMountedFolder(path: string): Promise<FolderSelection> {
 
 export function scrapeFolderWork(batch: number, row: number, paths: string[],
   candidate: { provider: MediaProvider; id: string } | null): Promise<FolderWorkResult> {
-  if (!invoke) return Promise.reject(new Error("本地刮削仅在桌面版可用。"));
+  if (!invoke) return Promise.reject(new Error(errorText("本地刮削仅在桌面版可用。", "FOLDER_SCRAPE_FAILED")));
   return invoke("scrape_folder_work", { batch, row, paths, candidate });
 }
 

@@ -231,7 +231,7 @@
   .detail-close { @apply size-10 p-0; }
   .detail-content { @apply p-3 sm:p-6; }
   .detail-notice { @apply mb-3 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-accent; }
-  .detail-notice[data-kind="error"] { @apply text-danger; }
+  .detail-notice[data-kind="error"] { @apply text-danger [overflow-wrap:anywhere]; }
 
   .tab-strip { @apply flex min-w-0 flex-wrap gap-1 border-b border-line pb-2; }
   .tab-button { @apply px-2.5; }

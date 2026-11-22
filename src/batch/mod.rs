@@ -121,6 +121,8 @@ pub struct FolderWorkResult {
     candidates: Option<Value>,
     result: Option<LookupResponse>,
     output: Option<OutputReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -537,12 +539,23 @@ impl Collector {
         let output = outcome
             .output
             .map(|prepared| prepared.map_or_else(|report| report, BatchExport::publish));
+        let output_issue = output.as_ref().is_some_and(OutputReport::has_issue);
+        let diagnostic_id = if matches!(outcome.stage, "failed" | "not_found") || output_issue {
+            crate::diagnostics::warn(
+                "local_folder_scrape_issue",
+                serde_json::json!({"stage": outcome.stage, "output_issue": output_issue}),
+            );
+            crate::diagnostics::current_request_id()
+        } else {
+            None
+        };
         Ok(FolderWorkResult {
             stage: outcome.stage,
             message: outcome.message,
             candidates: outcome.candidates,
             result: outcome.result.filter(LookupResponse::has_fields),
             output,
+            diagnostic_id,
         })
     }
 

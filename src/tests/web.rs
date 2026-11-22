@@ -59,7 +59,26 @@ async fn failed_api_requests_have_safe_errors_and_server_generated_ids() {
     assert_eq!(invalid.headers()[header::CACHE_CONTROL], "no-store");
     let body = invalid.text().await.unwrap();
     assert!(!body.contains(supplied));
-    assert!(serde_json::from_str::<Value>(&body).unwrap()["error"].is_string());
+    let body = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(body["code"], "INVALID_INPUT");
+    assert_eq!(body["diagnostic_id"], id);
+    assert!(body["error"].is_string());
+
+    let rejected = client
+        .post(format!("{address}/api/search"))
+        .json(&json!({"kind":"movie", "query":" "}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let request_id = rejected.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let body = rejected.json::<Value>().await.unwrap();
+    assert_eq!(body["code"], "MEDIA_SEARCH_FAILED");
+    assert_eq!(body["error"], "请输入电影或剧集名称（最多 160 个字符）。");
+    assert_eq!(body["diagnostic_id"], request_id);
 
     let unknown = client
         .get(format!("{address}/api/old/{supplied}"))
@@ -68,7 +87,10 @@ async fn failed_api_requests_have_safe_errors_and_server_generated_ids() {
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     assert_ne!(unknown.headers()["x-request-id"].to_str().unwrap(), id);
-    assert!(unknown.json::<Value>().await.unwrap()["error"].is_string());
+    assert_eq!(
+        unknown.json::<Value>().await.unwrap()["code"],
+        "RESOURCE_NOT_FOUND"
+    );
     server.abort();
 }
 

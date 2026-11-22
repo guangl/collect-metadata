@@ -28,12 +28,11 @@ async fn desktop_commands_work_without_a_database_and_keep_preferences() {
 
     assert!(!storage_configured(state()));
     let connection_error = check_storage(state()).await.unwrap_err();
-    let id = connection_error
-        .rsplit_once("诊断编号 ")
-        .unwrap()
-        .1
-        .trim_end_matches('）');
+    let payload = serde_json::to_value(connection_error).unwrap();
+    let id = payload["diagnostic_id"].as_str().unwrap();
     assert!(uuid::Uuid::parse_str(id).is_ok());
+    assert_eq!(payload["code"], "STORAGE_CHECK_FAILED");
+    assert!(payload["error"].as_str().unwrap().contains("PostgreSQL"));
     let log_directory = desktop_log_directory().await.unwrap();
     let log =
         fs::read_to_string(PathBuf::from(log_directory).join("collect-metadata.log")).unwrap();
@@ -41,6 +40,7 @@ async fn desktop_commands_work_without_a_database_and_keep_preferences() {
     assert_eq!(entry["event"], "desktop_command_failed");
     assert_eq!(entry["request_id"], id);
     assert_eq!(entry["details"]["command"], "check_storage");
+    assert_eq!(entry["details"]["code"], payload["code"]);
     assert!(configure_database(state(), "  ".into()).await.is_err());
     assert!(history(state(), None, None, None).await.unwrap().is_empty());
     assert!(history_languages(state()).await.unwrap().is_empty());
@@ -67,6 +67,15 @@ async fn desktop_commands_work_without_a_database_and_keep_preferences() {
         .is_err()
     );
     assert!(lookup(state(), "../".into()).await.is_err());
+    let search_error = search_media(state(), MediaKind::Movie, " ".into())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(search_error.code, ErrorCode::MediaSearchFailed);
+    assert_eq!(
+        search_error.error,
+        "请输入电影或剧集名称（最多 160 个字符）。"
+    );
     assert!(
         search_media(state(), MediaKind::Av, "abc".into())
             .await

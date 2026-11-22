@@ -14,13 +14,14 @@ use std::{
 #[cfg(test)]
 use collect_metadata::scan_folder_paths;
 use collect_metadata::{
-    AiBatchInput, BangumiSettings, BangumiStatus, BatchAction, BatchItemInput, BatchRow,
-    BatchSummary, BatchView, CandidateChoice, Collector, EmbyEpisodeOverview, EmbyInput, EmbyLibrary,
-    EmbyLibraryPreview, EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope, EmbyScrapeTarget,
-    EmbySelectionInput, EmbySeriesPreview, EmbySettings, EmbySettingsView, EmbyWorkPreview,
-    FolderBatchResult, FolderSelection, FolderWorkResult, HistoryItem, LanguageSettings,
-    LanguageSettingsView, LookupResponse, MediaKind, MediaProvider, OutputOptions, OutputSettings,
-    OutputSettingsView, SearchResult, TmdbSettings, TmdbStatus, diagnostics, scan_native_folder,
+    AiBatchInput, AppError, BangumiSettings, BangumiStatus, BatchAction, BatchItemInput, BatchRow,
+    BatchSummary, BatchView, CandidateChoice, Collector, EmbyEpisodeOverview, EmbyInput,
+    EmbyLibrary, EmbyLibraryPreview, EmbyOverwriteInput, EmbyPreviewImage, EmbyScrapeScope,
+    EmbyScrapeTarget, EmbySelectionInput, EmbySeriesPreview, EmbySettings, EmbySettingsView,
+    EmbyWorkPreview, ErrorCode, FolderBatchResult, FolderSelection, FolderWorkResult, HistoryItem,
+    LanguageSettings, LanguageSettingsView, LookupResponse, MediaKind, MediaProvider,
+    OutputOptions, OutputSettings, OutputSettingsView, SearchResult, TmdbSettings, TmdbStatus,
+    diagnostics, scan_native_folder,
 };
 use serde_json::{Value, json};
 use tauri::{
@@ -60,8 +61,8 @@ impl DesktopState {
 }
 
 #[tauri::command]
-async fn configure_database(state: State<'_, DesktopState>, url: String) -> Result<(), String> {
-    diagnostics::desktop_command("configure_database", async {
+async fn configure_database(state: State<'_, DesktopState>, url: String) -> Result<(), AppError> {
+    let work = async {
         let _config = state.config_lock.lock().await;
         if env::var("DATABASE_URL")
             .ok()
@@ -99,8 +100,8 @@ async fn configure_database(state: State<'_, DesktopState>, url: String) -> Resu
         runtime.worker.abort();
         *runtime = Runtime::start(collector);
         Ok(())
-    })
-    .await
+    };
+    diagnostics::desktop_command("configure_database", ErrorCode::StorageSettingsFailed, work).await
 }
 
 #[tauri::command]
@@ -112,9 +113,10 @@ fn tmdb_status(state: State<'_, DesktopState>) -> TmdbStatus {
 async fn test_tmdb(
     state: State<'_, DesktopState>,
     credential: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     diagnostics::desktop_command(
         "test_tmdb",
+        ErrorCode::TmdbConnectionFailed,
         state.collector().test_tmdb(credential.as_deref()),
     )
     .await
@@ -124,8 +126,13 @@ async fn test_tmdb(
 async fn save_tmdb(
     state: State<'_, DesktopState>,
     credential: String,
-) -> Result<TmdbStatus, String> {
-    diagnostics::desktop_command("save_tmdb", state.collector().save_tmdb(credential)).await
+) -> Result<TmdbStatus, AppError> {
+    diagnostics::desktop_command(
+        "save_tmdb",
+        ErrorCode::TmdbSettingsFailed,
+        state.collector().save_tmdb(credential),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -137,16 +144,26 @@ fn bangumi_status(state: State<'_, DesktopState>) -> BangumiStatus {
 async fn test_bangumi(
     state: State<'_, DesktopState>,
     credential: Option<String>,
-) -> Result<(), String> {
-    state.collector().test_bangumi(credential.as_deref()).await
+) -> Result<(), AppError> {
+    diagnostics::desktop_command(
+        "test_bangumi",
+        ErrorCode::BangumiConnectionFailed,
+        state.collector().test_bangumi(credential.as_deref()),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn save_bangumi(
     state: State<'_, DesktopState>,
     credential: String,
-) -> Result<BangumiStatus, String> {
-    state.collector().save_bangumi(credential).await
+) -> Result<BangumiStatus, AppError> {
+    diagnostics::desktop_command(
+        "save_bangumi",
+        ErrorCode::BangumiSettingsFailed,
+        state.collector().save_bangumi(credential),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -158,17 +175,23 @@ fn ai_status(state: State<'_, DesktopState>) -> bool {
 async fn create_ai_batch(
     state: State<'_, DesktopState>,
     input: AiBatchInput,
-) -> Result<i64, String> {
-    diagnostics::desktop_command("create_ai_batch", state.collector().create_ai_batch(input)).await
+) -> Result<i64, AppError> {
+    diagnostics::desktop_command(
+        "create_ai_batch",
+        ErrorCode::AiBatchCreateFailed,
+        state.collector().create_ai_batch(input),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn import_emby_selection(
     state: State<'_, DesktopState>,
     input: EmbySelectionInput,
-) -> Result<i64, String> {
+) -> Result<i64, AppError> {
     diagnostics::desktop_command(
         "import_emby_selection",
+        ErrorCode::EmbyImportFailed,
         state.collector().import_emby_selection(input),
     )
     .await
@@ -180,37 +203,43 @@ async fn correct_batch_match(
     batch: i64,
     row: i64,
     candidate: CandidateChoice,
-) -> Result<(), String> {
-    diagnostics::desktop_command("correct_batch_match", async {
-        state
-            .collector()
-            .correct_batch_match(batch, row, candidate)
-            .await
-    })
+) -> Result<(), AppError> {
+    diagnostics::desktop_command(
+        "correct_batch_match",
+        ErrorCode::BatchMatchFailed,
+        state.collector().correct_batch_match(batch, row, candidate),
+    )
     .await
 }
 
 #[tauri::command]
-async fn emby_libraries(state: State<'_, DesktopState>) -> Result<Vec<EmbyLibrary>, String> {
-    diagnostics::desktop_command("emby_libraries", state.collector().emby_libraries()).await
+async fn emby_libraries(state: State<'_, DesktopState>) -> Result<Vec<EmbyLibrary>, AppError> {
+    diagnostics::desktop_command(
+        "emby_libraries",
+        ErrorCode::EmbyLibraryFailed,
+        state.collector().emby_libraries(),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn preview_emby(
     state: State<'_, DesktopState>,
     library: String,
-) -> Result<Vec<EmbyWorkPreview>, String> {
+) -> Result<Vec<EmbyWorkPreview>, AppError> {
     diagnostics::desktop_command(
         "preview_emby",
+        ErrorCode::EmbyLibraryFailed,
         state.collector().preview_emby_library(&library),
     )
     .await
 }
 
 #[tauri::command]
-async fn import_emby(state: State<'_, DesktopState>, library: String) -> Result<i64, String> {
+async fn import_emby(state: State<'_, DesktopState>, library: String) -> Result<i64, AppError> {
     diagnostics::desktop_command(
         "import_emby",
+        ErrorCode::EmbyImportFailed,
         state.collector().import_emby_library(&library),
     )
     .await
@@ -219,14 +248,20 @@ async fn import_emby(state: State<'_, DesktopState>, library: String) -> Result<
 #[tauri::command]
 async fn emby_catalog(
     state: State<'_, DesktopState>,
-) -> Result<Option<Vec<EmbyLibraryPreview>>, String> {
-    diagnostics::desktop_command("emby_catalog", state.collector().emby_catalog()).await
+) -> Result<Option<Vec<EmbyLibraryPreview>>, AppError> {
+    diagnostics::desktop_command(
+        "emby_catalog",
+        ErrorCode::EmbyLibraryFailed,
+        state.collector().emby_catalog(),
+    )
+    .await
 }
 
 #[tauri::command]
-async fn import_emby_catalog(state: State<'_, DesktopState>) -> Result<i64, String> {
+async fn import_emby_catalog(state: State<'_, DesktopState>) -> Result<i64, AppError> {
     diagnostics::desktop_command(
         "import_emby_catalog",
+        ErrorCode::EmbyImportFailed,
         state.collector().import_emby_catalog(),
     )
     .await
@@ -237,9 +272,10 @@ async fn import_emby_item(
     state: State<'_, DesktopState>,
     id: String,
     scope: EmbyScrapeScope,
-) -> Result<i64, String> {
+) -> Result<i64, AppError> {
     diagnostics::desktop_command(
         "import_emby_item",
+        ErrorCode::EmbyImportFailed,
         state.collector().import_emby_item(&id, scope),
     )
     .await
@@ -249,16 +285,26 @@ async fn import_emby_item(
 async fn overwrite_emby(
     state: State<'_, DesktopState>,
     input: EmbyOverwriteInput,
-) -> Result<(), String> {
-    diagnostics::desktop_command("overwrite_emby", state.collector().overwrite_emby(input)).await
+) -> Result<(), AppError> {
+    diagnostics::desktop_command(
+        "overwrite_emby",
+        ErrorCode::EmbyOverwriteFailed,
+        state.collector().overwrite_emby(input),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn refresh_emby_metadata(
     state: State<'_, DesktopState>,
     target: EmbyScrapeTarget,
-) -> Result<(), String> {
-    state.collector().refresh_emby_metadata(target).await
+) -> Result<(), AppError> {
+    diagnostics::desktop_command(
+        "refresh_emby_metadata",
+        ErrorCode::EmbyRefreshFailed,
+        state.collector().refresh_emby_metadata(target),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -266,12 +312,12 @@ async fn emby_preview_image(
     state: State<'_, DesktopState>,
     id: String,
     image: EmbyPreviewImage,
-) -> Result<tauri::ipc::Response, String> {
+) -> Result<tauri::ipc::Response, AppError> {
     let (bytes, _) = state
         .collector()
         .emby_preview_image(&id, image)
         .await
-        .ok_or("Emby 图片暂不可用。")?;
+        .ok_or_else(|| AppError::new(ErrorCode::EmbyImageUnavailable, "Emby 图片暂不可用。"))?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -279,33 +325,49 @@ async fn emby_preview_image(
 async fn emby_credits(
     state: State<'_, DesktopState>,
     id: String,
-) -> Result<Vec<collect_metadata::EmbyCredit>, String> {
-    diagnostics::desktop_command("emby_credits", state.collector().emby_credits(&id)).await
+) -> Result<Vec<collect_metadata::EmbyCredit>, AppError> {
+    diagnostics::desktop_command(
+        "emby_credits",
+        ErrorCode::EmbyDetailsFailed,
+        state.collector().emby_credits(&id),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn emby_missing_episode_overviews(
     state: State<'_, DesktopState>,
     library: String,
-) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
-    state.collector().emby_missing_episode_overviews(&library).await
+) -> Result<std::collections::HashMap<String, Vec<String>>, AppError> {
+    diagnostics::desktop_command(
+        "emby_missing_episode_overviews",
+        ErrorCode::EmbyDetailsFailed,
+        state.collector().emby_missing_episode_overviews(&library),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn emby_episode_overview(
     state: State<'_, DesktopState>,
     id: String,
-) -> Result<EmbyEpisodeOverview, String> {
-    state.collector().emby_episode_overview(&id).await
+) -> Result<EmbyEpisodeOverview, AppError> {
+    diagnostics::desktop_command(
+        "emby_episode_overview",
+        ErrorCode::EmbyDetailsFailed,
+        state.collector().emby_episode_overview(&id),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn emby_series_preview(
     state: State<'_, DesktopState>,
     id: String,
-) -> Result<EmbySeriesPreview, String> {
+) -> Result<EmbySeriesPreview, AppError> {
     diagnostics::desktop_command(
         "emby_series_preview",
+        ErrorCode::EmbyDetailsFailed,
         state.collector().emby_series_preview(&id),
     )
     .await
@@ -320,14 +382,14 @@ fn language_settings(state: State<'_, DesktopState>) -> LanguageSettingsView {
 async fn save_languages(
     state: State<'_, DesktopState>,
     languages: Vec<String>,
-) -> Result<LanguageSettingsView, String> {
-    diagnostics::desktop_command("save_languages", async {
+) -> Result<LanguageSettingsView, AppError> {
+    let work = async {
         let settings = Arc::clone(state.collector().language_settings());
         tauri::async_runtime::spawn_blocking(move || settings.save(languages))
             .await
             .map_err(|_| "无法保存元数据语言。".to_owned())?
-    })
-    .await
+    };
+    diagnostics::desktop_command("save_languages", ErrorCode::LanguageSettingsFailed, work).await
 }
 
 #[tauri::command]
@@ -336,16 +398,26 @@ fn emby_settings(state: State<'_, DesktopState>) -> EmbySettingsView {
 }
 
 #[tauri::command]
-async fn test_emby(state: State<'_, DesktopState>, input: EmbyInput) -> Result<(), String> {
-    diagnostics::desktop_command("test_emby", state.collector().test_emby(input)).await
+async fn test_emby(state: State<'_, DesktopState>, input: EmbyInput) -> Result<(), AppError> {
+    diagnostics::desktop_command(
+        "test_emby",
+        ErrorCode::EmbyConnectionFailed,
+        state.collector().test_emby(input),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn save_emby(
     state: State<'_, DesktopState>,
     input: EmbyInput,
-) -> Result<EmbySettingsView, String> {
-    diagnostics::desktop_command("save_emby", state.collector().save_emby(input)).await
+) -> Result<EmbySettingsView, AppError> {
+    diagnostics::desktop_command(
+        "save_emby",
+        ErrorCode::EmbySettingsFailed,
+        state.collector().save_emby(input),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -357,19 +429,24 @@ fn output_settings(state: State<'_, DesktopState>) -> OutputSettingsView {
 async fn save_output_settings(
     state: State<'_, DesktopState>,
     options: OutputOptions,
-) -> Result<OutputSettingsView, String> {
-    diagnostics::desktop_command("save_output_settings", async {
+) -> Result<OutputSettingsView, AppError> {
+    let work = async {
         let settings = Arc::clone(&state.output);
         tauri::async_runtime::spawn_blocking(move || settings.save(options))
             .await
             .map_err(|_| "无法保存输出设置。".to_owned())?
-    })
+    };
+    diagnostics::desktop_command(
+        "save_output_settings",
+        ErrorCode::OutputSettingsFailed,
+        work,
+    )
     .await
 }
 
 #[tauri::command]
-async fn pick_output_directory(app: AppHandle) -> Result<Option<String>, String> {
-    diagnostics::desktop_command("pick_output_directory", async {
+async fn pick_output_directory(app: AppHandle) -> Result<Option<String>, AppError> {
+    let work = async {
         tauri::async_runtime::spawn_blocking(move || {
             let root = app
                 .dialog()
@@ -385,21 +462,26 @@ async fn pick_output_directory(app: AppHandle) -> Result<Option<String>, String>
         })
         .await
         .map_err(|_| "无法打开目录选择器。".to_owned())?
-    })
-    .await
+    };
+    diagnostics::desktop_command("pick_output_directory", ErrorCode::OutputFolderFailed, work).await
 }
 
 #[tauri::command]
 async fn create_batch(
     state: State<'_, DesktopState>,
     items: Vec<BatchItemInput>,
-) -> Result<i64, String> {
-    diagnostics::desktop_command("create_batch", state.collector().create_batch(items)).await
+) -> Result<i64, AppError> {
+    diagnostics::desktop_command(
+        "create_batch",
+        ErrorCode::BatchCreateFailed,
+        state.collector().create_batch(items),
+    )
+    .await
 }
 
 #[tauri::command]
-async fn choose_media_folder(app: AppHandle) -> Result<Option<FolderSelection>, String> {
-    diagnostics::desktop_command("choose_media_folder", async {
+async fn choose_media_folder(app: AppHandle) -> Result<Option<FolderSelection>, AppError> {
+    let work = async {
         tauri::async_runtime::spawn_blocking(move || {
             let Some(root) = app
                 .dialog()
@@ -414,8 +496,8 @@ async fn choose_media_folder(app: AppHandle) -> Result<Option<FolderSelection>, 
         })
         .await
         .map_err(|_| "无法扫描所选文件夹。")?
-    })
-    .await
+    };
+    diagnostics::desktop_command("choose_media_folder", ErrorCode::FolderScanFailed, work).await
 }
 
 #[tauri::command]
@@ -425,20 +507,25 @@ async fn scrape_folder_work(
     row: i64,
     paths: Vec<String>,
     candidate: Option<CandidateChoice>,
-) -> Result<FolderWorkResult, String> {
-    state
-        .collector()
-        .scrape_folder_work(batch, row, paths, candidate)
-        .await
+) -> Result<FolderWorkResult, AppError> {
+    diagnostics::desktop_command(
+        "scrape_folder_work",
+        ErrorCode::FolderScrapeFailed,
+        state
+            .collector()
+            .scrape_folder_work(batch, row, paths, candidate),
+    )
+    .await
 }
 
 #[tauri::command]
 async fn create_folder_batch(
     state: State<'_, DesktopState>,
     paths: Vec<String>,
-) -> Result<FolderBatchResult, String> {
+) -> Result<FolderBatchResult, AppError> {
     diagnostics::desktop_command(
         "create_folder_batch",
+        ErrorCode::BatchCreateFailed,
         state.collector().create_folder_batch(paths),
     )
     .await
@@ -448,18 +535,33 @@ async fn create_folder_batch(
 async fn list_batches(
     state: State<'_, DesktopState>,
     before: Option<i64>,
-) -> Result<Vec<BatchSummary>, String> {
-    diagnostics::desktop_command("list_batches", state.collector().list_batches(before)).await
+) -> Result<Vec<BatchSummary>, AppError> {
+    diagnostics::desktop_command(
+        "list_batches",
+        ErrorCode::BatchReadFailed,
+        state.collector().list_batches(before),
+    )
+    .await
 }
 
 #[tauri::command]
-async fn batch_rows(state: State<'_, DesktopState>, batch: i64) -> Result<Vec<BatchRow>, String> {
-    diagnostics::desktop_command("batch_rows", state.collector().batch_rows(batch)).await
+async fn batch_rows(state: State<'_, DesktopState>, batch: i64) -> Result<Vec<BatchRow>, AppError> {
+    diagnostics::desktop_command(
+        "batch_rows",
+        ErrorCode::BatchReadFailed,
+        state.collector().batch_rows(batch),
+    )
+    .await
 }
 
 #[tauri::command]
-async fn batch_view(state: State<'_, DesktopState>, batch: i64) -> Result<BatchView, String> {
-    diagnostics::desktop_command("batch_view", state.collector().batch_view(batch)).await
+async fn batch_view(state: State<'_, DesktopState>, batch: i64) -> Result<BatchView, AppError> {
+    diagnostics::desktop_command(
+        "batch_view",
+        ErrorCode::BatchReadFailed,
+        state.collector().batch_view(batch),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -467,8 +569,13 @@ async fn batch_files(
     state: State<'_, DesktopState>,
     batch: i64,
     row: i64,
-) -> Result<Vec<String>, String> {
-    diagnostics::desktop_command("batch_files", state.collector().batch_files(batch, row)).await
+) -> Result<Vec<String>, AppError> {
+    diagnostics::desktop_command(
+        "batch_files",
+        ErrorCode::BatchReadFailed,
+        state.collector().batch_files(batch, row),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -476,9 +583,10 @@ async fn control_batch(
     state: State<'_, DesktopState>,
     batch: i64,
     action: BatchAction,
-) -> Result<u64, String> {
+) -> Result<u64, AppError> {
     diagnostics::desktop_command(
         "control_batch",
+        ErrorCode::BatchUpdateFailed,
         state.collector().control_batch(batch, action),
     )
     .await
@@ -489,9 +597,10 @@ async fn batch_result(
     state: State<'_, DesktopState>,
     batch: i64,
     row: i64,
-) -> Result<LookupResponse, String> {
+) -> Result<LookupResponse, AppError> {
     diagnostics::desktop_command(
         "batch_result",
+        ErrorCode::BatchReadFailed,
         state.collector().batch_row_result(batch, row),
     )
     .await
@@ -502,9 +611,10 @@ async fn preview_writeback(
     state: State<'_, DesktopState>,
     batch: i64,
     row: Option<i64>,
-) -> Result<collect_metadata::WritebackPreview, String> {
+) -> Result<collect_metadata::WritebackPreview, AppError> {
     diagnostics::desktop_command(
         "preview_writeback",
+        ErrorCode::WritebackPreviewFailed,
         state.collector().preview_writeback(batch, row),
     )
     .await
@@ -516,9 +626,10 @@ async fn queue_writeback(
     batch: i64,
     row: Option<i64>,
     token: String,
-) -> Result<usize, String> {
+) -> Result<usize, AppError> {
     diagnostics::desktop_command(
         "queue_writeback",
+        ErrorCode::WritebackQueueFailed,
         state.collector().queue_writeback(batch, row, &token),
     )
     .await
@@ -529,9 +640,10 @@ async fn retry_batch_row(
     state: State<'_, DesktopState>,
     batch: i64,
     row: i64,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     diagnostics::desktop_command(
         "retry_batch_row",
+        ErrorCode::BatchUpdateFailed,
         state.collector().retry_batch_row(batch, row),
     )
     .await
@@ -543,19 +655,25 @@ async fn choose_batch_candidate(
     batch: i64,
     row: i64,
     candidate: CandidateChoice,
-) -> Result<(), String> {
-    diagnostics::desktop_command("choose_batch_candidate", async {
+) -> Result<(), AppError> {
+    diagnostics::desktop_command(
+        "choose_batch_candidate",
+        ErrorCode::BatchMatchFailed,
         state
             .collector()
-            .select_batch_candidate(batch, row, candidate)
-            .await
-    })
+            .select_batch_candidate(batch, row, candidate),
+    )
     .await
 }
 
 #[tauri::command]
-async fn lookup(state: State<'_, DesktopState>, query: String) -> Result<LookupResponse, String> {
-    diagnostics::desktop_command("lookup", state.collector().lookup(&query)).await
+async fn lookup(state: State<'_, DesktopState>, query: String) -> Result<LookupResponse, AppError> {
+    diagnostics::desktop_command(
+        "lookup",
+        ErrorCode::MediaLookupFailed,
+        state.collector().lookup(&query),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -563,8 +681,13 @@ async fn search_media(
     state: State<'_, DesktopState>,
     kind: MediaKind,
     query: String,
-) -> Result<SearchResult, String> {
-    diagnostics::desktop_command("search_media", state.collector().search_media(kind, &query)).await
+) -> Result<SearchResult, AppError> {
+    diagnostics::desktop_command(
+        "search_media",
+        ErrorCode::MediaSearchFailed,
+        state.collector().search_media(kind, &query),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -573,17 +696,23 @@ async fn collect_media(
     kind: MediaKind,
     provider: MediaProvider,
     id: String,
-) -> Result<LookupResponse, String> {
+) -> Result<LookupResponse, AppError> {
     diagnostics::desktop_command(
         "collect_media",
+        ErrorCode::MediaCollectionFailed,
         state.collector().collect_media(kind, provider, &id),
     )
     .await
 }
 
 #[tauri::command]
-async fn history_languages(state: State<'_, DesktopState>) -> Result<Vec<String>, String> {
-    diagnostics::desktop_command("history_languages", state.collector().history_languages()).await
+async fn history_languages(state: State<'_, DesktopState>) -> Result<Vec<String>, AppError> {
+    diagnostics::desktop_command(
+        "history_languages",
+        ErrorCode::HistoryReadFailed,
+        state.collector().history_languages(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -592,19 +721,26 @@ async fn history(
     before: Option<i64>,
     kind: Option<MediaKind>,
     language: Option<String>,
-) -> Result<Vec<HistoryItem>, String> {
-    diagnostics::desktop_command("history", async {
-        state
-            .collector()
-            .history(before, kind, language.as_deref())
-            .await
-    })
+) -> Result<Vec<HistoryItem>, AppError> {
+    diagnostics::desktop_command(
+        "history",
+        ErrorCode::HistoryReadFailed,
+        state.collector().history(before, kind, language.as_deref()),
+    )
     .await
 }
 
 #[tauri::command]
-async fn load_snapshot(state: State<'_, DesktopState>, id: i64) -> Result<LookupResponse, String> {
-    diagnostics::desktop_command("load_snapshot", state.collector().load(id)).await
+async fn load_snapshot(
+    state: State<'_, DesktopState>,
+    id: i64,
+) -> Result<LookupResponse, AppError> {
+    diagnostics::desktop_command(
+        "load_snapshot",
+        ErrorCode::HistoryReadFailed,
+        state.collector().load(id),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -613,13 +749,18 @@ fn storage_configured(state: State<'_, DesktopState>) -> bool {
 }
 
 #[tauri::command]
-async fn check_storage(state: State<'_, DesktopState>) -> Result<(), String> {
-    diagnostics::desktop_command("check_storage", state.collector().check_storage()).await
+async fn check_storage(state: State<'_, DesktopState>) -> Result<(), AppError> {
+    diagnostics::desktop_command(
+        "check_storage",
+        ErrorCode::StorageCheckFailed,
+        state.collector().check_storage(),
+    )
+    .await
 }
 
 #[tauri::command]
-async fn export_json(app: AppHandle, code: String, document: Value) -> Result<bool, String> {
-    diagnostics::desktop_command("export_json", async {
+async fn export_json(app: AppHandle, code: String, document: Value) -> Result<bool, AppError> {
+    let work = async {
         let filename = code
             .chars()
             .take(64)
@@ -654,29 +795,29 @@ async fn export_json(app: AppHandle, code: String, document: Value) -> Result<bo
         })
         .await
         .map_err(|_| "导出任务异常结束。请重试或查看应用日志。".to_owned())?
-    })
-    .await
+    };
+    diagnostics::desktop_command("export_json", ErrorCode::JsonExportFailed, work).await
 }
 
 #[tauri::command]
-async fn desktop_log_directory() -> Result<String, String> {
-    diagnostics::desktop_command("desktop_log_directory", async {
+async fn desktop_log_directory() -> Result<String, AppError> {
+    let work = async {
         Ok(diagnostics::desktop_log_directory()?
             .to_string_lossy()
             .into_owned())
-    })
-    .await
+    };
+    diagnostics::desktop_command("desktop_log_directory", ErrorCode::LogAccessFailed, work).await
 }
 
 #[tauri::command]
-async fn open_desktop_logs(app: AppHandle) -> Result<(), String> {
-    diagnostics::desktop_command("open_desktop_logs", async {
+async fn open_desktop_logs(app: AppHandle) -> Result<(), AppError> {
+    let work = async {
         let directory = diagnostics::desktop_log_directory()?;
         app.opener()
             .open_path(directory.to_string_lossy(), None::<&str>)
             .map_err(|_| "无法打开日志目录，请在文件管理器中打开显示的路径。".into())
-    })
-    .await
+    };
+    diagnostics::desktop_command("open_desktop_logs", ErrorCode::LogAccessFailed, work).await
 }
 
 fn setup_desktop(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {

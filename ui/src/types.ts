@@ -224,7 +224,20 @@ export const mediaLabels: Record<MediaType, string> = {
   av: "AV 番号",
 };
 
-export function errorText(error: unknown): string {
-  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  return message.trim() || "操作失败。请重试，仍失败时查看「设置 → 日志与排查」。";
+export function diagnosticId(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-f0-9]{32}$/.test(value) ? value : undefined;
+}
+
+export function errorText(error: unknown, fallbackCode = "OPERATION_FAILED"): string {
+  const details = typeof error === "object" && error !== null
+    ? error as { code?: unknown; error?: unknown; diagnostic_id?: unknown }
+    : undefined;
+  const message = typeof details?.error === "string" ? details.error
+    : error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const reason = message.trim() || "操作失败。请重试，仍失败时查看「设置 → 日志与排查」。";
+  if (/^【错误码 [A-Z][A-Z0-9_]*】/.test(reason)) return reason;
+  const code = typeof details?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(details.code)
+    ? details.code : fallbackCode;
+  const id = diagnosticId(details?.diagnostic_id);
+  return `【错误码 ${code}】${reason}${id ? `（诊断编号 ${id}）` : ""}`;
 }

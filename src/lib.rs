@@ -1,3 +1,4 @@
+mod app_error;
 mod batch;
 mod collect;
 pub mod diagnostics;
@@ -5,6 +6,7 @@ mod output;
 mod providers;
 mod storage;
 
+pub use app_error::{AppError, ErrorCode};
 pub use collect::{
     BangumiSettings, BangumiStatus, Collector, EmbyEpisodeOverview, LanguageSettings, LanguageSettingsView,
     LookupResponse, TmdbSettings, TmdbStatus,

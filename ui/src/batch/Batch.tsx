@@ -164,11 +164,18 @@ function LocalFolderScrape({ folder, busy, setBusy }: {
             {response && <button type="button" className="secondary"
               onClick={(event) => setOpened({ response, opener: event.currentTarget })}>查看结果</button>}
           </div>
-          {row?.message && <p className="muted">{row.message}</p>}
+          {row?.message && <p className={row.stage === "failed" ? "batch-error" : "muted"}>
+            {row.stage === "failed" || row.stage === "not_found"
+              ? errorText({ error: row.message, diagnostic_id: row.diagnostic_id },
+                row.stage === "not_found" ? "MEDIA_NOT_FOUND" : "FOLDER_SCRAPE_FAILED")
+              : row.message}
+          </p>}
           {row?.candidates?.length ? <CandidateChoice candidates={row.candidates} busy={busy}
             onChoose={(candidate) => void choose(index, candidate)} /> : null}
           {row?.output?.directory && <p>已写出 {row.output.written} 项资料 · <code>{row.output.directory}</code></p>}
-          {row?.output?.message && <p className="batch-error">{row.output.message}</p>}
+          {row?.output?.message && <p className="batch-error">
+            {errorText({ error: row.output.message, diagnostic_id: row.diagnostic_id }, "OUTPUT_FAILED")}
+          </p>}
         </li>;
       })}
     </ul>
@@ -405,7 +412,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     } else if (folderInput.current && "webkitdirectory" in folderInput.current) {
       folderInput.current.click();
     } else {
-      setFolderError("当前浏览器不支持选择文件夹。请使用支持文件夹选择的浏览器或桌面版。");
+      setFolderError(errorText("当前浏览器不支持选择文件夹。请使用支持文件夹选择的浏览器或桌面版。", "FOLDER_SCAN_FAILED"));
     }
   }
 
@@ -413,7 +420,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     const files = event.currentTarget.files;
     if (!files?.length) return;
     if (files.length > MAX_FOLDER_FILES) {
-      setFolderError("请选择包含 30,000 个以内文件的文件夹。");
+      setFolderError(errorText("请选择包含 30,000 个以内文件的文件夹。", "INVALID_INPUT"));
     } else {
       const paths = Array.from(files, (file) => file.webkitRelativePath || file.name);
       void scan(() => chooseMediaFolder(paths));
@@ -453,7 +460,9 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   }
 
   const queueEmby = useCallback(async (request: () => Promise<number>, notice: string) => {
-    if (sourceBusy || storage !== "ready") throw new Error("后台任务当前不可用。");
+    if (sourceBusy || storage !== "ready") {
+      throw new Error(errorText("后台任务当前不可用。", "BATCH_CREATE_FAILED"));
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -742,12 +751,17 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
                     onClick={() => setWriteback({ row: row.id, title })}>
                     {row.writeback === "ready" ? "预览写回" : row.writeback === "failed" ? "查看失败并重试" : "查看写回记录"}
                   </button>}
-                {row.message && <p className={row.stage === "failed" ? "batch-error" : "muted"}>{row.message}</p>}
+                {row.message && <p className={row.stage === "failed" ? "batch-error" : "muted"}>
+                  {row.stage === "failed" ? errorText(row.message, "BATCH_ITEM_FAILED")
+                    : row.stage === "not_found" ? errorText(row.message, "MEDIA_NOT_FOUND") : row.message}
+                </p>}
                 {(row.stage === "failed" || row.stage === "partial" || row.writeback === "failed") &&
                   <p className="muted">条目 #{row.id}</p>}
                 {row.output && <div className="muted">
                   {row.output.directory && <p>已写出 {row.output.written} 项资料 · <code>{row.output.directory}</code></p>}
-                  {row.output.message && <p className="batch-error">{row.output.message}</p>}
+                  {row.output.message && <p className="batch-error">
+                    {errorText(row.output.message, row.writeback === "failed" ? "WRITEBACK_FILE_FAILED" : "OUTPUT_FAILED")}
+                  </p>}
                 </div>}
                 {row.file_count > 0 && selected !== null && <LinkedFiles batch={selected} row={row} />}
                 {row.stage === "choice" && row.candidates && <CandidateChoice candidates={row.candidates} busy={busy}

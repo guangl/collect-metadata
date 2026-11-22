@@ -1,4 +1,4 @@
-import type { Candidate, LookupResponse, MediaType, OutputReport } from "../types";
+import { errorText, type Candidate, type LookupResponse, type MediaType, type OutputReport } from "../types";
 
 export const MAX_ITEMS = 100;
 export const AV_PREFIXES = ["有码番号", "无码番号", "素人番号", "FC2番号", "欧美番号", "国产番号", "动漫里番", "mywife"];
@@ -39,6 +39,7 @@ export interface FolderWorkResult {
   candidates: Candidate[] | null;
   result: LookupResponse | null;
   output: OutputReport | null;
+  diagnostic_id?: string;
 }
 
 export type BatchStatus = "running" | "paused" | "cancelled";
@@ -77,8 +78,8 @@ export interface BatchRow extends BatchInput {
 
 export function parseBatch(input: string, defaultType: MediaType): BatchInput[] {
   const lines = input.split(/\r\n|[\r\n]/).map((line) => line.trim()).filter(Boolean);
-  if (!lines.length) throw new Error("请至少输入一条作品名称或番号。");
-  if (lines.length > MAX_ITEMS) throw new Error("每批最多 " + MAX_ITEMS + " 条，请分批输入。");
+  if (!lines.length) throw new Error(errorText("请至少输入一条作品名称或番号。", "INVALID_INPUT"));
+  if (lines.length > MAX_ITEMS) throw new Error(errorText(`每批最多 ${MAX_ITEMS} 条，请分批输入。`, "INVALID_INPUT"));
 
   return lines.map((line) => {
     const prefix = /^([^:：]+)[:：]/.exec(line);

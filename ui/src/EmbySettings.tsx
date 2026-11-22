@@ -88,7 +88,10 @@ export function EmbySettings() {
         <p className="muted">安装新版插件后，在 Emby 管理后台选择允许整理的媒体库，并设置目录和文件名模板。整理任务在 Emby 服务端运行。</p>
         {organizer && <a className="inline-block text-sm" href={organizer} target="_blank" rel="noopener noreferrer" onClick={isDesktop ? (event) => {
           event.preventDefault();
-          void openUrl(organizer).catch(() => setMessage({ text: "无法打开 Emby 设置，请在浏览器登录 Emby 管理后台。", error: true }));
+          void openUrl(organizer).catch(() => setMessage({
+            text: errorText("无法打开 Emby 设置，请在浏览器登录 Emby 管理后台。", "LINK_OPEN_FAILED"),
+            error: true,
+          }));
         } : undefined}>打开 Emby 自动整理设置</a>}
       </div>
     </section>

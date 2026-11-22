@@ -273,11 +273,18 @@ function clickedBackdrop(event: MouseEvent<HTMLDialogElement> | PointerEvent<HTM
 
 function EpisodeSynopsis({ episode, revision }: { episode: EmbyEpisodePreview; revision: number }) {
   const [localized, setLocalized] = useState<EpisodeOverview>();
+  const [error, setError] = useState<string>();
   useEffect(() => {
     let active = true;
+    setError(undefined);
     getEmbyEpisodeOverview(episode.id).then(
       (overview) => { if (active) setLocalized(overview); },
-      () => { if (active) setLocalized(undefined); },
+      (reason) => {
+        if (active) {
+          setLocalized(undefined);
+          setError(errorText(reason, "EMBY_DETAILS_FAILED"));
+        }
+      },
     );
     return () => { active = false; };
   }, [episode.id, revision]);
@@ -286,6 +293,7 @@ function EpisodeSynopsis({ episode, revision }: { episode: EmbyEpisodePreview; r
   const source = localized?.source;
   return <>
     <p className="movie-description">{overview || "Emby 暂无本集简介。"}</p>
+    {error && <p className="batch-error" role="alert">{error}</p>}
     {!!overview && source && source !== "Emby" && <p className="mt-2 text-sm text-muted">简介来源 · {source}</p>}
   </>;
 }
