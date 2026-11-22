@@ -54,6 +54,16 @@ pub(crate) fn field_locked(item: &Value, name: &str) -> bool {
         .any(|field| field == name)
 }
 
+#[cfg(feature = "web")]
+pub(super) fn calendar_date(value: &Value) -> Option<time::Date> {
+    let date = value.as_str()?.trim().get(..10)?;
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month = time::Month::try_from(parts.next()?.parse::<u8>().ok()?).ok()?;
+    let day = parts.next()?.parse().ok()?;
+    time::Date::from_calendar_date(year, month, day).ok()
+}
+
 #[cfg(test)]
 #[test]
 fn only_classifies_whole_placeholders() {

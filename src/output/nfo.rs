@@ -428,25 +428,115 @@ fn escape(text: &str) -> String {
 
 #[cfg(feature = "web")]
 pub(super) fn fill_episode_title(xml: &str, item: &Value, title: &str) -> Option<String> {
-    use std::ops::Range;
-
-    use quick_xml::{Reader, escape::unescape, events::Event};
-
     use crate::providers::media::episode_title::placeholder;
+
+    let (root_end, fields) = nfo_fields(
+        xml,
+        "episodedetails",
+        &[
+            "title",
+            "sorttitle",
+            "season",
+            "episode",
+            "lockdata",
+            "lockedfields",
+        ],
+    )?;
+    let text = |key: &str| nfo_text(xml, &fields, key);
+    for (field, number) in [("season", "ParentIndexNumber"), ("episode", "IndexNumber")] {
+        if text(field)?.parse::<u64>().ok()? != item[number].as_u64()? {
+            return None;
+        }
+    }
+    let locks = text("lockedfields").unwrap_or_default();
+    let locked = |name: &str| {
+        locks
+            .split('|')
+            .any(|field| field.trim().eq_ignore_ascii_case(name))
+    };
+    if text("lockdata").is_some_and(|s| s.eq_ignore_ascii_case("true"))
+        || locked("Name")
+        || (fields.contains_key("title") && !placeholder(&text("title")?, item))
+    {
+        return None;
+    }
+    let title = escape(title);
+    let change = |name: &str| {
+        let (range, whole_tag) = fields
+            .get(name)
+            .cloned()
+            .unwrap_or((root_end..root_end, true));
+        let replacement = if whole_tag {
+            format!("<{name}>{title}</{name}>")
+        } else {
+            title.clone()
+        };
+        (range, replacement)
+    };
+    let mut changes = vec![change("title")];
+    if !locked("SortName") && text("sorttitle").is_some_and(|value| placeholder(&value, item)) {
+        changes.push(change("sorttitle"));
+    }
+    changes.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut result = xml.to_owned();
+    for (range, replacement) in changes {
+        result.replace_range(range, &replacement);
+    }
+    Some(result)
+}
+
+#[cfg(feature = "web")]
+pub(super) fn fill_season_plot(xml: &str, number: u64, plot: &str) -> Option<String> {
+    let (root_end, fields) = nfo_fields(
+        xml,
+        "season",
+        &["seasonnumber", "plot", "lockdata", "lockedfields"],
+    )?;
+    let text = |key: &str| nfo_text(xml, &fields, key);
+    if text("seasonnumber")?.parse::<u64>().ok()? != number
+        || text("lockdata").is_some_and(|s| s.eq_ignore_ascii_case("true"))
+        || text("lockedfields")
+            .unwrap_or_default()
+            .split('|')
+            .any(|field| field.trim().eq_ignore_ascii_case("Overview"))
+        || fields.contains_key("plot") && !text("plot")?.trim().is_empty()
+    {
+        return None;
+    }
+    let (range, whole_tag) = fields
+        .get("plot")
+        .cloned()
+        .unwrap_or((root_end..root_end, true));
+    let escaped = escape(plot);
+    let replacement = if whole_tag {
+        format!("<plot>{escaped}</plot>")
+    } else {
+        escaped
+    };
+    let mut result = xml.to_owned();
+    result.replace_range(range, &replacement);
+    Some(result)
+}
+
+#[cfg(feature = "web")]
+type NfoFields = BTreeMap<String, (std::ops::Range<usize>, bool)>;
+
+#[cfg(feature = "web")]
+fn nfo_fields(xml: &str, root: &str, tracked: &[&str]) -> Option<(usize, NfoFields)> {
+    use quick_xml::{Reader, events::Event};
 
     let mut reader = Reader::from_str(xml);
     let mut depth = 0usize;
     let mut root_seen = false;
     let mut root_end = 0;
     let mut start = 0;
-    let mut fields: BTreeMap<String, (Range<usize>, bool)> = BTreeMap::new();
-    let tracked = |name: &str| matches!(name, "title" | "sorttitle" | "season" | "episode" | "lockdata" | "lockedfields");
+    let mut fields = NfoFields::new();
     loop {
         let before = reader.buffer_position() as usize;
         match reader.read_event().ok()? {
             Event::Start(tag) => {
                 if depth == 0 {
-                    if root_seen || tag.name().as_ref() != "episodedetails" {
+                    if root_seen || tag.name().as_ref() != root {
                         return None;
                     }
                     root_seen = true;
@@ -461,7 +551,8 @@ pub(super) fn fill_episode_title(xml: &str, item: &Value, title: &str) -> Option
                 if depth == 1 {
                     let name = tag.name();
                     let name = name.as_ref();
-                    if tracked(name) && fields.insert(name.into(), (start..before, false)).is_some()
+                    if tracked.contains(&name)
+                        && fields.insert(name.into(), (start..before, false)).is_some()
                     {
                         return None;
                     }
@@ -471,7 +562,9 @@ pub(super) fn fill_episode_title(xml: &str, item: &Value, title: &str) -> Option
                 let name = tag.name();
                 let name = name.as_ref();
                 let end = reader.buffer_position() as usize;
-                if tracked(name) && fields.insert(name.into(), (before..end, true)).is_some() {
+                if tracked.contains(&name)
+                    && fields.insert(name.into(), (before..end, true)).is_some()
+                {
                     return None;
                 }
             }
@@ -481,39 +574,38 @@ pub(super) fn fill_episode_title(xml: &str, item: &Value, title: &str) -> Option
             _ => {}
         }
     }
-    let text = |key: &str| {
-        let (range, empty) = fields.get(key)?;
-        let raw = if *empty { "" } else { xml.get(range.clone())?.trim() };
-        (!raw.contains('<')).then(|| unescape(raw).ok()).flatten()
+    Some((root_end, fields))
+}
+
+#[cfg(feature = "web")]
+fn nfo_text<'a>(xml: &'a str, fields: &NfoFields, key: &str) -> Option<std::borrow::Cow<'a, str>> {
+    let (range, empty) = fields.get(key)?;
+    let raw = if *empty {
+        ""
+    } else {
+        xml.get(range.clone())?.trim()
     };
-    for (field, number) in [("season", "ParentIndexNumber"), ("episode", "IndexNumber")] {
-        if text(field)?.parse::<u64>().ok()? != item[number].as_u64()? {
-            return None;
-        }
-    }
-    let locks = text("lockedfields").unwrap_or_default();
-    let locked = |name: &str| locks.split('|').any(|field| field.trim().eq_ignore_ascii_case(name));
-    if text("lockdata").is_some_and(|s| s.eq_ignore_ascii_case("true")) || locked("Name")
-        || (fields.contains_key("title") && !placeholder(&text("title")?, item))
-    {
-        return None;
-    }
-    let title = escape(title);
-    let change = |name: &str| {
-        let (range, whole_tag) = fields.get(name).cloned().unwrap_or((root_end..root_end, true));
-        let replacement = if whole_tag { format!("<{name}>{title}</{name}>") } else { title.clone() };
-        (range, replacement)
-    };
-    let mut changes = vec![change("title")];
-    if !locked("SortName") && text("sorttitle").is_some_and(|value| placeholder(&value, item)) {
-        changes.push(change("sorttitle"));
-    }
-    changes.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start));
-    let mut result = xml.to_owned();
-    for (range, replacement) in changes {
-        result.replace_range(range, &replacement);
-    }
-    Some(result)
+    (!raw.contains('<'))
+        .then(|| quick_xml::escape::unescape(raw).ok())
+        .flatten()
+}
+
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn season_plot_patch_preserves_existing_values_and_validates_season() {
+    let original = "<?xml version=\"1.0\"?><season><title>第 2 季</title><seasonnumber>2</seasonnumber><plot /></season>";
+    let patched = fill_season_plot(original, 2, "A & B").unwrap();
+    assert_eq!(
+        patched,
+        original.replace("<plot />", "<plot>A &amp; B</plot>")
+    );
+    assert!(fill_season_plot(&patched, 2, "Other").is_none());
+    assert!(fill_season_plot(original, 3, "Other").is_none());
+    let locked = original.replace("<plot />", "<lockedfields>Overview</lockedfields><plot />");
+    assert!(fill_season_plot(&locked, 2, "Other").is_none());
+    let no_plot = original.replace("<plot />", "");
+    let added = fill_season_plot(&no_plot, 2, "A & B").unwrap();
+    assert_eq!(added.replace("<plot>A &amp; B</plot>", ""), no_plot);
 }
 
 #[cfg(all(test, feature = "web"))]

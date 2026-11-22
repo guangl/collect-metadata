@@ -47,19 +47,18 @@ impl Tmdb {
         {
             return None;
         }
-        let empty_ids = Value::Null;
-        let ids = if series_override.is_some() {
-            &empty_ids
-        } else {
-            &item["ProviderIds"]
-        };
+        let ids = &item["ProviderIds"];
         let expected_id = ids["Tmdb"].as_str().and_then(id).map(u64::from);
         let episode = if let Some(series) = series_override {
-            Episode {
-                series,
-                season: item["ParentIndexNumber"].as_u64()?,
-                number: number.filter(|number| *number > 0)?,
-                id: None,
+            match self.find_episode(client, ids, language).await {
+                Ok(episode) if episode.series == series => episode,
+                Ok(_) => return None,
+                Err(_) => Episode {
+                    series,
+                    season: item["ParentIndexNumber"].as_u64()?,
+                    number: number.filter(|number| *number > 0)?,
+                    id: expected_id,
+                },
             }
         } else {
             match self.find_episode(client, ids, language).await {
@@ -208,16 +207,17 @@ impl Tmdb {
         &self,
         client: &Client,
         series: u32,
-        number: u64,
+        item: &Value,
         language: &str,
     ) -> Result<Source, String> {
+        let number = item["IndexNumber"].as_u64().ok_or("Emby 条目缺少季号。")?;
         let path = format!("tv/{series}/season/{number}");
         let data = self
             .get(client, &self.endpoint(&path, language))
             .await
             .map_err(|error| format!("TMDB：{}", error.description()))?;
-        if data["season_number"].as_u64() != Some(number) || data["name"].as_str().is_none() {
-            return Err("TMDB 返回的季号不匹配。".into());
+        if !season_matches(&data, item) {
+            return Err("TMDB 季号、季 ID 或首播日与 Emby 冲突，需要核对分季映射。".into());
         }
         let page = Url::parse(&format!("https://www.themoviedb.org/{path}")).unwrap();
         let fields = field_map([
@@ -279,6 +279,33 @@ impl Tmdb {
         }
         Err(failure)
     }
+}
+
+#[cfg(feature = "web")]
+fn season_matches(data: &Value, item: &Value) -> bool {
+    data["season_number"].as_u64() == item["IndexNumber"].as_u64()
+        && data["name"].as_str().is_some()
+        && item["ProviderIds"]["Tmdb"]
+            .as_str()
+            .and_then(id)
+            .is_none_or(|expected| data["id"].as_u64() == Some(u64::from(expected)))
+        && episode_title::calendar_date(&item["PremiereDate"])
+            .zip(episode_title::calendar_date(&data["air_date"]))
+            .is_none_or(|(local, source)| (local - source).whole_days().abs() <= 1)
+}
+
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn automatic_season_requires_consistent_local_evidence() {
+    let source = json!({"season_number":2,"name":"Season 2","id":123,"air_date":"2026-09-27"});
+    let mut item =
+        json!({"IndexNumber":2,"ProviderIds":{"Tmdb":"123"},"PremiereDate":"2026-09-26T16:00:00Z"});
+    assert!(season_matches(&source, &item));
+    item["ProviderIds"]["Tmdb"] = json!("124");
+    assert!(!season_matches(&source, &item));
+    item["ProviderIds"]["Tmdb"] = Value::Null;
+    item["PremiereDate"] = json!("2026-08-27");
+    assert!(!season_matches(&source, &item));
 }
 
 #[cfg(feature = "web")]

@@ -208,7 +208,7 @@ impl Emby {
             .append_pair("Recursive", "false")
             .append_pair("MetadataRefreshMode", "FullRefresh")
             .append_pair("ImageRefreshMode", "FullRefresh")
-            .append_pair("ReplaceAllMetadata", "true")
+            .append_pair("ReplaceAllMetadata", "false")
             .append_pair("ReplaceAllImages", "false");
         self.timed_response(client, Method::POST, url, Duration::from_secs(10))
             .await?;
@@ -372,16 +372,30 @@ impl Emby {
         item_type: &str,
         fields: &str,
     ) -> Result<Value, String> {
+        self.find_item(client, id, item_type, fields)
+            .await?
+            .ok_or_else(|| "未找到指定类型的 Emby 条目。".into())
+    }
+
+    async fn find_item(
+        &self,
+        client: &Client,
+        id: &str,
+        item_type: &str,
+        fields: &str,
+    ) -> Result<Option<Value>, String> {
         if !is_item_id(id) {
             return Err("Emby 条目 ID 无效。".into());
         }
         let mut page = self
             .items(client, &[("Ids", id), ("Fields", fields)])
             .await?;
-        page["Items"]
+        let items = page["Items"]
             .as_array_mut()
-            .and_then(|items| items.first_mut())
-            .filter(|item| {
+            .ok_or("Emby 返回的条目格式无效。")?;
+        Ok(items
+            .iter_mut()
+            .find(|item| {
                 let matches = match item_type {
                     "Movie,Video" => matches_kind(item, MediaKind::Movie),
                     "Movie,Series,Video" => work_kind(item).is_some(),
@@ -389,8 +403,7 @@ impl Emby {
                 };
                 valid_id(&item["Id"]) == Some(id) && matches
             })
-            .map(Value::take)
-            .ok_or_else(|| "未找到指定类型的 Emby 条目。".into())
+            .map(Value::take))
     }
 
     #[cfg(feature = "web")]
@@ -399,23 +412,25 @@ impl Emby {
         client: &Client,
         id: &str,
         item_type: &str,
-    ) -> Result<Source, String> {
+    ) -> Result<Option<Source>, String> {
         let requested = format!(
             "{FIELDS},PremiereDate,Settings,LocationType,ParentId,DateCreated,DateLastSaved"
         );
-        let item = self.item(client, id, item_type, &requested).await?;
+        let Some(item) = self.find_item(client, id, item_type, &requested).await? else {
+            return Ok(None);
+        };
         let fields = if item_type == "Episode" {
             episode_fields(&item)
         } else {
             fields(&item, &[])
         };
         let source_url = self.endpoint(&format!("web/index.html#!/item?id={id}"));
-        Ok(Source::found(
+        Ok(Some(Source::found(
             "Emby",
             &source_url,
             fields,
             json!({"item":item}),
-        ))
+        )))
     }
 
     async fn details(&self, client: &Client, id: &str, item_type: &str) -> Option<Source> {

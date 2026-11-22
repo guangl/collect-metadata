@@ -7,6 +7,7 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{CandidateChoice, folder};
@@ -16,12 +17,56 @@ use crate::{
     providers::media::{emby::{EPISODE_QUERY_PREFIX, is_item_id}, episode_title::{needs_title, usable}},
 };
 
-const TITLE_RETRY_WINDOW: Duration = Duration::from_secs(7 * 24 * 3600);
+const RETRY_WINDOW: Duration = Duration::from_secs(7 * 24 * 3600);
+const MISSING_ITEM_GRACE: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Deserialize, Default)]
+#[serde(transparent)]
+struct SeasonMap(HashMap<String, HashMap<u64, Vec<u32>>>);
+
+impl SeasonMap {
+    fn parse(json: &str) -> Result<Self, String> {
+        let map: Self =
+            serde_json::from_str(json).map_err(|error| format!("季集映射格式无效：{error}"))?;
+        for (series, seasons) in &map.0 {
+            if !is_item_id(series)
+                || seasons.iter().any(|(&season, subjects)| {
+                    season == 0
+                        || subjects.is_empty()
+                        || subjects
+                            .iter()
+                            .enumerate()
+                            .any(|(index, id)| *id == 0 || subjects[..index].contains(id))
+                })
+            {
+                return Err(
+                    "季集映射需要有效的 Emby 剧集 ID、正季号和不重复的 Bangumi 条目 ID。".into(),
+                );
+            }
+        }
+        Ok(map)
+    }
+
+    fn subjects(&self, item: &Value) -> &[u32] {
+        let number = if item["Type"] == "Episode" {
+            "ParentIndexNumber"
+        } else {
+            "IndexNumber"
+        };
+        item["SeriesId"]
+            .as_str()
+            .zip(item[number].as_u64())
+            .and_then(|(series, season)| self.0.get(series)?.get(&season))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
 
 enum Outcome {
     Skipped,
     Written(usize),
     AwaitingTitle,
+    MissingItem,
 }
 
 pub struct AutoScrape {
@@ -30,6 +75,7 @@ pub struct AutoScrape {
     roots: Vec<PathBuf>,
     private_roots: Vec<PathBuf>,
     central_metadata: bool,
+    season_map: SeasonMap,
 }
 
 struct Event {
@@ -84,12 +130,21 @@ impl AutoScrape {
             .filter(|value| !value.trim().is_empty());
         let central_metadata = env::var("EMBY_AUTO_SCRAPE_CENTRAL_METADATA")
             .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+        let season_map =
+            match env::var_os("EMBY_AUTO_SCRAPE_SEASON_MAP").filter(|path| !path.is_empty()) {
+                Some(path) => SeasonMap::parse(
+                    &std::fs::read_to_string(path)
+                        .map_err(|error| format!("无法读取季集映射：{error}"))?,
+                )?,
+                None => SeasonMap::default(),
+            };
         Ok(Some(Self {
             spool,
             url,
             roots,
             private_roots,
             central_metadata,
+            season_map,
         }))
     }
 
@@ -130,11 +185,15 @@ impl AutoScrape {
                 .buffer_unordered(4);
             while let Some((event, result)) = results.next().await {
                 let mut title_pending = false;
-                let error = match result {
+                let (error, archive) = match result {
                     Ok(Outcome::AwaitingTitle) => {
                         title_pending = true;
-                        "来源尚未提供可核对的分集标题。".into()
+                        ("来源尚未提供可核对的分集标题。".into(), None)
                     }
+                    Ok(Outcome::MissingItem) => (
+                        "Emby 未返回此入库条目。".into(),
+                        Some(("missing", MISSING_ITEM_GRACE)),
+                    ),
                     Ok(done) => match tokio::fs::remove_file(&event.path).await {
                         Ok(()) => {
                             retries.remove(&event.path);
@@ -147,10 +206,28 @@ impl AutoScrape {
                             continue;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(error) => format!("无法移除已确认的入库事件：{error}"),
+                        Err(error) => (format!("无法移除已确认的入库事件：{error}"), None),
                     },
-                    Err(error) => error,
+                    Err(error) => (error, Some(("failed", RETRY_WINDOW))),
                 };
+                if let Some((status, grace)) = archive
+                    && event_age(&event.path).await.is_ok_and(|age| age >= grace)
+                {
+                    let archived = event
+                        .path
+                        .with_extension(format!("{status}-{}", uuid::Uuid::new_v4().simple()));
+                    match tokio::fs::rename(&event.path, &archived).await {
+                        Ok(()) => {
+                            retries.remove(&event.path);
+                            eprintln!(
+                                "Automatic scrape {} {} archived as {status}: {error}",
+                                event.item_type, event.id
+                            );
+                            continue;
+                        }
+                        Err(error) => eprintln!("Cannot archive automatic scrape event: {error}"),
+                    }
+                }
                 let attempt = retries.get(&event.path).map_or(1, |(count, _)| count + 1);
                 let delay = if title_pending {
                     Duration::from_secs(if attempt == 1 { 1800 } else { 6 * 3600 })
@@ -202,9 +279,12 @@ impl AutoScrape {
         };
         let query = format!("{prefix}{}", event.id);
         // The scan may still be committing the item when its event is queued.
-        let home = emby
+        let Some(home) = emby
             .automatic_item(&collector.client, &event.id, item_type)
-            .await?;
+            .await?
+        else {
+            return Ok(Outcome::MissingItem);
+        };
         let item = &home.data["item"];
         if item["LocationType"] == "Virtual" {
             return Ok(Outcome::Skipped);
@@ -226,6 +306,7 @@ impl AutoScrape {
         if event.item_type == "Video" && !private {
             return Ok(Outcome::Skipped);
         }
+        let mapped_subjects = self.season_map.subjects(item);
         let mut result = if private {
             if kind != MediaKind::Movie {
                 return Ok(Outcome::Skipped);
@@ -250,6 +331,12 @@ impl AutoScrape {
                 .ok_or("采集记录缺少来源。")?;
             sources.push(json!(home));
             result
+        } else if event.item_type == "Episode" && complete_episode(item) {
+            collector.existing_automatic_episode(home, &query, &event.id)?
+        } else if !mapped_subjects.is_empty() {
+            collector
+                .gather_mapped_child(home, &query, &event.id, mapped_subjects)
+                .await?
         } else if matches!(event.item_type, "Season" | "Episode") {
             let series_id = item["SeriesId"].as_str().ok_or("Emby 条目缺少所属剧集。")?;
             let series = emby
@@ -280,8 +367,12 @@ impl AutoScrape {
         if central {
             collector.require_store().await?;
             let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
-            emby.enrich_automatic_item(&collector.client, &data["item"], &result.record).await?;
-            let fresh = emby.automatic_item(&collector.client, &event.id, item_type).await?;
+            emby.enrich_automatic_item(&collector.client, &data["item"], &result.record)
+                .await?;
+            let fresh = emby
+                .automatic_item(&collector.client, &event.id, item_type)
+                .await?
+                .ok_or("Emby 条目在写入期间已消失。")?;
             let source = result.record["sources"].as_array_mut().into_iter().flatten()
                 .find(|source| source["provider"] == "Emby")
                 .ok_or("缺少 Emby 文件关联。")?;
@@ -296,6 +387,13 @@ impl AutoScrape {
                     }
                 }
             }
+            if event.item_type == "Season" {
+                let actual = &fresh.data["item"]["Overview"];
+                if result.record["fields"]["description"] != *actual {
+                    result.record["fields"]["description"] = actual.clone();
+                    result.record["field_sources"]["description"] = json!("Emby");
+                }
+            }
             let server = emby.automatic_server_id(&collector.client).await?;
             collector.upsert_emby_item(&server, &event.id, &fresh.data["item"], None).await?;
         } else if event.item_type == "Episode" {
@@ -305,12 +403,23 @@ impl AutoScrape {
                 result.record["field_sources"]["title"] = json!("Emby");
             }
         }
-        let item = &crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?["item"];
-        let missing_title = needs_title(item) && usable(&result.record["fields"]["title"], item).is_none();
-        let awaiting_title = missing_title && tokio::fs::metadata(&event.path).await
-            .and_then(|entry| entry.modified()).map_err(|error| format!("无法读取入库事件时间：{error}"))?
-            .elapsed().unwrap_or_default() < TITLE_RETRY_WINDOW;
-        let written = write_automatic(&collector.client, &emby, &paths, &result.record, awaiting_title).await?;
+        let item =
+            &crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?["item"];
+        let missing_title =
+            needs_title(item) && usable(&result.record["fields"]["title"], item).is_none();
+        let awaiting_title = missing_title
+            && event_age(&event.path)
+                .await
+                .map_err(|error| format!("无法读取入库事件时间：{error}"))?
+                < RETRY_WINDOW;
+        let written = write_automatic(
+            &collector.client,
+            &emby,
+            &paths,
+            &result.record,
+            awaiting_title,
+        )
+        .await?;
         if !central && (!awaiting_title || written > 0) {
             // The legacy route loads local sidecars into Emby.
             emby.refresh_sidecars(&collector.client, &event.id).await?;
@@ -329,6 +438,24 @@ impl AutoScrape {
         }
         Ok(Outcome::Written(written))
     }
+}
+
+async fn event_age(path: &Path) -> std::io::Result<Duration> {
+    Ok(tokio::fs::metadata(path)
+        .await?
+        .modified()?
+        .elapsed()
+        .unwrap_or_default())
+}
+
+fn complete_episode(item: &Value) -> bool {
+    !needs_title(item)
+        && item["Overview"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+        && item["ImageTags"]["Primary"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
 }
 
 fn media_roots(variable: &str) -> Result<Vec<PathBuf>, String> {
@@ -415,4 +542,50 @@ async fn match_work(
                 .message
                 .unwrap_or_else(|| "公开来源存在多个候选，请为文件或剧集目录添加来源 ID。".into())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn season_map_is_scoped_to_series_and_rejects_invalid_subjects() {
+        let map = SeasonMap::parse(r#"{"102":{"2":[120,140]},"103":{"2":[160]}}"#).unwrap();
+        assert_eq!(
+            map.subjects(&json!({"Type":"Season","SeriesId":"102","IndexNumber":2})),
+            &[120, 140]
+        );
+        assert_eq!(
+            map.subjects(
+                &json!({"Type":"Episode","SeriesId":"103","ParentIndexNumber":2,"IndexNumber":1})
+            ),
+            &[160]
+        );
+        assert!(
+            map.subjects(
+                &json!({"Type":"Episode","SeriesId":"102","ParentIndexNumber":1,"IndexNumber":2})
+            )
+            .is_empty()
+        );
+        for invalid in [
+            r#"{"102":{"0":[120]}}"#,
+            r#"{"102":{"2":[]}}"#,
+            r#"{"102":{"2":[0]}}"#,
+            r#"{"102":{"2":[120,120]}}"#,
+        ] {
+            assert!(SeasonMap::parse(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn existing_episode_requires_a_title_an_overview_and_a_primary_image() {
+        let mut item = json!({"Type":"Episode","Name":"A real title","IndexNumber":7,
+            "Overview":"Keep this","ImageTags":{"Primary":"existing-tag"}});
+        assert!(complete_episode(&item));
+        item["Name"] = json!("第 7 集");
+        assert!(!complete_episode(&item));
+        item["Name"] = json!("A real title");
+        item["Overview"] = json!(" ");
+        assert!(!complete_episode(&item));
+    }
 }

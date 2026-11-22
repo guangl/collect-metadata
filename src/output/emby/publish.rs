@@ -424,13 +424,14 @@ pub(crate) async fn write_automatic(
     record: &Value,
     defer_episode_nfo: bool,
 ) -> Result<usize, String> {
+    use crate::providers::media::episode_title::{field_locked, usable};
+
     let data = super::super::emby_source(record).ok_or("缺少 Emby 文件关联。")?;
     let state = WritebackState::default();
     let item = &data["item"];
     let mut repaired = 0;
     let (mut files, _, _) = plan_with_mode(paths, data, record, &state, true);
     if item["Type"] == "Episode" {
-        use crate::providers::media::episode_title::{field_locked, usable};
         let title = &record["fields"]["title"];
         if defer_episode_nfo || title.as_str().is_none_or(|title| title.trim().is_empty()) {
             files.retain(|file| !matches!(file.kind, FileKind::Nfo));
@@ -442,13 +443,34 @@ pub(crate) async fn write_automatic(
         {
             let item = item.clone();
             let title = title.to_owned();
-            repaired =
-                tokio::task::spawn_blocking(move || repair_episode_nfo(&target, &item, &title))
-                    .await
-                    .map_err(|_| "无法补充分集 NFO 标题。")?
-                    .map_err(|error| format!("无法补充分集 NFO 标题：{error}"))?
-                    as usize;
+            repaired = tokio::task::spawn_blocking(move || {
+                repair_nfo(&target, &target.video_sidecar(".nfo"), |xml| {
+                    nfo::fill_episode_title(xml, &item, &title)
+                })
+            })
+            .await
+            .map_err(|_| "无法补充分集 NFO 标题。")?
+            .map_err(|error| format!("无法补充分集 NFO 标题：{error}"))? as usize;
         }
+    } else if item["Type"] == "Season"
+        && !field_locked(item, "Overview")
+        && let Some(number) = item["IndexNumber"].as_u64()
+        && let Some(plot) = record["fields"]["description"]
+            .as_str()
+            .filter(|plot| !plot.trim().is_empty())
+        && let Some(target) = item["Path"]
+            .as_str()
+            .and_then(|path| paths.target(path, true))
+    {
+        let plot = plot.to_owned();
+        repaired = tokio::task::spawn_blocking(move || {
+            repair_nfo(&target, "season.nfo", |xml| {
+                nfo::fill_season_plot(xml, number, &plot)
+            })
+        })
+        .await
+        .map_err(|_| "无法补充季 NFO 简介。")?
+        .map_err(|error| format!("无法补充季 NFO 简介：{error}"))? as usize;
     }
     if files.is_empty() {
         return Ok(repaired);
@@ -480,33 +502,33 @@ pub(crate) async fn write_automatic(
 }
 
 #[cfg(feature = "web")]
-fn repair_episode_nfo(target: &Target, item: &Value, title: &str) -> io::Result<bool> {
+fn repair_nfo(
+    target: &Target,
+    name: &str,
+    edit: impl FnOnce(&str) -> Option<String>,
+) -> io::Result<bool> {
     use io::Read;
 
     const MAX_NFO: u64 = 1024 * 1024;
     let dir = target.directory()?;
-    let name = target.video_sidecar(".nfo");
-    let previous = Existing::read(&dir, &name);
+    let previous = Existing::read(&dir, name);
     if !matches!(&previous, Existing::File { length, .. } if *length <= MAX_NFO) {
         return Ok(false);
     }
     let mut original = Vec::new();
-    dir.open(&name)?
+    dir.open(name)?
         .take(MAX_NFO + 1)
         .read_to_end(&mut original)?;
     if original.len() as u64 > MAX_NFO {
         return Ok(false);
     }
-    let Some(updated) = std::str::from_utf8(&original)
-        .ok()
-        .and_then(|xml| nfo::fill_episode_title(xml, item, title))
-    else {
+    let Some(updated) = std::str::from_utf8(&original).ok().and_then(edit) else {
         return Ok(false);
     };
     let backup = format!("automatic-{}.bak", uuid::Uuid::new_v4().simple());
-    preserve_existing(&dir, &name, &previous, &backup)?;
-    write_atomic(&dir, &name, updated.as_bytes(), false, || {
-        Existing::read(&dir, &name) == previous
+    preserve_existing(&dir, name, &previous, &backup)?;
+    write_atomic(&dir, name, updated.as_bytes(), false, || {
+        Existing::read(&dir, name) == previous
     })?;
     Ok(true)
 }

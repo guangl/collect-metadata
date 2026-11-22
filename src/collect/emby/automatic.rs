@@ -118,6 +118,66 @@ impl Collector {
         Ok(self.localize_lookup(result, targets).await)
     }
 
+    pub(crate) fn existing_automatic_episode(
+        &self,
+        home: Source,
+        query: &str,
+        id: &str,
+    ) -> Result<LookupResponse, String> {
+        let mut result = make_lookup(
+            MediaKind::Series,
+            query,
+            Some(&format!("Emby-{id}")),
+            vec![home],
+        )?;
+        result.record["scope"] = json!("episode");
+        result.record["fill_missing"] = json!(true);
+        Ok(result)
+    }
+
+    pub(crate) async fn gather_mapped_child(
+        &self,
+        home: Source,
+        query: &str,
+        id: &str,
+        subjects: &[u32],
+    ) -> Result<LookupResponse, String> {
+        let targets = self.languages.targets(None);
+        let item = &home.data["item"];
+        let bangumi = self.bangumi.provider();
+        let (scope, sources) = if item["Type"] == "Season" {
+            let number = item["IndexNumber"].as_u64().ok_or("Emby 条目缺少季号。")?;
+            let season = bangumi
+                .mapped_season(&self.client, subjects, number)
+                .await?;
+            for (local, field) in [
+                (&item["Overview"], "description"),
+                (&item["ImageTags"]["Primary"], "poster_url"),
+            ] {
+                if local.as_str().is_none_or(|value| value.trim().is_empty())
+                    && !season.fields.contains_key(field)
+                {
+                    return Err(format!("已核对的 Bangumi 季条目缺少 {field}。"));
+                }
+            }
+            ("season", vec![home, season])
+        } else {
+            let episode = bangumi
+                .mapped_episode(&self.client, subjects, item, &targets[0])
+                .await?;
+            ("episode", automatic_episode_sources(home, vec![episode]))
+        };
+        let mut result = make_lookup(
+            MediaKind::Series,
+            query,
+            Some(&format!("Emby-{id}")),
+            sources,
+        )?;
+        result.record["scope"] = json!(scope);
+        result.record["fill_missing"] = json!(true);
+        Ok(self.localize_lookup(result, targets).await)
+    }
+
     pub(crate) async fn gather_automatic_child(
         &self,
         emby: &media::emby::Emby,
@@ -154,9 +214,8 @@ impl Collector {
                 return Err("季资料需要剧集的 TMDB ID。".into());
             }
             let tmdb = self.tmdb.provider().ok_or("请先配置 TMDB API 凭据。")?;
-            let number = item["IndexNumber"].as_u64().ok_or("Emby 条目缺少季号。")?;
             let series = candidate.id.parse().map_err(|_| "剧集 TMDB ID 无效。")?;
-            tmdb.emby_season(&self.client, series, number, &targets[0])
+            tmdb.emby_season(&self.client, series, item, &targets[0])
                 .await?
         } else {
             let detail = self
