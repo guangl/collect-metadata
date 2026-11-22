@@ -9,6 +9,8 @@
 - `collect_metadata_anime_tmdb_subjects` 和 `collect_metadata_anime_tmdb_episodes` 保留公开的跨站映射及来源版本。
 - `collect_metadata_anime_verified_seasons` 保存已核对的 Emby 正式季，含首播日、整季集数和按播放顺序排列的 Bangumi 条目。启用 `EMBY_AUTO_SCRAPE_DB_SEASON_MAP=true` 后自动刮削优先读取该表。新登记的行下一次刮削即可用。缺少数据库映射行时可沿用现有 JSON 配置，再走普通匹配。
 
+已核对的季使用 PostgreSQL 归档定位分集时，所有篇章必须来自同一快照，正片序号连续，条目数与公开集数一致。刮削器只取目标分集的实时资料，并核对条目 ID、序号和日期。归档缺集、未知集数或与实时资料冲突时，刮削器读取实时季表。多个篇章可并行请求，结果依照已核对的播出顺序合并。
+
 季度视图的行是 Bangumi 播出条目。制作方把上下篇归到同一正式季时，已核对的季表用一行保存整季总集数。
 
 ```sql

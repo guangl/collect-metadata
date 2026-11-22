@@ -141,6 +141,7 @@ impl Collector {
         query: &str,
         id: &str,
         subjects: &[u32],
+        use_archive: bool,
     ) -> Result<LookupResponse, String> {
         let targets = self.languages.targets(None);
         let item = &home.data["item"];
@@ -162,8 +163,16 @@ impl Collector {
             }
             ("season", vec![home, season])
         } else {
+            let archived = if use_archive {
+                self.require_store()
+                    .await?
+                    .archived_bangumi_episodes(subjects)
+                    .await
+            } else {
+                Vec::new()
+            };
             let episode = bangumi
-                .mapped_episode(&self.client, subjects, item, &targets[0])
+                .mapped_episode(&self.client, subjects, &archived, item, &targets[0])
                 .await?;
             ("episode", automatic_episode_sources(home, vec![episode]))
         };

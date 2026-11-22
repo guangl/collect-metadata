@@ -372,7 +372,13 @@ impl AutoScrape {
             collector.existing_automatic_episode(home, &query, &event.id)?
         } else if !mapped_subjects.is_empty() {
             collector
-                .gather_mapped_child(home, &query, &event.id, mapped_subjects)
+                .gather_mapped_child(
+                    home,
+                    &query,
+                    &event.id,
+                    mapped_subjects,
+                    database_subjects.is_some(),
+                )
                 .await?
         } else if matches!(event.item_type, "Season" | "Episode") {
             let series_id = item["SeriesId"].as_str().ok_or("Emby 条目缺少所属剧集。")?;

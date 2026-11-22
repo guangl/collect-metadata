@@ -19,6 +19,44 @@ async fn test_database() -> (PgPool, PgConnectOptions, String) {
     (admin, options.options([("search_path", &schema)]), schema)
 }
 
+#[cfg(feature = "web")]
+#[tokio::test]
+#[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
+async fn complete_bangumi_archives_keep_part_order_and_ignore_stale_rows() {
+    let (admin, options, schema) = test_database().await;
+    let store = Store::connect(&options).await.unwrap();
+    sqlx::raw_sql(include_str!("../../../tools/anime-catalog/schema.sql"))
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO collect_metadata_anime_subjects
+            (bangumi_id,title,format,is_adult,expected_episodes,archive_version)
+         VALUES (12,'First','TV',false,2,'current'),(11,'Second','TV',false,1,'current');
+         INSERT INTO collect_metadata_anime_episodes
+            (bangumi_episode_id,bangumi_id,kind,source_number,archive_version)
+         VALUES (50,12,0,25,'current'),(51,12,0,26,'current'),(60,11,0,27,'current'),
+                (52,12,1,1,'current'),(53,12,0,28,'older');",
+    )
+    .execute(&store.pool)
+    .await
+    .unwrap();
+    let episodes = store.archived_bangumi_episodes(&[12, 11]).await;
+    let sorts: Vec<_> = episodes.iter().map(|entry| entry["sort"].as_u64().unwrap()).collect();
+    assert_eq!(sorts, [25, 26, 27]);
+    assert!(store.archived_bangumi_episodes(&[12, 99]).await.is_empty());
+    sqlx::query("UPDATE collect_metadata_anime_subjects SET expected_episodes=2 WHERE bangumi_id=11")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    assert!(store.archived_bangumi_episodes(&[12, 11]).await.is_empty());
+    store.pool.close().await;
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
 async fn claim_when_free(store: &Store) -> Claim {
     for _ in 0..50 {
         if let Some(claim) = store.claim(true, None).await.unwrap() {

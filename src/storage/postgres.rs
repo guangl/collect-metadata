@@ -149,6 +149,51 @@ impl Store {
         .transpose()
     }
 
+    #[cfg(feature = "web")]
+    pub(crate) async fn archived_bangumi_episodes(&self, subjects: &[u32]) -> Vec<Value> {
+        let Ok(ids) = subjects
+            .iter()
+            .copied()
+            .map(i32::try_from)
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            return Vec::new();
+        };
+        // An incomplete part could shift the offsets of subsequent parts.
+        // Trust the archive only if it lists every declared regular episode
+        // for every verified part, using the same snapshot for both tables.
+        let result = sqlx::query_scalar(
+            "WITH complete_parts AS (
+                SELECT requested.id, requested.part_order, subject.archive_version
+                FROM unnest($1::int[]) WITH ORDINALITY AS requested(id, part_order)
+                JOIN collect_metadata_anime_subjects AS subject ON subject.bangumi_id=requested.id
+                JOIN collect_metadata_anime_episodes AS episode ON episode.bangumi_id=requested.id
+                    AND episode.kind=0 AND episode.archive_version=subject.archive_version
+                GROUP BY requested.id, requested.part_order, subject.expected_episodes, subject.archive_version
+                HAVING count(*)=subject.expected_episodes
+                    AND count(*) FILTER (WHERE episode.source_number > 0
+                        AND episode.source_number=trunc(episode.source_number)
+                        AND episode.source_number<=9223372036854775807)=count(*)
+            )
+            SELECT jsonb_build_object(
+                'id', episode.bangumi_episode_id, 'subject_id', episode.bangumi_id,
+                'sort', episode.source_number::bigint, 'airdate', episode.airdate, 'type', episode.kind)
+            FROM complete_parts AS part
+            JOIN collect_metadata_anime_subjects AS subject ON subject.bangumi_id=part.id
+            JOIN collect_metadata_anime_episodes AS episode ON episode.bangumi_id=part.id
+                AND episode.kind=0 AND episode.archive_version=subject.archive_version
+            WHERE (SELECT count(*)=cardinality($1::int[]) AND count(DISTINCT archive_version)=1 FROM complete_parts)
+            ORDER BY part.part_order, episode.source_number",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await;
+        result.unwrap_or_else(|error| {
+            diagnostics::postgres_error("postgres_anime_archive_read_failed", &error);
+            Vec::new()
+        })
+    }
+
     pub(crate) async fn check_connection(&self) -> Result<(), String> {
         sqlx::query("SELECT 1")
             .execute(&self.pool)

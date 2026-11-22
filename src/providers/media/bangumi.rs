@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+#[cfg(feature = "web")]
+use futures_util::{StreamExt, TryStreamExt, stream};
 use reqwest::header;
 use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
@@ -305,17 +307,32 @@ impl Bangumi {
         &self,
         client: &Client,
         subjects: &[u32],
+        archived: &[Value],
         item: &Value,
         language: &str,
     ) -> Result<Source, String> {
-        let mut episodes = Vec::new();
-        for &subject in subjects {
-            let (all, complete) = self.episodes(client, subject, MediaKind::Series).await;
-            if !complete {
-                return Err("Bangumi 未返回完整分集清单。".into());
-            }
-            episodes.extend(all.into_iter().filter(|episode| episode["type"] == 0));
+        if let Some(cached) = mapped_episode_match(archived, item)
+            && let Some(id) = cached["id"].as_u64().filter(|&id| id > 0)
+            && let Ok(live) = self.api(client, &format!("episodes/{id}"), None).await
+            && catalog_episode_matches_live(cached, &live, item)
+            && let Some(source) = automatic_episode_source(&live, item, language)
+        {
+            return Ok(source);
         }
+
+        let parts: Vec<Vec<Value>> = stream::iter(subjects.iter().copied())
+            .map(|subject| async move {
+                let (episodes, complete) = self.episodes(client, subject, MediaKind::Series).await;
+                complete.then_some(episodes).ok_or("Bangumi 未返回完整分集清单。")
+            })
+            .buffered(4)
+            .try_collect()
+            .await?;
+        let episodes: Vec<_> = parts
+            .into_iter()
+            .flatten()
+            .filter(|episode| episode["type"] == 0)
+            .collect();
         let episode = mapped_episode_match(&episodes, item)
             .ok_or("无法用已核对的 Bangumi 分季映射唯一匹配此分集。")?;
         automatic_episode_source(episode, item, language)
@@ -329,17 +346,20 @@ impl Bangumi {
         subjects: &[u32],
         number: u64,
     ) -> Result<Source, String> {
-        let mut parts = Vec::new();
-        for &id in subjects {
-            let subject = self
-                .subject(client, id)
-                .await
-                .map_err(|error| format!("Bangumi 条目 {id}：{}", error.description()))?;
-            if !matches_kind(&subject, MediaKind::Series) {
-                return Err(format!("Bangumi 条目 {id} 不是剧集。"));
-            }
-            parts.push(subject);
-        }
+        let parts: Vec<_> = stream::iter(subjects.iter().copied())
+            .map(|id| async move {
+                let subject = self
+                    .subject(client, id)
+                    .await
+                    .map_err(|error| format!("Bangumi 条目 {id}：{}", error.description()))?;
+                if !matches_kind(&subject, MediaKind::Series) {
+                    return Err(format!("Bangumi 条目 {id} 不是剧集。"));
+                }
+                Ok(subject)
+            })
+            .buffered(4)
+            .try_collect()
+            .await?;
         let first = parts.first().ok_or("缺少已核对的 Bangumi 季条目。")?;
         let id = first["id"].as_u64().ok_or("Bangumi 季条目 ID 无效。")?;
         let page = Url::parse(&format!("https://bgm.tv/subject/{id}")).unwrap();
@@ -500,6 +520,17 @@ fn automatic_episode_source(episode: &Value, item: &Value, language: &str) -> Op
 }
 
 #[cfg(feature = "web")]
+fn catalog_episode_matches_live(cached: &Value, live: &Value, item: &Value) -> bool {
+    live["type"] == 0
+        && ["id", "subject_id", "sort"].iter().all(|key| {
+            cached[key].as_u64().is_some_and(|expected| live[key].as_u64() == Some(expected))
+        })
+        && calendar_date(&item["PremiereDate"])
+            .zip(calendar_date(&live["airdate"]))
+            .is_none_or(|(local, source)| (local - source).whole_days().abs() <= 1)
+}
+
+#[cfg(feature = "web")]
 fn mapped_episode_match<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
     let number = item["IndexNumber"].as_u64().filter(|&number| number > 0)?;
     if item["IndexNumberEnd"]
@@ -560,6 +591,57 @@ fn automatic_episode_match<'a>(episodes: &'a [Value], item: &Value) -> Option<&'
         }
     });
     matches.next().filter(|_| matches.next().is_none())
+}
+
+#[cfg(all(test, feature = "web"))]
+#[tokio::test]
+async fn mapped_episode_validates_archive_and_falls_back_to_the_live_season() {
+    use axum::{
+        Json, Router,
+        extract::{Path, Query, State},
+        routing::get,
+    };
+    use std::{collections::HashMap, sync::atomic::{AtomicUsize, Ordering}};
+
+    let list_requests = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/episodes/{id}", get(|Path(id): Path<u64>| async move {
+            // ID 99 has been moved to a different subject since the archive.
+            let subject = if id == 101 { 11 } else { 90 };
+            Json(json!({"id":id,"subject_id":subject,"sort":26,"type":0,
+                "airdate":"2026-04-02","name_cn":"实时片名","desc":"实时简介"}))
+        }))
+        .route("/episodes", get(|State(requests): State<Arc<AtomicUsize>>, Query(query): Query<HashMap<String, String>>| async move {
+            requests.fetch_add(1, Ordering::Relaxed);
+            let (id, subject, sort, title) = if query["subject_id"] == "11" {
+                (101, 11, 26, "上篇")
+            } else {
+                (202, 12, 27, "下篇")
+            };
+            Json(json!({"offset":0,"total":1,
+                "data":[{"id":id,"subject_id":subject,"sort":sort,"type":0,"name_cn":title}]}))
+        }))
+        .with_state(Arc::clone(&list_requests));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_root = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let bangumi = Bangumi { api_root, ..Bangumi::default() };
+    let client = Client::new();
+    let mut archived = [
+        json!({"id":101,"subject_id":11,"sort":26,"type":0,"airdate":"2026-04-02"}),
+        json!({"id":202,"subject_id":12,"sort":27,"type":0}),
+    ];
+    let item = json!({"Type":"Episode","IndexNumber":1,"PremiereDate":"2026-04-01T16:00:00Z"});
+    let source = bangumi.mapped_episode(&client, &[11, 12], &archived, &item, "zh-CN").await.unwrap();
+    assert_eq!(source.fields["description"], "实时简介");
+    assert_eq!(list_requests.load(Ordering::Relaxed), 0);
+
+    archived[1]["id"] = json!(99);
+    let item = json!({"Type":"Episode","IndexNumber":2});
+    let source = bangumi.mapped_episode(&client, &[11, 12], &archived, &item, "zh-CN").await.unwrap();
+    assert_eq!(source.fields["bangumi_id"], "202");
+    assert_eq!(list_requests.load(Ordering::Relaxed), 2);
+    server.abort();
 }
 
 #[cfg(all(test, feature = "web"))]

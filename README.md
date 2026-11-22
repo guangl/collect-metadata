@@ -324,7 +324,7 @@ EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --all-features --summary-onl
 
 可选的 Compose 配置位于 `deploy/`。更新已有部署时，在每个可选配置文件名前加 `deploy/`，例如将 `-f compose.ghcr.yaml` 改为 `-f deploy/compose.ghcr.yaml`，并沿用原 Compose 项目名。
 
-**使用预构建镜像（Compose v2.24.4+）：** 从 v0.11.0 起，发布流程为 amd64 和 arm64 构建镜像。`ghcr.io/guangl/collect-metadata:latest` 随最新 GitHub Release 更新。需要固定部署版本时，在 `.env` 设置 `COLLECT_METADATA_IMAGE=ghcr.io/guangl/collect-metadata:0.11.0`，也可用镜像摘要固定到具体构建。[GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata)
+**使用预构建镜像（Compose v2.24.4+）：** 从 v0.11.0 起，发布流程为 amd64 和 arm64 构建镜像。`ghcr.io/guangl/collect-metadata:latest` 随最新 GitHub Release 更新。需要固定部署版本时，在 `.env` 设置 `COLLECT_METADATA_IMAGE=ghcr.io/guangl/collect-metadata:0.12.0`，也可用镜像摘要固定到具体构建。[GitHub Container Registry](https://github.com/users/guangl/packages/container/package/collect-metadata)
 
 ```sh
 docker compose -f compose.yaml -f deploy/compose.ghcr.yaml pull
