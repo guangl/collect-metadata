@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import { exportJson } from "./api";
 import { Tabs } from "./Tabs";
 import { RecordedCredits } from "./RecordedCredits";
-import { EmbyCredits } from "./batch/EmbyCatalog";
+import { EmbyCredits } from "./batch/emby/Credits";
 import { Episodes, ExternalLink, languageName, languageText, LocalDate, PosterArt, safeUrl } from "./Catalog";
 import { errorText, mediaLabels } from "./types";
 import type { Fields, LookupResponse, MediaType, Source } from "./types";

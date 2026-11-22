@@ -1,285 +1,28 @@
+mod paths;
+mod publish;
+
+pub(crate) use paths::MediaPaths;
+pub(super) use paths::PathMapping;
+#[cfg(feature = "web")]
+pub(crate) use publish::write_automatic;
+pub(crate) use publish::{PreparedWriteback, prepare};
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    ffi::OsString,
-    fs, io,
-    path::{Component, Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
+    io,
+    time::UNIX_EPOCH,
 };
 
-use cap_std::{
-    ambient_authority,
-    fs::{Dir, OpenOptions},
-};
-use futures_util::{StreamExt, stream::FuturesOrdered};
-use reqwest::{Client, Url};
+use cap_std::fs::Dir;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{
-    OutputFile, OutputReport,
-    assets::{allowed, image_bytes, public_response},
-    nfo,
-    settings::OutputOptions,
-};
-use crate::providers::media::emby::{Emby, episode_fields};
+use super::assets::allowed;
 
-#[derive(Clone, Deserialize, Serialize)]
-pub(super) struct PathMapping {
-    server: String,
-    local: String,
-}
-
-impl PathMapping {
-    pub(super) fn validate(
-        paths: &mut [Self],
-        web: bool,
-        root: Option<&Path>,
-    ) -> Result<(), String> {
-        if paths.len() > 32 {
-            return Err("最多可配置 32 条 Emby 媒体路径映射。".into());
-        }
-        if web && root.is_none() && !paths.is_empty() {
-            return Err("请先为 Web 服务配置可写的 EMBY_WRITEBACK_ROOT。".into());
-        }
-        let mut servers = HashSet::new();
-        for path in paths {
-            path.server = path.server.trim().replace('\\', "/");
-            path.local = path.local.trim().to_owned();
-            let Some(server) = ServerPath::parse(&path.server) else {
-                return Err("Emby 端路径必须是绝对路径，例如 /media/Movies。".into());
-            };
-            let local = Path::new(&path.local);
-            if path.local.len() > 4096
-                || path.local.contains('\0')
-                || local.components().any(|part| part == Component::ParentDir)
-                || (web
-                    && local
-                        .components()
-                        .any(|part| !matches!(part, Component::Normal(_))))
-                || (!web && !local.is_absolute())
-            {
-                return Err(if web {
-                    "请输入可写挂载根目录下的相对路径。"
-                } else {
-                    "请输入本机可访问的媒体目录绝对路径。"
-                }
-                .into());
-            }
-            let mut key = format!("{}:{}", server.root, server.parts.join("/"));
-            if server.windows() {
-                key.make_ascii_lowercase();
-            }
-            if !servers.insert(key) {
-                return Err("每个 Emby 端目录只能配置一条路径映射。".into());
-            }
-        }
-        Ok(())
-    }
-}
-
-struct ServerPath<'a> {
-    root: &'a str,
-    parts: Vec<&'a str>,
-}
-
-impl<'a> ServerPath<'a> {
-    fn parse(path: &'a str) -> Option<Self> {
-        if path.len() > 4096 || path.contains('\0') {
-            return None;
-        }
-        let (root, remainder) = if let Some(remainder) = path.strip_prefix("//") {
-            ("//", remainder)
-        } else if let Some(remainder) = path.strip_prefix('/') {
-            ("/", remainder)
-        } else if matches!(path.as_bytes(), [b'A'..=b'Z' | b'a'..=b'z', b':', b'/', ..]) {
-            (&path[..2], &path[3..])
-        } else {
-            return None;
-        };
-        let parts: Vec<_> = remainder
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .collect();
-        if parts.iter().any(|part| matches!(*part, "." | "..")) || (root == "//" && parts.len() < 2)
-        {
-            return None;
-        }
-        Some(Self { root, parts })
-    }
-
-    fn windows(&self) -> bool {
-        self.root != "/"
-    }
-
-    fn relative_to(&self, base: &Self) -> Option<&[&str]> {
-        let equal = |left: &str, right: &str| {
-            if self.windows() {
-                left.eq_ignore_ascii_case(right)
-            } else {
-                left == right
-            }
-        };
-        (equal(self.root, base.root)
-            && self.parts.len() >= base.parts.len()
-            && self
-                .parts
-                .iter()
-                .zip(&base.parts)
-                .all(|(left, right)| equal(left, right)))
-        .then(|| &self.parts[base.parts.len()..])
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub(crate) struct MediaPaths {
-    paths: Vec<PathMapping>,
-    web_root: Option<PathBuf>,
-}
-
-impl MediaPaths {
-    pub(super) fn new(paths: Vec<PathMapping>, web: bool, web_root: Option<PathBuf>) -> Self {
-        Self {
-            paths: if web && web_root.is_none() {
-                Vec::new()
-            } else {
-                paths
-            },
-            web_root,
-        }
-    }
-
-    fn target(&self, path: &str, series: bool) -> Option<Target> {
-        let normalized = path.replace('\\', "/");
-        let server = ServerPath::parse(&normalized)?;
-        let (mapping, tail) = self
-            .paths
-            .iter()
-            .filter_map(|mapping| {
-                let base = ServerPath::parse(&mapping.server)?;
-                Some((mapping, server.relative_to(&base)?))
-            })
-            .min_by_key(|(_, tail)| tail.len())?;
-        let mut relative = PathBuf::new();
-        let root = match &self.web_root {
-            Some(root) => {
-                let local = Path::new(&mapping.local);
-                if local
-                    .components()
-                    .any(|part| !matches!(part, Component::Normal(_)))
-                {
-                    return None;
-                }
-                relative.push(local);
-                root.clone()
-            }
-            None => {
-                let local = PathBuf::from(&mapping.local);
-                if !local.is_absolute() {
-                    return None;
-                }
-                local
-            }
-        };
-        for part in tail {
-            let mut components = Path::new(part).components();
-            if !matches!(components.next(), Some(Component::Normal(_)))
-                || components.next().is_some()
-            {
-                return None;
-            }
-            relative.push(part);
-        }
-        let video = if series {
-            None
-        } else {
-            if tail.is_empty() {
-                return None;
-            }
-            let name = relative.file_name()?;
-            Path::new(name).file_stem()?;
-            Some(name.to_owned())
-        };
-        if video.is_some() {
-            relative.pop();
-        }
-        Some(Target {
-            root,
-            relative,
-            video,
-        })
-    }
-}
-
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-struct Target {
-    root: PathBuf,
-    relative: PathBuf,
-    video: Option<OsString>,
-}
-
-impl Target {
-    fn directory(&self) -> io::Result<Dir> {
-        let root = Dir::open_ambient_dir(&self.root, ambient_authority())?;
-        let dir = if self.relative.as_os_str().is_empty() {
-            root
-        } else {
-            root.open_dir(&self.relative)?
-        };
-        if let Some(video) = &self.video
-            && !dir.symlink_metadata(video)?.is_file()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a regular video file",
-            ));
-        }
-        Ok(dir)
-    }
-
-    fn display_path(&self) -> String {
-        self.root
-            .join(&self.relative)
-            .to_string_lossy()
-            .into_owned()
-    }
-
-    fn stem(&self) -> Option<&str> {
-        Path::new(self.video.as_ref()?).file_stem()?.to_str()
-    }
-
-    fn video_sidecar(&self, suffix: &str) -> String {
-        format!(
-            "{}{suffix}",
-            self.stem().expect("mapped Emby video has a file stem")
-        )
-    }
-
-    fn backdrop_stem(&self) -> String {
-        let Some(stem) = self.stem() else {
-            return "fanart".into();
-        };
-        // A folder named for the video (including Emby's version suffix) can use shared fanart.
-        if self
-            .relative
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|folder| {
-                stem == folder
-                    || stem
-                        .strip_prefix(folder)
-                        .is_some_and(|suffix| suffix.starts_with(" - "))
-            })
-        {
-            "fanart".into()
-        } else {
-            self.video_sidecar("-thumb")
-        }
-    }
-}
+use paths::Target;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "png", "webp", "gif"];
-const BACKUP_DIRECTORY: &str = ".collect-metadata-backups";
-
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum FileKind {
@@ -443,16 +186,6 @@ impl PlannedFile {
     }
 }
 
-impl Target {
-    fn path(&self, name: &str) -> String {
-        self.root
-            .join(&self.relative)
-            .join(name)
-            .to_string_lossy()
-            .into_owned()
-    }
-}
-
 pub(crate) fn plan(
     paths: &MediaPaths,
     data: &Value,
@@ -469,13 +202,18 @@ fn plan_with_mode(
     state: &WritebackState,
     create_only: bool,
 ) -> (Vec<PlannedFile>, Vec<WritebackPreviewFile>, usize) {
-    let item = &data["item"];
-    let series = item["Type"] == "Series";
+    let main_item = &data["item"];
+    let series = main_item["Type"] == "Series";
     let children = data["children"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|child| !create_only && series && child["Type"] == "Episode" && child["LocationType"] != "Virtual");
+        .filter(|child| {
+            !create_only
+                && series
+                && child["Type"] == "Episode"
+                && child["LocationType"] != "Virtual"
+        });
     let fields = &record["fields"];
     let episodes: HashMap<_, _> = fields["episodes"]
         .as_array()
@@ -484,12 +222,11 @@ fn plan_with_mode(
         .filter_map(|episode| Some((episode["id"].as_str()?, episode)))
         .collect();
     let fill_missing = record["fill_missing"] == true;
-    let main_item = item;
     let mut seen = HashSet::new();
     let mut files = Vec::new();
     let mut preview = Vec::new();
     let mut writable = 0;
-    for item in std::iter::once(item).chain(children) {
+    for item in std::iter::once(main_item).chain(children) {
         let path = item["Path"].as_str().filter(|path| !path.is_empty());
         let source = path.map(str::to_owned).unwrap_or_else(|| {
             format!(
@@ -498,7 +235,12 @@ fn plan_with_mode(
                 item["Name"].as_str().unwrap_or("")
             )
         });
-        let target = path.and_then(|path| paths.target(path, matches!(item["Type"].as_str(), Some("Series" | "Season"))));
+        let target = path.and_then(|path| {
+            paths.target(
+                path,
+                matches!(item["Type"].as_str(), Some("Series" | "Season")),
+            )
+        });
         let directory = target.as_ref().and_then(|target| target.directory().ok());
         let blocked = if target.is_none() {
             Some("媒体路径缺失或未匹配写回映射。")
@@ -507,7 +249,6 @@ fn plan_with_mode(
         } else {
             None
         };
-        let episode = item["Type"] == "Episode";
         let image_fields = if item["Id"] == main_item["Id"] {
             fields
         } else {
@@ -516,57 +257,9 @@ fn plan_with_mode(
                 .and_then(|id| episodes.get(id).copied())
                 .unwrap_or(&Value::Null)
         };
-        let primary = if episode {
-            image_fields["still_url"].as_str()
-        } else {
-            image_fields["poster_url"]
-                .as_str()
-                .or_else(|| image_fields["cover_url"].as_str())
-        };
-        let mut kinds = Vec::new();
-        for (kind, emby_available, url) in [
-            (
-                if episode {
-                    FileKind::Still
-                } else {
-                    FileKind::Poster
-                },
-                item["ImageTags"]["Primary"].is_string(),
-                primary,
-            ),
-            (
-                FileKind::Backdrop,
-                !episode
-                    && item["BackdropImageTags"]
-                        .as_array()
-                        .is_some_and(|tags| !tags.is_empty()),
-                (!episode)
-                    .then(|| image_fields["backdrop_url"].as_str())
-                    .flatten(),
-            ),
-            (
-                FileKind::Logo,
-                !episode && item["ImageTags"]["Logo"].is_string(),
-                (!episode).then(|| image_fields["logo_url"].as_str()).flatten(),
-            ),
-            (
-                FileKind::Landscape,
-                !episode && item["ImageTags"]["Thumb"].is_string(),
-                (!episode).then(|| image_fields["landscape_url"].as_str()).flatten()
-                    .filter(|url| Some(*url) != image_fields["backdrop_url"].as_str()),
-            ),
-        ] {
-            let public_image = url
-                .filter(|_| !fill_missing || !emby_available)
-                .and_then(|url| Url::parse(url).ok())
-                .filter(allowed)
-                .map(|url| url.to_string());
-            if emby_available || public_image.is_some() {
-                kinds.push((kind, public_image));
-            }
-        }
-        kinds.push((FileKind::Nfo, None));
-        for (kind, public_image) in kinds {
+        let artwork = artwork_sources(item, image_fields, fill_missing);
+        let sidecars = artwork.into_iter().chain([(FileKind::Nfo, None)]);
+        for (kind, public_image) in sidecars {
             let key = format!("{}\n{}", kind.label(), source);
             if !seen.insert(key.clone()) {
                 continue;
@@ -575,48 +268,11 @@ fn plan_with_mode(
                 .as_ref()
                 .and_then(|target| {
                     let dir = directory.as_ref()?;
-                    let names = match kind {
-                        FileKind::Nfo => vec![if target.video.is_some() {
-                            target.video_sidecar(".nfo")
-                        } else if item["Type"] == "Season" {
-                            "season.nfo".into()
-                        } else {
-                            "tvshow.nfo".into()
-                        }],
-                        FileKind::Poster => image_names(if target.video.is_some() {
-                            target.video_sidecar("-poster")
-                        } else {
-                            "poster".into()
-                        }),
-                        FileKind::Backdrop if create_only && !matches!(target.backdrop_stem().as_str(), "fanart") => {
-                            if let Some(stem) = target.stem() {
-                                image_names(format!("{stem}-fanart"))
-                            } else {
-                                image_names(target.backdrop_stem())
-                            }
-                        }
-                        FileKind::Backdrop => image_names(target.backdrop_stem()),
-                        FileKind::Logo => image_names(if target.video.is_some() {
-                            target.video_sidecar("-clearlogo")
-                        } else {
-                            "clearlogo".into()
-                        }),
-                        FileKind::Landscape => image_names(if target.video.is_some() {
-                            target.video_sidecar("-landscape")
-                        } else {
-                            "landscape".into()
-                        }),
-                        FileKind::Still => image_names(target.video_sidecar("-thumb")),
-                    };
                     Some(
-                        names
+                        destination_names(kind, item, target, create_only)
                             .into_iter()
                             .map(|name| Destination {
-                                existing: if target
-                                    .video
-                                    .as_ref()
-                                    .is_some_and(|video| video.eq_ignore_ascii_case(&name))
-                                {
+                                existing: if target.is_video_name(&name) {
                                     Existing::Blocked
                                 } else {
                                     Existing::read(dir, &name)
@@ -627,10 +283,15 @@ fn plan_with_mode(
                     )
                 })
                 .unwrap_or_default();
-            if create_only && let (Some(dir), Some(target)) = (directory.as_ref(), target.as_ref()) {
+            if create_only && let (Some(dir), Some(target)) = (directory.as_ref(), target.as_ref())
+            {
                 let alternates = automatic_alternates(kind, item, target);
-                if destinations.iter().any(|entry| entry.existing != Existing::Missing)
-                    || alternates.iter().any(|name| Existing::read(dir, name) != Existing::Missing)
+                if destinations
+                    .iter()
+                    .any(|entry| entry.existing != Existing::Missing)
+                    || alternates
+                        .iter()
+                        .any(|name| Existing::read(dir, name) != Existing::Missing)
                 {
                     continue;
                 }
@@ -664,6 +325,100 @@ fn plan_with_mode(
     (files, preview, writable)
 }
 
+fn artwork_sources(
+    item: &Value,
+    fields: &Value,
+    fill_missing: bool,
+) -> Vec<(FileKind, Option<String>)> {
+    let tags = &item["ImageTags"];
+    let artwork: &[(FileKind, bool, Option<&str>)] = if item["Type"] == "Episode" {
+        &[(
+            FileKind::Still,
+            tags["Primary"].is_string(),
+            fields["still_url"].as_str(),
+        )]
+    } else {
+        let backdrop = fields["backdrop_url"].as_str();
+        &[
+            (
+                FileKind::Poster,
+                tags["Primary"].is_string(),
+                fields["poster_url"]
+                    .as_str()
+                    .or_else(|| fields["cover_url"].as_str()),
+            ),
+            (
+                FileKind::Backdrop,
+                item["BackdropImageTags"]
+                    .as_array()
+                    .is_some_and(|tags| !tags.is_empty()),
+                backdrop,
+            ),
+            (
+                FileKind::Logo,
+                tags["Logo"].is_string(),
+                fields["logo_url"].as_str(),
+            ),
+            (
+                FileKind::Landscape,
+                tags["Thumb"].is_string(),
+                fields["landscape_url"]
+                    .as_str()
+                    .filter(|url| Some(*url) != backdrop),
+            ),
+        ]
+    };
+    artwork
+        .iter()
+        .filter_map(|&(kind, emby_available, url)| {
+            let public_image = url
+                .filter(|_| !fill_missing || !emby_available)
+                .and_then(|url| Url::parse(url).ok())
+                .filter(allowed)
+                .map(|url| url.to_string());
+            (emby_available || public_image.is_some()).then_some((kind, public_image))
+        })
+        .collect()
+}
+
+fn destination_names(
+    kind: FileKind,
+    item: &Value,
+    target: &Target,
+    create_only: bool,
+) -> Vec<String> {
+    let image_stem = match kind {
+        FileKind::Nfo => {
+            return vec![if target.is_video() {
+                target.video_sidecar(".nfo")
+            } else if item["Type"] == "Season" {
+                "season.nfo".into()
+            } else {
+                "tvshow.nfo".into()
+            }];
+        }
+        FileKind::Poster if target.is_video() => target.video_sidecar("-poster"),
+        FileKind::Poster => "poster".into(),
+        FileKind::Backdrop => {
+            let stem = target.backdrop_stem();
+            if create_only
+                && stem != "fanart"
+                && let Some(video) = target.stem()
+            {
+                format!("{video}-fanart")
+            } else {
+                stem
+            }
+        }
+        FileKind::Logo if target.is_video() => target.video_sidecar("-clearlogo"),
+        FileKind::Logo => "clearlogo".into(),
+        FileKind::Landscape if target.is_video() => target.video_sidecar("-landscape"),
+        FileKind::Landscape => "landscape".into(),
+        FileKind::Still => target.video_sidecar("-thumb"),
+    };
+    image_names(image_stem)
+}
+
 fn automatic_alternates(kind: FileKind, item: &Value, target: &Target) -> Vec<String> {
     let mut names = Vec::new();
     let stem = target.stem();
@@ -675,11 +430,23 @@ fn automatic_alternates(kind: FileKind, item: &Value, target: &Target) -> Vec<St
             return names;
         }
         FileKind::Poster if item["Type"] != "Movie" || target.backdrop_stem() == "fanart" => {
-            vec!["folder".to_owned(), "poster".into(), "cover".into(), "default".into(), "movie".into(), "show".into()]
+            vec![
+                "folder".to_owned(),
+                "poster".into(),
+                "cover".into(),
+                "default".into(),
+                "movie".into(),
+                "show".into(),
+            ]
         }
         FileKind::Poster => Vec::new(),
         FileKind::Backdrop if item["Type"] != "Movie" || target.backdrop_stem() == "fanart" => {
-            vec!["backdrop".to_owned(), "fanart".into(), "background".into(), "art".into()]
+            vec![
+                "backdrop".to_owned(),
+                "fanart".into(),
+                "background".into(),
+                "art".into(),
+            ]
         }
         FileKind::Backdrop => Vec::new(),
         FileKind::Logo => match stem {
@@ -690,7 +457,9 @@ fn automatic_alternates(kind: FileKind, item: &Value, target: &Target) -> Vec<St
             Some(stem) => vec![format!("{stem}-thumb")],
             None => vec!["landscape".into(), "thumb".into()],
         },
-        FileKind::Still => stem.map(|stem| vec![format!("metadata/{stem}")]).unwrap_or_default(),
+        FileKind::Still => stem
+            .map(|stem| vec![format!("metadata/{stem}")])
+            .unwrap_or_default(),
     };
     let mut image_stems = image_stems;
     if stem.is_some() && target.backdrop_stem() == "fanart" {
@@ -700,93 +469,22 @@ fn automatic_alternates(kind: FileKind, item: &Value, target: &Target) -> Vec<St
             _ => {}
         }
     }
-    if matches!(kind, FileKind::Poster) && let Some(stem) = stem {
-        image_stems.extend(["", "-poster", "-cover", "-default", "-movie"].map(|suffix| format!("{stem}{suffix}")));
+    if matches!(kind, FileKind::Poster)
+        && let Some(stem) = stem
+    {
+        image_stems.extend(
+            ["", "-poster", "-cover", "-default", "-movie"].map(|suffix| format!("{stem}{suffix}")),
+        );
     }
-    image_stems.into_iter().flat_map(|name| {
-        IMAGE_EXTENSIONS.iter().chain(["jpeg", "tbn"].iter())
-            .map(move |ext| format!("{name}.{ext}"))
-    }).collect()
-}
-
-#[cfg(feature = "web")]
-pub(crate) async fn write_automatic(
-    client: &Client,
-    emby: &Emby,
-    paths: &MediaPaths,
-    record: &Value,
-    defer_episode_nfo: bool,
-) -> Result<usize, String> {
-    let data = super::emby_source(record).ok_or("缺少 Emby 文件关联。")?;
-    let state = WritebackState::default();
-    let item = &data["item"];
-    let mut repaired = 0;
-    let (mut files, _, _) = plan_with_mode(paths, data, record, &state, true);
-    if item["Type"] == "Episode" {
-        use crate::providers::media::episode_title::{field_locked, usable};
-        let title = &record["fields"]["title"];
-        if defer_episode_nfo || title.as_str().is_none_or(|title| title.trim().is_empty()) {
-            files.retain(|file| !matches!(file.kind, FileKind::Nfo));
-        } else if !field_locked(item, "Name")
-            && let Some(title) = usable(title, item)
-            && let Some(target) = item["Path"].as_str().and_then(|path| paths.target(path, false))
-        {
-            let item = item.clone();
-            let title = title.to_owned();
-            repaired = tokio::task::spawn_blocking(move || repair_episode_nfo(&target, &item, &title))
-                .await.map_err(|_| "无法补充分集 NFO 标题。")?
-                .map_err(|error| format!("无法补充分集 NFO 标题：{error}"))? as usize;
-        }
-    }
-    if files.is_empty() {
-        return Ok(repaired);
-    }
-    let job = WritebackJob {
-        id: uuid::Uuid::new_v4().simple().to_string(),
-        owner: String::new(),
-        stage: String::new(),
-        files,
-    };
-    let output = prepare(client, Some(emby), paths, &job, record, &state).await;
-    if let Some(error) = output.files.iter().find_map(|(_, staged)| staged.as_ref().err()) {
-        return Err(error.clone());
-    }
-    let (state, report) = tokio::task::spawn_blocking(move || output.publish(&job.id, state))
-        .await.map_err(|_| "无法保存自动写回资料。")?;
-    if let Some(error) = state.files.into_values().find_map(|file| match file {
-        FileResult::Failed { error } => Some(error),
-        _ => None,
-    }) {
-        return Err(error);
-    }
-    Ok(report.written + repaired)
-}
-
-#[cfg(feature = "web")]
-fn repair_episode_nfo(target: &Target, item: &Value, title: &str) -> io::Result<bool> {
-    use io::Read;
-
-    const MAX_NFO: u64 = 1024 * 1024;
-    let dir = target.directory()?;
-    let name = target.video_sidecar(".nfo");
-    let previous = Existing::read(&dir, &name);
-    if !matches!(&previous, Existing::File { length, .. } if *length <= MAX_NFO) {
-        return Ok(false);
-    }
-    let mut original = Vec::new();
-    dir.open(&name)?.take(MAX_NFO + 1).read_to_end(&mut original)?;
-    if original.len() as u64 > MAX_NFO {
-        return Ok(false);
-    }
-    let Some(updated) = std::str::from_utf8(&original).ok()
-        .and_then(|xml| nfo::fill_episode_title(xml, item, title))
-    else {
-        return Ok(false);
-    };
-    let backup = format!("automatic-{}.bak", uuid::Uuid::new_v4().simple());
-    preserve_existing(&dir, &name, &previous, &backup)?;
-    write_atomic(&dir, &name, updated.as_bytes(), false, || Existing::read(&dir, &name) == previous)?;
-    Ok(true)
+    image_stems
+        .into_iter()
+        .flat_map(|name| {
+            IMAGE_EXTENSIONS
+                .iter()
+                .chain(["jpeg", "tbn"].iter())
+                .map(move |ext| format!("{name}.{ext}"))
+        })
+        .collect()
 }
 
 fn image_names(stem: String) -> Vec<String> {
@@ -796,429 +494,12 @@ fn image_names(stem: String) -> Vec<String> {
         .collect()
 }
 
-struct StagedFile {
-    destination: Destination,
-    path: PathBuf,
-}
-
-pub(crate) struct PreparedWriteback {
-    _stage: Option<tempfile::TempDir>,
-    files: Vec<(PlannedFile, Result<StagedFile, String>)>,
-}
-
-pub(crate) async fn prepare(
-    client: &Client,
-    emby: Option<&Emby>,
-    paths: &MediaPaths,
-    job: &WritebackJob,
-    record: &Value,
-    state: &WritebackState,
-) -> PreparedWriteback {
-    let stage = tempfile::tempdir().ok();
-    let source = record["sources"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|source| source["provider"] == "Emby");
-    let emby = emby.filter(|emby| source.is_some_and(|source| emby.owns_source(source)));
-    let data = source.map(|source| &source["data"]).unwrap_or(&Value::Null);
-    let children: HashMap<_, _> = data["children"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|child| Some((child["Id"].as_str()?, child)))
-        .collect();
-    let stage_path = stage.as_ref().map(tempfile::TempDir::path);
-    let mut files = Vec::new();
-    {
-        let mut jobs = FuturesOrdered::new();
-        let mut pending = job
-            .files
-            .iter()
-            .filter_map(|file| Some((file, file.kind.image_type()?)));
-        loop {
-            for (file, image_type) in pending.by_ref().take(4 - jobs.len()) {
-                jobs.push_back(prepare_image(
-                    client, emby, paths, stage_path, file, image_type,
-                ));
-            }
-            let Some(file) = jobs.next().await else { break };
-            files.push(file);
-        }
-    }
-    let mut images: HashMap<&str, Vec<OutputFile>> = HashMap::new();
-    for (file, staged) in &files {
-        if let Ok(staged) = staged {
-            images
-                .entry(&file.source)
-                .or_default()
-                .push(image_reference(file.kind.label(), &staged.destination.name));
-        }
-    }
-    let episodes: HashMap<_, _> = record["fields"]["episodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|episode| Some((episode["id"].as_str()?, episode)))
-        .collect();
-    let mut nfos = Vec::new();
-    for file in job
-        .files
-        .iter()
-        .filter(|file| file.kind.image_type().is_none())
-    {
-        let staged = async {
-            check_target(file, paths)?;
-            let stage = stage_path.ok_or("无法创建写回临时目录。")?;
-            let id = file.item_id.as_str().unwrap_or_default();
-            let episode = children
-                .get(id)
-                .map(|item| episode_record(item, episodes.get(id).copied(), record));
-            let mut images = images.remove(file.source.as_str()).unwrap_or_default();
-            for kind in ["poster", "backdrop", "logo", "landscape", "still"] {
-                if let Some(FileResult::Written { path, .. }) =
-                    state.files.get(&format!("{kind}\n{}", file.source))
-                    && let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str())
-                {
-                    images.push(image_reference(kind, name));
-                }
-            }
-            let xml = nfo::work_xml(
-                episode.as_ref().unwrap_or(record),
-                &OutputOptions::default(),
-                &images,
-            );
-            stage_file(stage, &file.destinations[0], xml).await
-        }
-        .await;
-        nfos.push((file.clone(), staged));
-    }
-    files.extend(nfos);
-    PreparedWriteback {
-        _stage: stage,
-        files,
-    }
-}
-
-async fn prepare_image(
-    client: &Client,
-    emby: Option<&Emby>,
-    paths: &MediaPaths,
-    stage: Option<&Path>,
-    file: &PlannedFile,
-    image_type: &str,
-) -> (PlannedFile, Result<StagedFile, String>) {
-    let staged = async {
-        check_target(file, paths)?;
-        let stage = stage.ok_or("无法创建写回临时目录。")?;
-        let response = if let Some(url) = &file.public_image {
-            let url = Url::parse(url).map_err(|_| "来源图片地址无效。")?;
-            public_response(client, &url, "image/*", Duration::from_secs(10))
-                .await
-                .ok_or("无法下载公开来源的图片。")?
-        } else {
-            let emby = emby.ok_or("无法连接此快照对应的 Emby 服务来读取图片。")?;
-            let mut url = emby
-                .image_url(&file.item_id, image_type)
-                .ok_or("Emby 图片地址无效。")?;
-            url.query_pairs_mut().append_pair("EnableImageEnhancers", "false");
-            emby.image_response(client, &url)
-                .await
-                .ok_or("无法下载 Emby 图片。")?
-        };
-        let (bytes, extension) = image_bytes(response)
-            .await
-            .ok_or("图片格式无效或超出大小限制。")?;
-        let destination = file
-            .destinations
-            .iter()
-            .find(|entry| {
-                Path::new(&entry.name)
-                    .extension()
-                    .is_some_and(|ending| ending == extension)
-            })
-            .ok_or("未找到预览中的图片文件名。")?;
-        stage_file(stage, destination, bytes).await
-    }
-    .await;
-    (file.clone(), staged)
-}
-
-fn check_target(file: &PlannedFile, paths: &MediaPaths) -> Result<(), String> {
-    if let Some(error) = &file.blocked {
-        return Err(error.clone());
-    }
-    if paths.target(
-        &file.source,
-        file.target
-            .as_ref()
-            .is_some_and(|target| target.video.is_none()),
-    ) != file.target
-    {
-        return Err("写回映射已变更，请重新预览。".into());
-    }
-    Ok(())
-}
-
-fn image_reference(kind: &'static str, name: &str) -> OutputFile {
-    OutputFile {
-        path: name.into(),
-        kind,
-        source_url: None,
-        person: None,
-    }
-}
-
-fn episode_record(item: &Value, localized: Option<&Value>, record: &Value) -> Value {
-    let mut fields = episode_fields(item);
-    if let Some(localized) = localized {
-        for key in ["title", "description", "description_original"] {
-            if let Some(text) = localized.get(key).filter(|text| text.is_string()) {
-                fields.insert(key, text.clone());
-            }
-        }
-    }
-    if !fields.contains_key("series") {
-        fields.insert("series", record["fields"]["title"].clone());
-    }
-    json!({"scope": "episode", "media_type": "series", "fields": fields})
-}
-
-async fn stage_file(
-    stage: &Path,
-    destination: &Destination,
-    bytes: impl AsRef<[u8]>,
-) -> Result<StagedFile, String> {
-    if destination.existing == Existing::Blocked {
-        return Err("目标不是普通文件，或无法读取现有资料。".into());
-    }
-    let path = stage.join(uuid::Uuid::new_v4().simple().to_string());
-    tokio::fs::write(&path, bytes)
-        .await
-        .map_err(|_| "无法暂存写回文件。")?;
-    Ok(StagedFile {
-        destination: destination.clone(),
-        path,
-    })
-}
-
-impl PreparedWriteback {
-    pub(crate) fn publish(
-        self,
-        id: &str,
-        mut state: WritebackState,
-    ) -> (WritebackState, OutputReport) {
-        let directory = self
-            .files
-            .iter()
-            .find_map(|(file, _)| file.target.as_ref().map(Target::display_path));
-        for (index, (file, staged)) in self.files.into_iter().enumerate() {
-            // The job ID remains stable when the queue reclaims an interrupted attempt.
-            let result = staged
-                .and_then(|staged| publish_file(&file, &staged, &format!("{id}-{index}.bak")));
-            state.files.insert(
-                file.key,
-                result.unwrap_or_else(|error| FileResult::Failed { error }),
-            );
-        }
-        let failed = state
-            .files
-            .values()
-            .filter(|file| matches!(file, FileResult::Failed { .. }))
-            .count();
-        state.remaining = Some(failed);
-        let report = OutputReport {
-            directory,
-            written: state.files.len() - failed,
-            failed,
-            message: (failed > 0)
-                .then(|| format!("{failed} 项资料未写回。重新预览可查看原因并重试。")),
-        };
-        (state, report)
-    }
-}
-
-fn publish_file(
-    file: &PlannedFile,
-    staged: &StagedFile,
-    backup_name: &str,
-) -> Result<FileResult, String> {
-    let target = file.target.as_ref().ok_or("未配置媒体路径。")?;
-    let dir = target.directory().map_err(|_| "媒体目录或视频已不可用。")?;
-    let name = &staged.destination.name;
-    let previous = &staged.destination.existing;
-    let current = Existing::read(&dir, name);
-    if file.create_only {
-        if current == Existing::Missing {
-            write_atomic(
-                &dir, name,
-                fs::File::open(&staged.path).map_err(|_| "无法读取暂存资料。")?,
-                true, || true,
-            ).map_err(|_| "无法写入新资料，请检查挂载和权限。")?;
-        } else if current == Existing::Blocked {
-            return Err("目标在写回时已变更。".into());
-        }
-        return Ok(FileResult::Written { path: target.path(name), backup: None });
-    }
-    let backup = format!("{BACKUP_DIRECTORY}/{backup_name}");
-    let backup_exists = dir
-        .symlink_metadata(&backup)
-        .is_ok_and(|metadata| metadata.is_file());
-    if matches!(current, Existing::File { .. })
-        && (backup_exists || matches!(previous, Existing::Missing))
-        && same_contents(&dir, name, &staged.path)
-    {
-        return Ok(FileResult::Written {
-            path: target.path(name),
-            backup: backup_exists.then(|| target.path(&backup)),
-        });
-    }
-    if &current != previous {
-        return Err("目标在预览后已变更，请重新预览。".into());
-    }
-    let replaced = matches!(current, Existing::File { .. });
-    if replaced {
-        preserve_existing(&dir, name, previous, backup_name)
-            .map_err(|_| "无法保留旧文件，写回已跳过。")?;
-    }
-    write_atomic(
-        &dir,
-        name,
-        fs::File::open(&staged.path).map_err(|_| "无法读取暂存资料。")?,
-        false,
-        || Existing::read(&dir, name) == *previous,
-    )
-    .map_err(|error| {
-        if error.kind() == io::ErrorKind::AlreadyExists {
-            "目标在预览后已变更，请重新预览。"
-        } else {
-            "无法写回文件，请检查挂载和写入权限。"
-        }
-    })?;
-    Ok(FileResult::Written {
-        path: target.path(name),
-        backup: replaced.then(|| target.path(&backup)),
-    })
-}
-
-fn same_contents(dir: &Dir, name: &str, staged: &Path) -> bool {
-    let read = || -> io::Result<bool> {
-        let existing = dir.open(name)?;
-        if existing.metadata()?.len() != fs::metadata(staged)?.len() {
-            return Ok(false);
-        }
-        let mut existing = io::BufReader::new(existing);
-        let mut staged = io::BufReader::new(fs::File::open(staged)?);
-        use io::BufRead;
-        loop {
-            let left = existing.fill_buf()?;
-            let right = staged.fill_buf()?;
-            if left != right || left.is_empty() {
-                return Ok(left == right);
-            }
-            let count = left.len();
-            existing.consume(count);
-            staged.consume(count);
-        }
-    };
-    read().unwrap_or(false)
-}
-
-fn preserve_existing(
-    dir: &Dir,
-    name: &str,
-    previous: &Existing,
-    backup_name: &str,
-) -> io::Result<()> {
-    match dir.create_dir(BACKUP_DIRECTORY) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    if !dir.symlink_metadata(BACKUP_DIRECTORY)?.is_dir() {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    let backups = dir.open_dir(BACKUP_DIRECTORY)?;
-    match Existing::read(&backups, backup_name) {
-        Existing::File { .. } => return Ok(()),
-        Existing::Blocked => return Err(io::ErrorKind::AlreadyExists.into()),
-        Existing::Missing => {}
-    }
-    let input = dir.open(name)?;
-    write_atomic(&backups, backup_name, input, true, || {
-        Existing::read(dir, name) == *previous
-            && Existing::read(&backups, backup_name) == Existing::Missing
-    })
-}
-
-fn write_atomic(
-    dir: &Dir,
-    name: &str,
-    mut input: impl io::Read,
-    create_only: bool,
-    current: impl FnOnce() -> bool,
-) -> io::Result<()> {
-    let temporary = format!(".collect-metadata-{}.tmp", uuid::Uuid::new_v4().simple());
-    let mut output = dir.open_with(&temporary, OpenOptions::new().write(true).create_new(true))?;
-    let result = (|| {
-        io::copy(&mut input, &mut output)?;
-        output.sync_all()?;
-        drop(output);
-        if !current() {
-            return Err(io::ErrorKind::AlreadyExists.into());
-        }
-        if create_only {
-            dir.hard_link(&temporary, dir, name)
-        } else {
-            dir.rename(&temporary, dir, name)
-        }
-    })();
-    if create_only || result.is_err() {
-        let _ = dir.remove_file(&temporary);
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
+    use super::publish::{BACKUP_DIRECTORY, publish_file, stage_file};
     use super::*;
-
-    #[test]
-    fn chooses_the_most_specific_server_path_by_component() {
-        let root = tempfile::tempdir().unwrap();
-        let mut mappings = vec![
-            PathMapping {
-                server: r"Z:\Media".into(),
-                local: "general".into(),
-            },
-            PathMapping {
-                server: r"Z:\Media\TV".into(),
-                local: "series".into(),
-            },
-        ];
-        PathMapping::validate(&mut mappings, true, Some(root.path())).unwrap();
-        let paths = MediaPaths::new(mappings, true, Some(root.path().into()));
-
-        let target = paths
-            .target(r"z:\media\tv\剧集\Season 1\第 1 集.mp4", false)
-            .unwrap();
-        assert_eq!(target.relative, Path::new("series/剧集/Season 1"));
-        assert_eq!(target.video_sidecar(".nfo"), "第 1 集.nfo");
-        assert_eq!(
-            paths
-                .target(r"Z:\Media\TV Archive\Film.mkv", false)
-                .unwrap()
-                .relative,
-            Path::new("general/TV Archive")
-        );
-        for path in [
-            r"Z:\MediaArchive\Film.mkv",
-            r"Z:\Media\..\Film.mp4",
-            "https://media/show",
-        ] {
-            assert!(paths.target(path, false).is_none());
-        }
-    }
+    use serde_json::json;
+    use std::fs;
 
     #[test]
     fn writeback_preview_includes_public_artwork_and_keeps_existing_emby_artwork() {
@@ -1266,22 +547,34 @@ mod tests {
         fs::write(film.join("movie.nfo"), "local metadata").unwrap();
         fs::write(film.join("poster.jpeg"), "local poster").unwrap();
         let paths = MediaPaths::new(
-            vec![PathMapping { server: "/media".into(), local: String::new() }],
+            vec![PathMapping {
+                server: "/media".into(),
+                local: String::new(),
+            }],
             true,
             Some(root.path().into()),
         );
         let data = json!({"item":{"Id":"1","Type":"Movie","Path":"/media/Film/Film.mkv"}});
         let record = json!({"fields":{"poster_url":"https://image.tmdb.org/t/p/w500/p.jpg"}});
         let state = WritebackState::default();
-        assert!(plan_with_mode(&paths, &data, &record, &state, true).0.is_empty());
+        assert!(
+            plan_with_mode(&paths, &data, &record, &state, true)
+                .0
+                .is_empty()
+        );
 
         fs::remove_file(film.join("movie.nfo")).unwrap();
         let (files, _, _) = plan_with_mode(&paths, &data, &record, &state, true);
         assert_eq!(files.len(), 1);
-        let staged = stage_file(root.path(), &files[0].destinations[0], "scraped").await.unwrap();
+        let staged = stage_file(root.path(), &files[0].destinations[0], "scraped")
+            .await
+            .unwrap();
         fs::write(film.join("Film.nfo"), "arrived during staging").unwrap();
         publish_file(&files[0], &staged, "no-backup").unwrap();
-        assert_eq!(fs::read_to_string(film.join("Film.nfo")).unwrap(), "arrived during staging");
+        assert_eq!(
+            fs::read_to_string(film.join("Film.nfo")).unwrap(),
+            "arrived during staging"
+        );
         assert!(!film.join(BACKUP_DIRECTORY).exists());
     }
 
@@ -1291,16 +584,26 @@ mod tests {
         let series = root.path().join("Series");
         fs::create_dir(&series).unwrap();
         let paths = MediaPaths::new(
-            vec![PathMapping { server: "/media".into(), local: String::new() }],
-            true, Some(root.path().into()),
+            vec![PathMapping {
+                server: "/media".into(),
+                local: String::new(),
+            }],
+            true,
+            Some(root.path().into()),
         );
         let data = json!({"item":{"Id":"1","Type":"Series","Path":"/media/Series",
             "ImageTags":{"Logo":"png","Thumb":"jpg"}}});
-        let record = json!({"fill_missing":true,"fields":{"logo_url":"https://image.tmdb.org/new.png"}});
+        let record =
+            json!({"fill_missing":true,"fields":{"logo_url":"https://image.tmdb.org/new.png"}});
         let files = plan_with_mode(&paths, &data, &record, &WritebackState::default(), true).0;
         assert_eq!(files.len(), 3);
         assert_eq!(files[0].kind.image_type(), Some("Logo"));
-        assert!(files[0].destinations.iter().any(|file| file.name == "clearlogo.png"));
+        assert!(
+            files[0]
+                .destinations
+                .iter()
+                .any(|file| file.name == "clearlogo.png")
+        );
         assert!(files[0].public_image.is_none());
         assert_eq!(files[1].kind.image_type(), Some("Thumb"));
         assert_eq!(files[1].destinations[0].name, "landscape.jpg");

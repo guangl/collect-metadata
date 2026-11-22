@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,15 +10,10 @@ use unicode_normalization::UnicodeNormalization;
 use super::{CandidateChoice, Claim, Outcome};
 use crate::{
     Collector, MediaKind, MediaProvider, SearchResult, diagnostics,
-    output::{PreparedWriteback, emby_source, prepare_writeback},
-    providers::media::emby::Emby,
+    output::{PreparedWriteback, WritebackJob, WritebackState, emby_source, prepare_writeback},
+    providers::media::emby::{EPISODE_QUERY_PREFIX, Emby},
     storage::Store,
 };
-
-enum Work {
-    Collect(Outcome),
-    Writeback(PreparedWriteback),
-}
 
 impl Collector {
     pub async fn run_batch_worker(self: Arc<Self>) {
@@ -81,83 +77,64 @@ impl Collector {
     }
 
     async fn run_claim(&self, store: &Store, claim: &Claim) {
-        let outcome = {
-            let work = async {
-                if let Some((job, state)) = &claim.writeback {
-                    let result = match store.batch_row_result(claim.batch, claim.id).await {
-                        Ok(Some(result)) => result,
-                        Ok(None) => {
-                            diagnostics::error("batch_writeback_snapshot_missing", json!({}));
-                            return None;
-                        }
-                        Err(_) => {
-                            diagnostics::warn("batch_writeback_snapshot_read_failed", json!({}));
-                            return None;
-                        }
-                    };
-                    let paths = self
-                        .output_settings()
-                        .or_else(|| {
-                            diagnostics::error("batch_writeback_settings_missing", json!({}));
-                            None
-                        })?
-                        .media_paths();
-                    let emby = self.emby_connection().ok();
-                    Some(Work::Writeback(
-                        prepare_writeback(
-                            &self.client,
-                            emby.as_deref(),
-                            &paths,
-                            job,
-                            &result.record,
-                            state,
-                        )
-                        .await,
-                    ))
-                } else {
-                    self.process_claim(Some(store), claim)
-                        .await
-                        .map(Work::Collect)
-                }
-            };
-            tokio::pin!(work);
-            let mut heartbeat = tokio::time::interval(Duration::from_secs(4));
-            heartbeat.tick().await;
-            loop {
-                tokio::select! {
-                    outcome = &mut work => break outcome,
-                    _ = heartbeat.tick() => {
-                        match store.renew(claim).await {
-                            Ok(true) => {}
-                            Ok(false) => break None,
-                            Err(error) => {
-                                diagnostics::postgres_error("batch_lease_renew_failed", &error);
-                                break None;
-                            }
-                        }
-                    }
-                }
+        let finished = if let Some((job, state)) = &claim.writeback {
+            let work = self.prepare_claim_writeback(store, claim, job, state);
+            match run_with_lease(store, claim, work).await {
+                Some(output) => store.finish_writeback(claim, job, state, output).await,
+                None => Ok(false),
+            }
+        } else {
+            let work = self.process_claim(Some(store), claim);
+            match run_with_lease(store, claim, work).await {
+                Some(outcome) => store.finish(claim, outcome).await,
+                None => Ok(false),
             }
         };
-        if let Some(outcome) = outcome {
-            let finished = match outcome {
-                Work::Collect(outcome) => store.finish(claim, outcome).await,
-                Work::Writeback(output) => {
-                    let (job, state) = claim.writeback.as_ref().expect("writeback claim");
-                    store.finish_writeback(claim, job, state, output).await
-                }
-            };
-            match finished {
-                Ok(true) => return,
-                Ok(false) => {}
-                Err(error) => {
-                    diagnostics::postgres_error("batch_commit_failed", &error);
-                }
-            }
+        match finished {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => diagnostics::postgres_error("batch_commit_failed", &error),
         }
         if let Err(error) = store.release_revoked(claim).await {
             diagnostics::postgres_error("batch_release_failed", &error);
         }
+    }
+
+    async fn prepare_claim_writeback(
+        &self,
+        store: &Store,
+        claim: &Claim,
+        job: &WritebackJob,
+        state: &WritebackState,
+    ) -> Option<PreparedWriteback> {
+        let result = match store.batch_row_result(claim.batch, claim.id).await {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                diagnostics::error("batch_writeback_snapshot_missing", json!({}));
+                return None;
+            }
+            Err(_) => {
+                diagnostics::warn("batch_writeback_snapshot_read_failed", json!({}));
+                return None;
+            }
+        };
+        let Some(settings) = self.output_settings() else {
+            diagnostics::error("batch_writeback_settings_missing", json!({}));
+            return None;
+        };
+        let paths = settings.media_paths();
+        let emby = self.emby_connection().ok();
+        Some(
+            prepare_writeback(
+                &self.client,
+                emby.as_deref(),
+                &paths,
+                job,
+                &result.record,
+                state,
+            )
+            .await,
+        )
     }
 
     pub(super) async fn process_claim(
@@ -175,7 +152,7 @@ impl Collector {
         } else {
             (claim.query.as_str(), None)
         };
-        let import = query.starts_with("emby:") || query.starts_with(super::EPISODE_QUERY_PREFIX);
+        let import = query.starts_with("emby:") || query.starts_with(EPISODE_QUERY_PREFIX);
         let emby = self.emby_settings().and_then(|settings| {
             if import {
                 settings.connection()
@@ -410,6 +387,29 @@ async fn mark_collecting(store: &Store, claim: &Claim, candidate: &CandidateChoi
         Err(error) => {
             diagnostics::postgres_error("batch_collecting_failed", &error);
             false
+        }
+    }
+}
+
+async fn run_with_lease<T>(
+    store: &Store,
+    claim: &Claim,
+    work: impl Future<Output = Option<T>>,
+) -> Option<T> {
+    tokio::pin!(work);
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(4));
+    heartbeat.tick().await;
+    loop {
+        tokio::select! {
+            outcome = &mut work => return outcome,
+            _ = heartbeat.tick() => match store.renew(claim).await {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(error) => {
+                    diagnostics::postgres_error("batch_lease_renew_failed", &error);
+                    return None;
+                }
+            },
         }
     }
 }

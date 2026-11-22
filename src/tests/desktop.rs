@@ -1,6 +1,14 @@
-use serde_json::json;
+use collect_metadata::{BatchAction, ErrorCode, MediaKind, MediaProvider, scan_folder_paths};
+use serde_json::{Value, json};
 
-use super::*;
+use super::{
+    *,
+    batches::{batch_files, batch_result, batch_rows, batch_view, choose_batch_candidate, control_batch, create_batch, list_batches, retry_batch_row},
+    emby::{emby_libraries, import_emby},
+    logs::desktop_log_directory,
+    metadata::{collect_media, history, history_languages, load_snapshot, lookup, search_media},
+    settings::{check_storage, configure_database, emby_settings, output_settings, save_emby, save_output_settings, save_tmdb, storage_configured, test_emby, test_tmdb, tmdb_status},
+};
 
 #[tokio::test]
 async fn desktop_commands_work_without_a_database_and_keep_preferences() {

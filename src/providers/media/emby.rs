@@ -1,10 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    env, fs, io,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use reqwest::{Client, Method, Response, Url, header::HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -16,17 +10,19 @@ use crate::{collect::Source, diagnostics, providers::field_map};
 
 #[cfg(feature = "web")]
 mod automatic;
+mod catalog;
+mod settings;
+
+pub use catalog::{
+    EmbyCredit, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview, EmbyWorkPreview,
+};
+pub use settings::{EmbyInput, EmbySettings, EmbySettingsView};
 
 const FIELDS: &str = concat!(
     "Path,Overview,People,ProviderIds,Genres,Studios,Tags,TagItems,Taglines,OriginalTitle,SortName,",
     "ProductionLocations,ProductionYear,CommunityRating,CriticRating,OfficialRating,",
     "CustomRating,MediaSources,MediaStreams,Chapters,ExternalUrls,HomePageUrl,RemoteTrailers"
 );
-const PREVIEW_FIELDS: &str = concat!(
-    "Overview,Genres,OriginalTitle,ProductionYear,CommunityRating,CriticRating,",
-    "OfficialRating,ProviderIds,Tags,TagItems"
-);
-const EPISODE_SUMMARY_FIELDS: &str = "PremiereDate,CommunityRating";
 // Emby omits these properties from /Items unless requested, even for a single ID.
 const EPISODE_DETAIL_FIELDS: &str = concat!(
     "PremiereDate,ParentId,DateCreated,DateModified,Settings,FileName,VideoCodec,AudioCodec,",
@@ -39,111 +35,10 @@ const EPISODE_DETAIL_FIELDS: &str = concat!(
 pub(crate) const EPISODE_QUERY_PREFIX: &str = "emby-episode:";
 const MAX_RESPONSE: usize = 12 * 1024 * 1024;
 
-#[derive(Deserialize, Serialize, Default)]
-pub struct EmbyInput {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default)]
-    server: String,
-    #[serde(default)]
-    api_key: String,
-}
-
-#[derive(Serialize)]
-pub struct EmbySettingsView {
-    enabled: bool,
-    server: String,
-    configured: bool,
-}
-
 #[derive(Serialize)]
 pub struct EmbyLibrary {
     pub(crate) id: String,
     pub(crate) name: String,
-}
-
-#[derive(Serialize)]
-pub struct EmbyWorkPreview {
-    pub(crate) id: String,
-    pub(crate) kind: MediaKind,
-    pub(crate) title: String,
-    year: Option<u16>,
-    original_title: Option<String>,
-    overview: Option<String>,
-    genres: Vec<String>,
-    rating: Option<f64>,
-    official_rating: Option<String>,
-    critic_rating: Option<f64>,
-    imdb_rating: Option<ImdbRating>,
-    tmdb_id: Option<String>,
-    bangumi_id: Option<String>,
-    tags: Vec<String>,
-    runtime_minutes: Option<u64>,
-    poster: Option<String>,
-    backdrop: Option<String>,
-    logo: Option<String>,
-    landscape: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct EmbyLibraryPreview {
-    #[serde(flatten)]
-    pub(crate) library: EmbyLibrary,
-    pub(crate) works: Vec<EmbyWorkPreview>,
-}
-
-#[derive(Serialize)]
-pub struct EmbySeriesPreview {
-    seasons: Vec<EmbySeasonPreview>,
-    partial: bool,
-}
-
-#[derive(Default, Serialize)]
-struct EmbySeasonPreview {
-    number: Option<u64>,
-    title: Option<String>,
-    episodes: Vec<EmbyEpisodePreview>,
-}
-
-#[derive(Serialize)]
-struct EmbyEpisodePreview {
-    id: String,
-    number: Option<u64>,
-    last_number: Option<u64>,
-    title: String,
-    original_title: Option<String>,
-    overview: Option<String>,
-    date: Option<String>,
-    premiere_at: Option<String>,
-    runtime_minutes: Option<u64>,
-    rating: Option<f64>,
-    image: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct EmbyCredit {
-    id: Option<String>,
-    name: String,
-    role: &'static str,
-    detail: Option<String>,
-    portrait: Option<String>,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbyPreviewImage {
-    Poster,
-    Backdrop,
-    Logo,
-    Landscape,
-    Episode,
-    Portrait,
-}
-
-pub struct EmbySettings {
-    file: PathBuf,
-    state: Mutex<EmbyInput>,
-    imdb_ratings: Arc<HashMap<String, ImdbRating>>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -158,117 +53,13 @@ pub(crate) struct Emby {
     imdb_ratings: Arc<HashMap<String, ImdbRating>>,
 }
 
-impl EmbySettings {
-    pub fn load(file: PathBuf) -> Result<Self, String> {
-        let state = match fs::read_to_string(&file) {
-            Ok(value) => serde_json::from_str(&value).map_err(|_| "Emby 设置格式无效。")?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let server = env::var("EMBY_URL").unwrap_or_default();
-                let api_key = env::var("EMBY_API_KEY").unwrap_or_default();
-                EmbyInput {
-                    enabled: !server.is_empty() && !api_key.is_empty(),
-                    server,
-                    api_key,
-                }
-            }
-            Err(_) => return Err("无法读取 Emby 设置。".into()),
-        };
-        let imdb_ratings = match fs::read_to_string(file.with_file_name("imdb-ratings.json")) {
-            Ok(value) => serde_json::from_str(&value).map_err(|_| "IMDb 评分资料格式无效。")?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => HashMap::new(),
-            Err(_) => return Err("无法读取 IMDb 评分资料。".into()),
-        };
-        Ok(Self {
-            file,
-            state: Mutex::new(state),
-            imdb_ratings: Arc::new(imdb_ratings),
-        })
-    }
-
-    pub fn view(&self) -> EmbySettingsView {
-        let config = self.state.lock().expect("Emby settings lock");
-        view(&config)
-    }
-
-    fn resolve(&self, mut input: EmbyInput) -> EmbyInput {
-        input.server = input.server.trim().trim_end_matches('/').to_owned();
-        input.api_key = input.api_key.trim().to_owned();
-        let saved = self.state.lock().expect("Emby settings lock");
-        if input.api_key.is_empty() && input.server == saved.server {
-            input.api_key.clone_from(&saved.api_key);
-        }
-        input
-    }
-
-    pub async fn test(&self, client: &Client, input: EmbyInput) -> Result<(), String> {
-        let input = self.resolve(input);
-        Emby::new(&input, &self.imdb_ratings)?.validate(client).await
-    }
-
-    pub async fn save(
-        &self,
-        client: &Client,
-        input: EmbyInput,
-    ) -> Result<EmbySettingsView, String> {
-        let input = self.resolve(input);
-        if input.enabled {
-            Emby::new(&input, &self.imdb_ratings)?.validate(client).await?;
-        }
-        let directory = self.file.parent().ok_or("Emby 配置目录无效。")?;
-        let mut state = self.state.lock().expect("Emby settings lock");
-        let write = || -> io::Result<()> {
-            fs::create_dir_all(directory)?;
-            let mut file = tempfile::NamedTempFile::new_in(directory)?;
-            serde_json::to_writer_pretty(&mut file, &input)?;
-            file.as_file().sync_all()?;
-            file.persist(&self.file)?;
-            Ok(())
-        };
-        write().map_err(|_| "无法保存 Emby 设置。")?;
-        *state = input;
-        Ok(view(&state))
-    }
-
-    pub(crate) fn connection(&self) -> Option<Arc<Emby>> {
-        let input = self.state.lock().expect("Emby settings lock");
-        Emby::new(&input, &self.imdb_ratings).ok().map(Arc::new)
-    }
-
-    #[cfg(feature = "web")]
-    pub(crate) fn automatic_connection(&self, url: Option<&str>) -> Result<Arc<Emby>, String> {
-        let input = self.state.lock().expect("Emby settings lock");
-        if let Some(server) = url {
-            let local = EmbyInput { server: server.to_owned(), api_key: input.api_key.clone(), enabled: true };
-            Emby::new(&local, &self.imdb_ratings).map(Arc::new)
-        } else {
-            Emby::new(&input, &self.imdb_ratings).map(Arc::new)
-        }
-    }
-
-    pub(crate) fn active(&self) -> Option<Arc<Emby>> {
-        let input = self.state.lock().expect("Emby settings lock");
-        input
-            .enabled
-            .then(|| Emby::new(&input, &self.imdb_ratings).ok())
-            .flatten()
-            .map(Arc::new)
-    }
-}
-
-fn view(input: &EmbyInput) -> EmbySettingsView {
-    EmbySettingsView {
-        enabled: input.enabled,
-        server: input.server.clone(),
-        configured: !input.api_key.is_empty(),
-    }
-}
-
 impl Emby {
     fn new(
-        input: &EmbyInput,
+        server: &str,
+        api_key: &str,
         imdb_ratings: &Arc<HashMap<String, ImdbRating>>,
     ) -> Result<Self, String> {
-        let mut base = Url::parse(&input.server).map_err(|_| "请输入有效的 Emby 服务地址。")?;
+        let mut base = Url::parse(server).map_err(|_| "请输入有效的 Emby 服务地址。")?;
         if !matches!(base.scheme(), "http" | "https")
             || base.host_str().is_none()
             || !base.username().is_empty()
@@ -285,11 +76,11 @@ impl Emby {
             format!("{original}/")
         };
         base.set_path(&path);
-        if input.api_key.is_empty() || input.api_key.len() > 512 {
+        if api_key.is_empty() || api_key.len() > 512 {
             return Err("请填写 Emby API 密钥。".into());
         }
         let mut authorization =
-            HeaderValue::from_str(&input.api_key).map_err(|_| "Emby API 密钥格式无效。")?;
+            HeaderValue::from_str(api_key).map_err(|_| "Emby API 密钥格式无效。")?;
         authorization.set_sensitive(true);
         Ok(Self {
             base,
@@ -343,10 +134,7 @@ impl Emby {
         if !response.status().is_success() || response.url() != &url {
             let status = response.status();
             if status != reqwest::StatusCode::NOT_FOUND {
-                diagnostics::warn(
-                    "emby_request_failed",
-                    json!({"status": status.as_u16()}),
-                );
+                diagnostics::warn("emby_request_failed", json!({"status": status.as_u16()}));
             }
             let hint = match status.as_u16() {
                 401 | 403 => "请在「家庭 Emby」中测试 API 密钥和权限。",
@@ -452,84 +240,13 @@ impl Emby {
                     "Default"
                 },
             )
-            .append_pair("ReplaceAllImages", if replace_images { "true" } else { "false" });
+            .append_pair(
+                "ReplaceAllImages",
+                if replace_images { "true" } else { "false" },
+            );
         self.timed_response(client, Method::POST, url, Duration::from_secs(10))
             .await?;
         Ok(())
-    }
-
-    pub(crate) async fn library_entries(
-        &self,
-        client: &Client,
-        id: &str,
-    ) -> Result<Vec<EmbyWorkPreview>, String> {
-        let mut result = Vec::new();
-        let mut offset = 0;
-        const PAGE_SIZE: usize = 100;
-        loop {
-            let page = self
-                .items(
-                    client,
-                    &[
-                        ("ParentId", id),
-                        ("Recursive", "true"),
-                        ("IncludeItemTypes", "Movie,Series,Video"),
-                        ("SortBy", "SortName"),
-                        ("Fields", PREVIEW_FIELDS),
-                        ("EnableImages", "true"),
-                        ("EnableImageTypes", "Primary,Backdrop,Logo,Thumb"),
-                        ("ImageTypeLimit", "1"),
-                        ("Limit", "100"),
-                        ("StartIndex", &offset.to_string()),
-                    ],
-                )
-                .await?;
-            let items = page["Items"]
-                .as_array()
-                .ok_or("Emby 返回的媒体库格式无效。")?;
-            result.extend(items.iter().filter_map(|item| {
-                let id = valid_id(&item["Id"])?;
-                let kind = work_kind(item)?;
-                let title = item["Name"]
-                    .as_str()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or(id);
-                Some(EmbyWorkPreview {
-                    id: id.to_owned(),
-                    kind,
-                    title: title.to_owned(),
-                    year: item["ProductionYear"]
-                        .as_u64()
-                        .and_then(|year| year.try_into().ok()),
-                    original_title: nonempty_text(&item["OriginalTitle"]),
-                    overview: nonempty_text(&item["Overview"]),
-                    genres: list(&item["Genres"]).filter_map(nonempty_text).collect(),
-                    rating: item["CommunityRating"].as_f64(),
-                    official_rating: nonempty_text(&item["OfficialRating"]),
-                    critic_rating: item["CriticRating"].as_f64(),
-                    imdb_rating: self.imdb_rating(item),
-                    tmdb_id: nonempty_text(&item["ProviderIds"]["Tmdb"]),
-                    bangumi_id: nonempty_text(&item["ProviderIds"]["Bangumi"]),
-                    tags: item_tags(item),
-                    runtime_minutes: runtime(item),
-                    poster: nonempty_text(&item["ImageTags"]["Primary"]),
-                    backdrop: item["BackdropImageTags"]
-                        .as_array()
-                        .and_then(|tags| tags.first())
-                        .and_then(nonempty_text),
-                    logo: nonempty_text(&item["ImageTags"]["Logo"]),
-                    landscape: nonempty_text(&item["ImageTags"]["Thumb"]),
-                })
-            }));
-            offset += items.len();
-            let last_page = page["TotalRecordCount"]
-                .as_u64()
-                .map_or(items.len() < PAGE_SIZE, |count| offset as u64 >= count);
-            if items.is_empty() || last_page {
-                break;
-            }
-        }
-        Ok(result)
     }
 
     async fn validate(&self, client: &Client) -> Result<(), String> {
@@ -555,19 +272,28 @@ impl Emby {
             MediaKind::Av => "Movie",
         };
         if let Some(id) = query.strip_prefix("emby:") {
-            return self.details(client, id, item_type).await.map(|source| (id.to_owned(), source));
+            return self
+                .details(client, id, item_type)
+                .await
+                .map(|source| (id.to_owned(), source));
         }
         if let Some(id) = query.strip_prefix(EPISODE_QUERY_PREFIX) {
             if kind != MediaKind::Series {
                 return None;
             }
-            return self.details(client, id, "Episode").await.map(|source| (id.to_owned(), source));
+            return self
+                .details(client, id, "Episode")
+                .await
+                .map(|source| (id.to_owned(), source));
         }
         let mut params = vec![
             ("Recursive", "true"),
             ("IncludeItemTypes", item_type),
             ("Limit", "60"),
-            ("Fields", "Path,ProviderIds,OriginalTitle,SortName,ProductionYear"),
+            (
+                "Fields",
+                "Path,ProviderIds,OriginalTitle,SortName,ProductionYear",
+            ),
         ];
         let explicit = super::tmdb_id_query(query)
             .map(|id| ("Tmdb", id))
@@ -603,10 +329,17 @@ impl Emby {
             .map(|source| (id, source))
     }
 
-    pub(crate) async fn scrape_title(&self, client: &Client, id: &str, item_type: &str) -> Result<String, String> {
+    pub(crate) async fn scrape_title(
+        &self,
+        client: &Client,
+        id: &str,
+        item_type: &str,
+    ) -> Result<String, String> {
         let item = self.item(client, id, item_type, "").await?;
         let title = nonempty_text(&item["Name"]).ok_or("Emby 条目缺少标题。")?;
-        if item_type == "Episode" && let Some(series) = nonempty_text(&item["SeriesName"]) {
+        if item_type == "Episode"
+            && let Some(series) = nonempty_text(&item["SeriesName"])
+        {
             return Ok(format!("{series} · {title}"));
         }
         Ok(title)
@@ -619,7 +352,12 @@ impl Emby {
         provider: &str,
     ) -> Option<String> {
         let series = self
-            .item(client, valid_id(&episode["SeriesId"])?, "Series", "ProviderIds")
+            .item(
+                client,
+                valid_id(&episode["SeriesId"])?,
+                "Series",
+                "ProviderIds",
+            )
             .await
             .ok()?;
         nonempty_text(&series["ProviderIds"][provider])
@@ -635,7 +373,9 @@ impl Emby {
         if !is_item_id(id) {
             return Err("Emby 条目 ID 无效。".into());
         }
-        let mut page = self.items(client, &[("Ids", id), ("Fields", fields)]).await?;
+        let mut page = self
+            .items(client, &[("Ids", id), ("Fields", fields)])
+            .await?;
         page["Items"]
             .as_array_mut()
             .and_then(|items| items.first_mut())
@@ -653,13 +393,27 @@ impl Emby {
 
     #[cfg(feature = "web")]
     pub(crate) async fn automatic_item(
-        &self, client: &Client, id: &str, item_type: &str,
+        &self,
+        client: &Client,
+        id: &str,
+        item_type: &str,
     ) -> Result<Source, String> {
-        let requested = format!("{FIELDS},PremiereDate,Settings,LocationType,ParentId,DateCreated,DateLastSaved");
+        let requested = format!(
+            "{FIELDS},PremiereDate,Settings,LocationType,ParentId,DateCreated,DateLastSaved"
+        );
         let item = self.item(client, id, item_type, &requested).await?;
-        let fields = if item_type == "Episode" { episode_fields(&item) } else { fields(&item, &[]) };
+        let fields = if item_type == "Episode" {
+            episode_fields(&item)
+        } else {
+            fields(&item, &[])
+        };
         let source_url = self.endpoint(&format!("web/index.html#!/item?id={id}"));
-        Ok(Source::found("Emby", &source_url, fields, json!({"item":item})))
+        Ok(Source::found(
+            "Emby",
+            &source_url,
+            fields,
+            json!({"item":item}),
+        ))
     }
 
     async fn details(&self, client: &Client, id: &str, item_type: &str) -> Option<Source> {
@@ -674,7 +428,9 @@ impl Emby {
         };
         nonempty_text(&item["Name"])?;
         let (children, complete) = if item_type == "Series" {
-            self.series_children(client, id, &format!("{FIELDS},PremiereDate")).await.unwrap_or_default()
+            self.series_children(client, id, &format!("{FIELDS},PremiereDate"))
+                .await
+                .unwrap_or_default()
         } else {
             (Vec::new(), true)
         };
@@ -684,7 +440,10 @@ impl Emby {
             fields(&item, &children)
         };
         if let Some(rating) = self.imdb_rating(&item) {
-            details.insert("imdb_rating", json!({"value":rating.value,"scale":10,"count":rating.count}));
+            details.insert(
+                "imdb_rating",
+                json!({"value":rating.value,"scale":10,"count":rating.count}),
+            );
         }
         let source_url = self.endpoint(&format!("web/index.html#!/item?id={id}"));
         let mut source = Source::found(
@@ -748,144 +507,6 @@ impl Emby {
                 return Ok((children, last_page));
             }
         }
-    }
-
-    pub(crate) async fn missing_episode_overviews(
-        &self,
-        client: &Client,
-        library: &str,
-    ) -> Result<HashMap<String, Vec<String>>, String> {
-        const PAGE_SIZE: usize = 200;
-        let mut missing = HashMap::<String, Vec<String>>::new();
-        let mut seen = HashSet::new();
-        let mut offset = 0;
-        loop {
-            let page = self
-                .items(
-                    client,
-                    &[
-                        ("ParentId", library),
-                        ("Recursive", "true"),
-                        ("IncludeItemTypes", "Episode"),
-                        ("HasOverview", "false"),
-                        ("IsMissing", "false"),
-                        ("EnableImages", "false"),
-                        ("Fields", "Overview,LocationType"),
-                        ("Limit", &PAGE_SIZE.to_string()),
-                        ("StartIndex", &offset.to_string()),
-                    ],
-                )
-                .await?;
-            let items = page["Items"]
-                .as_array()
-                .ok_or("Emby 返回的分集格式无效。")?;
-            for item in items {
-                if item["Type"] == "Episode"
-                    && item["LocationType"] != "Virtual"
-                    && item["Overview"].as_str().is_none_or(|text| text.trim().is_empty())
-                    && let (Some(series), Some(id)) = (valid_id(&item["SeriesId"]), valid_id(&item["Id"]))
-                    && seen.insert(id.to_owned())
-                {
-                    missing.entry(series.to_owned()).or_default().push(id.to_owned());
-                }
-            }
-            offset += items.len();
-            let last_page = page["TotalRecordCount"].as_u64()
-                .map_or(items.len() < PAGE_SIZE, |total| offset as u64 >= total);
-            if last_page {
-                return Ok(missing);
-            }
-            if items.is_empty() {
-                return Err("Emby 未返回全部缺少简介的分集。".into());
-            }
-        }
-    }
-
-    pub(crate) async fn series_preview(
-        &self,
-        client: &Client,
-        id: &str,
-    ) -> Result<EmbySeriesPreview, String> {
-        if !is_item_id(id) {
-            return Err("Emby 剧集 ID 无效。".into());
-        }
-        let (children, complete) = self
-            .series_children(client, id, &format!("Overview,OriginalTitle,{EPISODE_SUMMARY_FIELDS}"))
-            .await?;
-        let mut seasons = HashMap::<Option<u64>, EmbySeasonPreview>::new();
-        let mut season_numbers = HashMap::new();
-        for item in children.iter().filter(|item| item["Type"] == "Season") {
-            let Some(number) = item["IndexNumber"].as_u64() else {
-                continue;
-            };
-            if let Some(id) = valid_id(&item["Id"]) {
-                season_numbers.insert(id, number);
-            }
-            seasons.insert(
-                Some(number),
-                EmbySeasonPreview {
-                    number: Some(number),
-                    title: nonempty_text(&item["Name"]),
-                    episodes: Vec::new(),
-                },
-            );
-        }
-        for item in children.iter().filter(|item| item["Type"] == "Episode") {
-            let Some(id) = valid_id(&item["Id"]) else {
-                continue;
-            };
-            let season = item["ParentIndexNumber"]
-                .as_u64()
-                .or_else(|| season_numbers.get(item["SeasonId"].as_str()?).copied());
-            let group = seasons.entry(season).or_insert_with(|| EmbySeasonPreview {
-                number: season,
-                ..Default::default()
-            });
-            group.episodes.push(EmbyEpisodePreview {
-                id: id.to_owned(),
-                number: item["IndexNumber"].as_u64(),
-                last_number: item["IndexNumberEnd"].as_u64(),
-                title: nonempty_text(&item["Name"]).unwrap_or_else(|| "未命名分集".into()),
-                original_title: nonempty_text(&item["OriginalTitle"]),
-                overview: nonempty_text(&item["Overview"]),
-                date: date(&item["PremiereDate"]).map(str::to_owned),
-                premiere_at: nonempty_text(&item["PremiereDate"]),
-                runtime_minutes: runtime(item),
-                rating: item["CommunityRating"].as_f64(),
-                image: nonempty_text(&item["ImageTags"]["Primary"]),
-            });
-        }
-        let mut seasons = seasons.into_values().collect::<Vec<_>>();
-        seasons.sort_by_key(|season| season.number.unwrap_or(u64::MAX));
-        for season in &mut seasons {
-            season
-                .episodes
-                .sort_by_key(|episode| episode.number.unwrap_or(u64::MAX));
-        }
-        Ok(EmbySeriesPreview {
-            seasons,
-            partial: !complete,
-        })
-    }
-
-    pub(crate) async fn credits(&self, client: &Client, id: &str) -> Result<Vec<EmbyCredit>, String> {
-        if !is_item_id(id) {
-            return Err("Emby 条目 ID 无效。".into());
-        }
-        let result = self.items(client, &[("Ids", id), ("Fields", "People,Genres")]).await?;
-        let item = list(&result["Items"]).find(|item| valid_id(&item["Id"]) == Some(id)
-            && matches!(item["Type"].as_str(), Some("Movie" | "Series" | "Episode")))
-            .ok_or("Emby 未返回该作品的资料。")?;
-        let mut seen = std::collections::HashSet::new();
-        Ok(list(&item["People"]).filter_map(|person| {
-            let name = nonempty_text(&person["Name"])?;
-            let id = valid_id(&person["Id"]).map(str::to_owned);
-            let role = credit_role(item, person);
-            let detail = nonempty_text(&person["Role"]);
-            let portrait = id.as_ref().and_then(|_| nonempty_text(&person["PrimaryImageTag"])
-                .or_else(|| nonempty_text(&person["ImageTags"]["Primary"])));
-            seen.insert((id.clone(), name.clone(), role, detail.clone())).then_some(EmbyCredit {id, name, role, detail, portrait})
-        }).take(200).collect())
     }
 
     pub(crate) fn image_url(&self, id: &Value, image_type: &str) -> Option<Url> {
@@ -982,32 +603,6 @@ impl Emby {
             .ok()
     }
 
-    pub(crate) async fn preview_image(
-        &self,
-        client: &Client,
-        id: &str,
-        image: EmbyPreviewImage,
-    ) -> Option<(Vec<u8>, &'static str)> {
-        if !is_item_id(id) {
-            return None;
-        }
-        let (kind, width, height) = match image {
-            EmbyPreviewImage::Poster => ("Primary", "420", "630"),
-            EmbyPreviewImage::Backdrop => ("Backdrop", "1280", "720"),
-            EmbyPreviewImage::Logo => ("Logo", "800", "400"),
-            EmbyPreviewImage::Landscape => ("Thumb", "1280", "720"),
-            EmbyPreviewImage::Episode => ("Primary", "640", "360"),
-            EmbyPreviewImage::Portrait => ("Primary", "256", "384"),
-        };
-        let mut url = self.endpoint(&format!("Items/{id}/Images/{kind}"));
-        url.query_pairs_mut()
-            .append_pair("MaxWidth", width)
-            .append_pair("MaxHeight", height)
-            .append_pair("Quality", "85")
-            .append_pair("EnableImageEnhancers", "false");
-        crate::output::image_bytes(self.image_response(client, &url).await?).await
-    }
-
     pub(crate) async fn image_response(&self, client: &Client, url: &Url) -> Option<Response> {
         self.media_response(client, url, Duration::from_secs(10))
             .await
@@ -1050,7 +645,9 @@ fn nonempty_text(value: &Value) -> Option<String> {
 
 fn item_tags(item: &Value) -> Vec<String> {
     if item["TagItems"].is_array() {
-        return list(&item["TagItems"]).filter_map(|tag| nonempty_text(&tag["Name"])).collect();
+        return list(&item["TagItems"])
+            .filter_map(|tag| nonempty_text(&tag["Name"]))
+            .collect();
     }
     list(&item["Tags"]).filter_map(nonempty_text).collect()
 }
@@ -1093,18 +690,38 @@ fn file_name(value: &Value) -> Option<&str> {
 }
 
 pub(crate) fn credit_role(item: &Value, person: &Value) -> &'static str {
-    let detail = person["Role"].as_str().unwrap_or_default().to_ascii_lowercase();
-    let voice = ["(voice", "配音", "声优", "聲優", "声優"].iter().any(|part| detail.contains(part));
-    let animation = || list(&item["Genres"]).filter_map(Value::as_str).any(|genre| {
-        genre.eq_ignore_ascii_case("animation") || matches!(genre, "动画" | "動畫" | "动漫" | "アニメ")
-    });
-    match person["Type"].as_str().unwrap_or_default().to_ascii_lowercase().as_str() {
+    let detail = person["Role"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let voice = ["(voice", "配音", "声优", "聲優", "声優"]
+        .iter()
+        .any(|part| detail.contains(part));
+    let animation = || {
+        list(&item["Genres"])
+            .filter_map(Value::as_str)
+            .any(|genre| {
+                genre.eq_ignore_ascii_case("animation")
+                    || matches!(genre, "动画" | "動畫" | "动漫" | "アニメ")
+            })
+    };
+    match person["Type"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "voiceactor" | "voice" | "voice actor" => "voice",
         "actor" | "gueststar" if voice || animation() => "voice",
         "actor" | "gueststar" => "actor",
-        "director" | "series director" | "co-director" | "animation director"
+        "director"
+        | "series director"
+        | "co-director"
+        | "animation director"
         | "chief animation director" => "director",
-        "writer" | "screenplay" | "series composition" | "teleplay" | "screenwriter" | "story" => "writer",
+        "writer" | "screenplay" | "series composition" | "teleplay" | "screenwriter" | "story" => {
+            "writer"
+        }
         "producer" => "producer",
         _ => "crew",
     }
@@ -1169,7 +786,10 @@ fn fields(item: &Value, children: &[Value]) -> crate::collect::Fields {
         ("title_original", item["OriginalTitle"].clone()),
         ("sort_title", item["SortName"].clone()),
         ("description", item["Overview"].clone()),
-        ("tagline", list(&item["Taglines"]).next().cloned().unwrap_or_default()),
+        (
+            "tagline",
+            list(&item["Taglines"]).next().cloned().unwrap_or_default(),
+        ),
         ("release_date", json!(date(&item["PremiereDate"]))),
         ("year", item["ProductionYear"].clone()),
         ("official_rating", item["OfficialRating"].clone()),
@@ -1186,8 +806,18 @@ fn fields(item: &Value, children: &[Value]) -> crate::collect::Fields {
         ("genres", item["Genres"].clone()),
         ("tags", json!(item_tags(item))),
         ("resolution", json!(resolution)),
-        ("has_chinese_subtitles", json!(has_chinese_subtitles.then_some(true))),
-        ("studio", json!(list(&item["Studios"]).filter_map(|studio| studio["Name"].as_str()).collect::<Vec<_>>())),
+        (
+            "has_chinese_subtitles",
+            json!(has_chinese_subtitles.then_some(true)),
+        ),
+        (
+            "studio",
+            json!(
+                list(&item["Studios"])
+                    .filter_map(|studio| studio["Name"].as_str())
+                    .collect::<Vec<_>>()
+            ),
+        ),
         ("countries", item["ProductionLocations"].clone()),
         ("cast", json!(people("actor"))),
         ("voice_actors", json!(people("voice"))),
@@ -1212,7 +842,13 @@ fn fields(item: &Value, children: &[Value]) -> crate::collect::Fields {
         ("tvdb_id", item["ProviderIds"]["Tvdb"].clone()),
         ("bangumi_id", item["ProviderIds"]["Bangumi"].clone()),
         ("official_url", item["HomePageUrl"].clone()),
-        ("trailer_url", videos.first().map(|video| video["url"].clone()).unwrap_or_default()),
+        (
+            "trailer_url",
+            videos
+                .first()
+                .map(|video| video["url"].clone())
+                .unwrap_or_default(),
+        ),
         ("videos", json!(videos)),
         ("file_name", json!(file_name(&item["Path"]))),
     ])

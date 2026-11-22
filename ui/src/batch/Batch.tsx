@@ -1,187 +1,29 @@
-import { WritebackDialog } from "./WritebackDialog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent } from "react";
-import { chooseBatchCandidate, chooseMediaFolder, controlBatch, correctBatchMatch, createAiBatch, createBatch, createFolderBatch, getAiStatus, getBatchFiles, getBatchResult, getBatchView, getEmbyCatalog, importEmbyCatalog, importEmbyItem, importEmbyLibrary, importEmbySelection, isDesktop, listBatches, overwriteEmby, previewMountedFolder, refreshEmbyMetadata, retryBatchRow, scrapeFolderWork } from "../api";
-import { languageText, PosterArt } from "../Catalog";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import {
+  chooseBatchCandidate, chooseMediaFolder, controlBatch, correctBatchMatch, createAiBatch, createBatch,
+  createFolderBatch, getAiStatus, getBatchResult, getEmbyCatalog, importEmbyCatalog, importEmbyItem,
+  importEmbyLibrary, importEmbySelection, isDesktop, overwriteEmby, previewMountedFolder,
+  refreshEmbyMetadata, retryBatchRow,
+} from "../api";
+import { PosterArt } from "../Catalog";
 import { DetailDialog } from "../DetailDialog";
 import { formatDate } from "../Movie";
-import { errorText, mediaLabels, providerLabels } from "../types";
-import type { Candidate, EmbyLibraryPreview, EmbyScrapeTarget, EmbyWorkPreview, LookupResponse, MediaProvider, MediaType, StorageStatus } from "../types";
-import { EmbyCatalog } from "./EmbyCatalog";
-import { EmbyScrapeDialog, type EmbyScrapeChoice } from "./EmbyScrapeDialog";
-import { MatchCorrection } from "./MatchCorrection";
+import { errorText, mediaLabels } from "../types";
+import type {
+  Candidate, EmbyLibraryPreview, EmbyScrapeTarget, EmbyWorkPreview, LookupResponse, MediaProvider,
+  MediaType, StorageStatus,
+} from "../types";
+
+import { BatchRowCard } from "./BatchRowCard";
+import { LocalFolderScrape } from "./LocalFolderScrape";
 import { MountedFolderPicker } from "./MountedFolderPicker";
+import { WritebackDialog } from "./WritebackDialog";
+import { batchLabels } from "./batchLabels";
+import { EmbyCatalog } from "./emby/Catalog";
+import { EmbyScrapeDialog, type EmbyScrapeChoice } from "./emby/ScrapeDialog";
 import { AV_PREFIXES, MAX_FOLDER_FILES, MAX_ITEMS, parseBatch, terminal } from "./engine";
-import type { BatchAction, BatchRow, BatchStage, BatchStatus, BatchSummary, BatchView, FolderBatchResult, FolderSelection, FolderWorkResult } from "./engine";
-
-const labels: Record<BatchStage, string> = {
-  queued: "排队中",
-  searching: "搜索中",
-  collecting: "采集中",
-  choice: "待选择",
-  success: "已采集",
-  partial: "部分完成",
-  not_found: "未找到",
-  failed: "失败",
-  paused: "已暂停",
-  cancelled: "已取消",
-};
-
-const batchLabels: Record<BatchStatus, string> = {
-  running: "进行中",
-  paused: "已暂停",
-  cancelled: "已取消",
-};
-
-function CandidateChoice({ candidates, busy, onChoose }: {
-  candidates: Candidate[];
-  busy: boolean;
-  onChoose: (candidate: Candidate) => void;
-}) {
-  const [selected, setSelected] = useState("");
-  const candidate = selected ? candidates[Number(selected)] : undefined;
-  return (
-    <>
-      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
-        <label className="filter">
-          候选作品
-          <select className="field" value={selected} onChange={(event) => setSelected(event.target.value)}>
-            <option value="">请选择作品</option>
-            {candidates.map((item, index) => (
-              <option value={index} key={item.provider + item.id}>
-                {[item.title, item.year, languageText(item.original_languages), providerLabels[item.provider]].filter(Boolean).join(" · ")}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button className="secondary" type="button" disabled={!candidate || busy}
-          onClick={() => { if (candidate) onChoose(candidate); }}>采集所选作品</button>
-      </div>
-    </>
-  );
-}
-
-function LinkedFiles({ batch, row }: { batch: number; row: BatchRow }) {
-  const [files, setFiles] = useState<string[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [limit, setLimit] = useState(100);
-
-  async function load() {
-    if (files || loading) return;
-    setError(null);
-    setLoading(true);
-    try {
-      setFiles(await getBatchFiles(batch, row.id));
-    } catch (error) {
-      setError(errorText(error));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return <details className="min-w-0 text-sm text-muted [&_ul]:my-2 [&_ul]:list-disc [&_ul]:ps-5 [&_ul]:font-mono [&_ul]:text-xs [overflow-wrap:anywhere]" onToggle={(event) => {
-    if (event.currentTarget.open) void load();
-  }}>
-    <summary>{row.file_count} 个关联文件</summary>
-    {loading && <p role="status">正在读取文件列表…</p>}
-    {error && <p className="batch-error" role="alert">{error}</p>}
-    {files && <ul>{files.slice(0, limit).map((file) => <li key={file}>{file}</li>)}</ul>}
-    {files && files.length > limit && <button className="secondary" type="button"
-      onClick={() => setLimit((value) => value + 100)}>显示更多文件</button>}
-  </details>;
-}
-
-function LocalFolderScrape({ folder, busy, setBusy }: {
-  folder: FolderSelection;
-  busy: boolean;
-  setBusy: (busy: boolean) => void;
-}) {
-  const [run, setRun] = useState<number>();
-  const [results, setResults] = useState<Record<number, FolderWorkResult>>({});
-  const [current, setCurrent] = useState<number>();
-  const [opened, setOpened] = useState<{ response: LookupResponse; opener: HTMLButtonElement }>();
-  const works = folder.preview.works;
-
-  async function collect(batch: number, index: number, candidate: Candidate | null) {
-    const { source_files } = works[index];
-    setCurrent(index);
-    try {
-      const result = await scrapeFolderWork(batch, index + 1, source_files ?? [],
-        candidate && { provider: candidate.provider, id: candidate.id });
-      setResults((previous) => ({ ...previous, [index]: result }));
-    } catch (error) {
-      setResults((previous) => ({ ...previous, [index]: {
-        stage: "failed", message: errorText(error), candidates: null, result: null, output: null,
-      } }));
-    } finally {
-      setCurrent(undefined);
-    }
-  }
-
-  async function start() {
-    if (busy) return;
-    setBusy(true);
-    const batch = -(Date.now() * 1000 + Math.floor(Math.random() * 1000));
-    setRun(batch);
-    setResults({});
-    try {
-      for (const index of works.keys()) await collect(batch, index, null);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function choose(index: number, candidate: Candidate) {
-    if (busy || run === undefined) return;
-    setBusy(true);
-    try {
-      await collect(run, index, candidate);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return <section className="mt-5 min-w-0" aria-labelledby="local-folder-title">
-    <div className="section-heading">
-      <h2 id="local-folder-title">本地文件夹刮削</h2>
-      <button type="button" className="primary" disabled={busy || !works.length}
-        onClick={() => void start()}>{busy ? "正在刮削…" : run ? "重新刮削" : "开始刮削元数据"}</button>
-    </div>
-    <p className="muted" role="status">{run
-      ? `已处理 ${Object.keys(results).length} / ${works.length} 部作品`
-      : `识别到 ${works.length} 部作品，关联 ${folder.preview.files} 个文件。`}</p>
-    {!works.length && <p className="catalog-empty">未识别到可刮削的作品。请更换文件夹。</p>}
-    <ul className="mt-3 grid gap-2" aria-label="待刮削作品">
-      {works.map((work, index) => {
-        const row = results[index];
-        const response = row?.result;
-        return <li className="panel min-w-0 space-y-2 [overflow-wrap:anywhere]" key={work.kind + ":" + work.query}>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <strong>{work.query}</strong>
-            <span className="muted">{mediaLabels[work.kind]} · {work.file_count} 个文件</span>
-            {current === index ? <span>正在刮削…</span> : row && <span>{labels[row.stage]}</span>}
-            {response && <button type="button" className="secondary"
-              onClick={(event) => setOpened({ response, opener: event.currentTarget })}>查看结果</button>}
-          </div>
-          {row?.message && <p className={row.stage === "failed" ? "batch-error" : "muted"}>
-            {row.stage === "failed" || row.stage === "not_found"
-              ? errorText({ error: row.message, diagnostic_id: row.diagnostic_id },
-                row.stage === "not_found" ? "MEDIA_NOT_FOUND" : "FOLDER_SCRAPE_FAILED")
-              : row.message}
-          </p>}
-          {row?.candidates?.length ? <CandidateChoice candidates={row.candidates} busy={busy}
-            onChoose={(candidate) => void choose(index, candidate)} /> : null}
-          {row?.output?.directory && <p>已写出 {row.output.written} 项资料 · <code>{row.output.directory}</code></p>}
-          {row?.output?.message && <p className="batch-error">
-            {errorText({ error: row.output.message, diagnostic_id: row.diagnostic_id }, "OUTPUT_FAILED")}
-          </p>}
-        </li>;
-      })}
-    </ul>
-    {opened && <DetailDialog {...opened} closeLabel="关闭本地刮削结果" onDismiss={() => setOpened(undefined)} />}
-  </section>;
-}
+import type { BatchAction, BatchRow, FolderBatchResult, FolderSelection } from "./engine";
+import { useBatchQueue } from "./useBatchQueue";
 
 export function Batch({ active, storage, folderSelection, setFolderSelection, onConfigure, onConfigureEmby, onNotice, onError }: {
   active: boolean;
@@ -195,14 +37,8 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
 }) {
   const [input, setInput] = useState("");
   const [kind, setKind] = useState<MediaType>("movie");
-  const [summaries, setSummaries] = useState<BatchSummary[]>([]);
-  const [listLoaded, setListLoaded] = useState(false);
-  const [older, setOlder] = useState(false);
-  const [selected, setSelected] = useState<number | null>(null);
-  const [batch, setBatch] = useState<{ id: number; view: BatchView } | null>(null);
   const [action, setAction] = useState<BatchAction | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
-  const [refresh, setRefresh] = useState(0);
   const [opened, setOpened] = useState<{ id: number; response: LookupResponse; opener: HTMLButtonElement } | null>(null);
   const [aiConfigured, setAiConfigured] = useState(false);
   const [aiStatusError, setAiStatusError] = useState<string | null>(null);
@@ -219,21 +55,9 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
   const [embyRefresh, setEmbyRefresh] = useState(0);
   const [allLibrariesOpener, setAllLibrariesOpener] = useState<HTMLButtonElement>();
   const [error, setError] = useState<string | null>(null);
+  const { summaries, listLoaded, older, selected, setSelected, view, pollError, refreshList, refreshBatch } =
+    useBatchQueue(active, storage, setError);
   const [writeback, setWriteback] = useState<{ row: number | null; title: string } | null>(null);
-  const [pollError, setPollError] = useState<string | null>(null);
-
-  const refreshList = useCallback(async (before: number | null = null) => {
-    const batches = await listBatches(before);
-    setSummaries((previous) => before === null ? batches : [...previous, ...batches]);
-    setOlder(batches.length === 50);
-    setSelected((current) => current ?? batches[0]?.id ?? null);
-    setListLoaded(true);
-  }, []);
-
-  useEffect(() => {
-    if (!active || storage !== "ready") return;
-    refreshList().catch((error) => setError(errorText(error)));
-  }, [active, storage, refreshList]);
 
   useEffect(() => {
     if (!active) return;
@@ -267,40 +91,9 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
     setOpened(null);
     setCorrecting(null);
     setConfirmCancel(false);
-    setPollError(null);
     setWriteback(null);
   }, [selected, storage]);
 
-  useEffect(() => {
-    if (!active || storage !== "ready" || selected === null) return;
-    const id = selected;
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      let delay = 1600;
-      try {
-        const view = await getBatchView(id);
-        if (stopped) return;
-        setBatch({ id, view });
-        setSummaries((previous) => previous.some((item) => item.id === id && item.status !== view.status)
-          ? previous.map((item) => item.id === id ? { ...item, status: view.status } : item)
-          : previous);
-        setPollError(null);
-        if (view.rows.some((row) => ["queued", "searching", "collecting"].includes(row.stage))) delay = 650;
-      } catch (error) {
-        if (!stopped) setPollError(errorText(error));
-      } finally {
-        if (!stopped) timer = setTimeout(poll, delay);
-      }
-    }
-    void poll();
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }, [active, storage, selected, refresh]);
-
-  const view = batch?.id === selected ? batch?.view : undefined;
   const rows = view?.rows ?? [];
   const openedRow = opened && rows.find((row) => row.id === opened.id);
   const libraries = embyResult && "libraries" in embyResult ? embyResult.libraries : null;
@@ -343,10 +136,10 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
         onNotice("已重新排入 " + count + " 条失败记录。" + (status === "paused" ? "继续批次后开始处理。" : ""));
       }
       setConfirmCancel(false);
-      setRefresh((value) => value + 1);
+      refreshBatch();
     } catch (error) {
       setError(errorText(error));
-      setRefresh((value) => value + 1);
+      refreshBatch();
     } finally {
       setAction(null);
     }
@@ -437,7 +230,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
       if (candidate) await chooseBatchCandidate(batch, row.id, candidate);
       else await retryBatchRow(batch, row.id);
       setOpened((previous) => previous?.id === row.id ? null : previous);
-      setRefresh((value) => value + 1);
+      refreshBatch();
     } catch (error) {
       setError(errorText(error));
     } finally {
@@ -452,7 +245,7 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
       await correctBatchMatch(selected, row.id, candidate);
       setOpened((previous) => previous?.id === row.id ? null : previous);
       setCorrecting(null);
-      setRefresh((value) => value + 1);
+      refreshBatch();
       onNotice("已提交纠正匹配。取得资料后会记住此选择。");
     } finally {
       setChanging(null);
@@ -715,60 +508,18 @@ export function Batch({ active, storage, folderSelection, setFolderSelection, on
           canQueue={status !== "cancelled"} onClose={() => setWriteback(null)}
           onQueued={(count) => {
             setWriteback(null);
-            setRefresh((value) => value + 1);
+            refreshBatch();
             onNotice("已排入 " + count + " 条写回任务。" + (status === "paused" ? "继续批次后开始写回。" : ""));
           }} />}
         {active && opened && openedRow && <DetailDialog response={opened.response}
           opener={opened.opener} closeLabel="收起结果" onDismiss={() => setOpened(null)} />}
         <ol className="poster-grid" role="list" aria-label="批次作品海报">
-          {rows.map((row) => {
-            const title = row.title || row.query || "缺少作品名称或番号";
-            return <li className="batch-row" aria-label={row.query || "空条目"} key={row.id}>
-              {row.has_result ? <button className="batch-poster" type="button"
-                aria-label={"打开 " + title + " 的详情"} aria-haspopup="dialog"
-                disabled={busy} onClick={(event) => open(row, event.currentTarget)}>
-                <PosterArt url={row.cover_url} />
-              </button> : <PosterArt url={row.cover_url} />}
-              <div className="grid min-w-0 gap-2 p-2.5">
-                <div className="min-w-0 [overflow-wrap:anywhere]">
-                  <h3>{title}</h3>
-                  <p className="muted mt-1">{row.query.startsWith("emby-episode:") ? "分集" : mediaLabels[row.kind]}{row.title && " · " + languageText(row.original_languages)}</p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="batch-status" data-stage={row.stage} title={"条目 #" + row.id}>{row.writeback === "queued" ? "等待写回" : row.writeback === "collecting" ? "正在写回" : labels[row.stage]}</span>
-                  {view.status !== "cancelled" && (row.stage === "failed" || row.stage === "not_found") && row.query &&
-                    <button className="secondary" type="button" disabled={busy} onClick={() => changeRow(row)}>重试</button>}
-                  {view.status !== "cancelled" && row.kind !== "av" && row.query && correcting !== row.id &&
-                    row.writeback !== "queued" && row.writeback !== "collecting" &&
-                    (row.stage === "choice" || row.stage === "paused" || terminal(row.stage)) &&
-                    <button className="secondary" type="button" disabled={busy} onClick={() => setCorrecting(row.id)}>纠正匹配</button>}
-                </div>
-                {correcting === row.id && view.status !== "cancelled" && <MatchCorrection key={row.id}
-                  kind={row.kind} episode={row.query.startsWith("emby-episode:")} busy={busy}
-                  onSave={(candidate) => saveCorrection(row, candidate)} onClose={() => setCorrecting(null)} />}
-                {(row.writeback === "ready" || row.writeback === "failed" || row.writeback === "done") &&
-                  <button type="button" className="secondary" disabled={busy}
-                    onClick={() => setWriteback({ row: row.id, title })}>
-                    {row.writeback === "ready" ? "预览写回" : row.writeback === "failed" ? "查看失败并重试" : "查看写回记录"}
-                  </button>}
-                {row.message && <p className={row.stage === "failed" ? "batch-error" : "muted"}>
-                  {row.stage === "failed" ? errorText(row.message, "BATCH_ITEM_FAILED")
-                    : row.stage === "not_found" ? errorText(row.message, "MEDIA_NOT_FOUND") : row.message}
-                </p>}
-                {(row.stage === "failed" || row.stage === "partial" || row.writeback === "failed") &&
-                  <p className="muted">条目 #{row.id}</p>}
-                {row.output && <div className="muted">
-                  {row.output.directory && <p>已写出 {row.output.written} 项资料 · <code>{row.output.directory}</code></p>}
-                  {row.output.message && <p className="batch-error">
-                    {errorText(row.output.message, row.writeback === "failed" ? "WRITEBACK_FILE_FAILED" : "OUTPUT_FAILED")}
-                  </p>}
-                </div>}
-                {row.file_count > 0 && selected !== null && <LinkedFiles batch={selected} row={row} />}
-                {row.stage === "choice" && row.candidates && <CandidateChoice candidates={row.candidates} busy={busy}
-                  onChoose={(candidate) => changeRow(row, candidate)} />}
-              </div>
-            </li>;
-          })}
+          {rows.map((row) => <BatchRowCard key={row.id}
+            row={row} batch={selected} status={view.status} busy={busy} correcting={correcting === row.id}
+            onOpen={(opener) => open(row, opener)} onChange={(candidate) => changeRow(row, candidate)}
+            onStartCorrection={() => setCorrecting(row.id)} onCloseCorrection={() => setCorrecting(null)}
+            onSaveCorrection={(candidate) => saveCorrection(row, candidate)}
+            onWriteback={(title) => setWriteback({ row: row.id, title })} />)}
         </ol>
       </>}
       </section>}

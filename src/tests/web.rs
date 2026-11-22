@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::{collections::HashMap, fs, panic::AssertUnwindSafe, time::Duration};
 
-use axum::{extract::OriginalUri, http::HeaderMap};
+use axum::{Json, extract::{OriginalUri, Query}, http::HeaderMap, routing::post};
+use serde_json::Value;
 use futures_util::FutureExt;
 use reqwest::{Client, Url};
 use sqlx::{AssertSqlSafe, PgPool};
@@ -952,11 +953,14 @@ async fn verify_web_routes(test_url: Url) {
     let film = rows.iter().find(|row| row["id"] == film_id).unwrap();
     assert_eq!(film["stage"], "success");
     assert_eq!(film["writeback"], "failed");
-    assert_eq!(film["output"]["written"], 2);
+    assert_eq!(film["output"]["written"], 4);
+    assert_eq!(film["output"]["failed"], 1);
     assert_eq!(Path::new(film["output"]["directory"].as_str().unwrap()), media);
     assert!(film_nfo.is_file());
     assert!(film_poster.is_dir());
-    assert!(media.join("海报电影-thumb.jpg").is_file());
+    for filename in ["海报电影-thumb.jpg", "海报电影-clearlogo.png", "海报电影-landscape.jpg"] {
+        assert!(media.join(filename).is_file(), "{filename}");
+    }
     assert_eq!(fs::read_to_string(media.join("海报电影.mkv")).unwrap(), "video fixture");
     let status = api.preview_writeback(imported, Some(film_id)).await;
     let nfo = status["files"].as_array().unwrap().iter().find(|file| file["kind"] == "nfo").unwrap();
@@ -971,7 +975,7 @@ async fn verify_web_routes(test_url: Url) {
     let finished = api.apply_writeback(imported, Some(film_id), &retry).await;
     let film = finished["rows"].as_array().unwrap().iter().find(|row| row["id"] == film_id).unwrap();
     assert_eq!(film["writeback"], "done");
-    assert_eq!(film["output"]["written"], 3);
+    assert_eq!(film["output"]["written"], 5);
     assert_eq!(api.success(&result_path, None).await["saved"]["id"], saved);
     assert_eq!(fs::read_to_string(&film_nfo).unwrap(), "manual edit after first writeback");
     assert_eq!(fs::read_to_string(backup).unwrap(), "original film metadata");

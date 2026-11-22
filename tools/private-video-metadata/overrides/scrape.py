@@ -124,35 +124,11 @@ def supplement_one(folder, fetcher):
     return {path.name: tags for path, _, tags in proposed}
 
 
-def scrape_one(folder, fetcher, args):
-    """Scrape and atomically commit metadata for one title folder."""
-    code, tags = normalize(folder.name)
-    if not code:
-        return "SKIP", "Catalog number not recognized"
-
-    nfo_path = folder / "movie.nfo"
-    if nfo_path.exists() and not args.force:
-        return "SKIP", "movie.nfo exists; skipped (--force to override)"
-
-    fetcher.begin_movie()
-
-    videos = sorted(
-        [
-            path
-            for path in folder.iterdir()
-            if path.is_file() and path.suffix.lower() in VIDEO_EXT
-        ],
-        key=lambda path: path.name,
-    )
-
-    data = collect_metadata(fetcher, code)
-    if not data:
-        return "MISS", f"{code} was not found in any metadata source"
-    source_tag = data["source"]
+def _build_sidecars(nfo_path, videos, data, tags, *, force):
     groups = {nfo_path: videos}
     for video in videos:
         sidecar = video.with_suffix(".nfo")
-        if sidecar != nfo_path and (args.force or not sidecar.exists()):
+        if sidecar != nfo_path and (force or not sidecar.exists()):
             groups.setdefault(sidecar, []).append(video)
     measured = {video: probe_video(video) for video in videos}
     if len(videos) == 1:
@@ -161,11 +137,20 @@ def scrape_one(folder, fetcher, args):
         if (measured[video].get("width") or 0) >= 3840:
             tags.append("4K")
     # A sidecar shared by multiple files cannot carry any single file's runtime.
-    payloads = {
-        path: build_nfo(data, tags, folder.name, measured[items[0]] if len(items) == 1 else {})
+    return {
+        path: build_nfo(
+            data, tags, nfo_path.parent.name, measured[items[0]] if len(items) == 1 else {}
+        )
         for path, items in groups.items()
     }
 
+
+def _sample_urls(samples, alternates):
+    for index, sample in enumerate(samples):
+        yield sample, alternates[index] if index < len(alternates) else None
+
+
+def _write_artwork(folder, fetcher, code, data):
     images = []
     samples = data.get("samples", [])
     alternate_samples = data.get("samples_alt", [])
@@ -185,13 +170,8 @@ def scrape_one(folder, fetcher, args):
         temporary = Path(tempfile.mkdtemp(prefix="jav_"))
         try:
             downloaded = []
-            for index, sample in enumerate(samples, 1):
+            for index, (sample, alternate) in enumerate(_sample_urls(samples, alternate_samples), 1):
                 path = temporary / f"s{index:02d}.jpg"
-                alternate = (
-                    alternate_samples[index - 1]
-                    if index <= len(alternate_samples)
-                    else None
-                )
                 if download_with_alt(fetcher, sample, alternate, path):
                     downloaded.append(path)
 
@@ -225,12 +205,7 @@ def scrape_one(folder, fetcher, args):
             sample_directory = folder / SAMPLES_DIR
             sample_directory.mkdir(exist_ok=True)
             downloaded_count = 0
-            for index, sample in enumerate(samples, 1):
-                alternate = (
-                    alternate_samples[index - 1]
-                    if index <= len(alternate_samples)
-                    else None
-                )
+            for index, (sample, alternate) in enumerate(_sample_urls(samples, alternate_samples), 1):
                 if download_with_alt(
                     fetcher,
                     sample,
@@ -248,6 +223,38 @@ def scrape_one(folder, fetcher, args):
     except OSError as error:
         print(f"{code}: could not publish Emby backdrops: {error}", flush=True)
 
+    return images
+
+
+def scrape_one(folder, fetcher, args):
+    """Collect metadata for one title and publish its artwork and sidecars."""
+    code, tags = normalize(folder.name)
+    if not code:
+        return "SKIP", "Catalog number not recognized"
+
+    nfo_path = folder / "movie.nfo"
+    if nfo_path.exists() and not args.force:
+        return "SKIP", "movie.nfo exists; skipped (--force to override)"
+
+    fetcher.begin_movie()
+
+    videos = sorted(
+        [
+            path
+            for path in folder.iterdir()
+            if path.is_file() and path.suffix.lower() in VIDEO_EXT
+        ],
+        key=lambda path: path.name,
+    )
+
+    data = collect_metadata(fetcher, code)
+    if not data:
+        return "MISS", f"{code} was not found in any metadata source"
+    source_tag = data["source"]
+    payloads = _build_sidecars(nfo_path, videos, data, tags, force=args.force)
+    images = _write_artwork(folder, fetcher, code, data)
+
+    # Publish movie.nfo last so a rerun can retry incomplete metadata.
     for path, payload in payloads.items():
         if path != nfo_path:
             atomic_write_bytes(path, payload)

@@ -159,6 +159,23 @@ internal static class MediaOrganizer
         // A collected range such as S01E01-E02 must not turn into a single episode.
         if (series && !PreservesEpisode(renamed, episode)) renamed = stem;
         if (!OrganizerRules.UsableSegment(folder) || !OrganizerRules.UsableSegment(renamed + Path.GetExtension(video))) return null;
+        var workDirectory = ResolveWorkDirectory(root, name, folder, series, directories);
+        if (workDirectory == null) return null;
+        var (work, reuse) = workDirectory.Value;
+        var destination = series ? ResolveSeasonDirectory(work, reuse, values, episode, rules) : work;
+        if (destination == null) return null;
+
+        var otherStems = files.Where(file => file != video && VideoExtensions.Contains(Path.GetExtension(file)))
+            .Select(file => Path.GetFileNameWithoutExtension(file)).Where(other => other.Length > stem.Length).ToArray();
+        var sources = files.Where(file => MovesSidecar(file, rules) && IsSidecar(stem, file) && !otherStems.Any(other => IsSidecar(other, file)))
+            .Append(video).ToArray();
+        var plan = new MovePlan(root, work, destination, sources, reuse, stem, renamed);
+        return sources.All(source => OrganizerRules.UsableSegment(Path.GetFileName(plan.Target(source)))) ? plan : null;
+    }
+
+    private static (string Path, bool Reuse)? ResolveWorkDirectory(
+        string root, string name, string folder, bool series, string[] directories)
+    {
         var exact = directories.Where(dir => Same(Path.GetFileName(dir), folder)).ToArray();
         var baseName = ReleaseGroup.Replace(TmdbTag.Replace(name, ""), "").Trim();
         var tmdb = TmdbTag.Match(name).Groups["id"].Value;
@@ -178,24 +195,19 @@ internal static class MediaOrganizer
             if (existingId != tmdb && (existingId.Length != 0 || !Same(existing, folder))) return null;
         }
         if (reuse != null && !PlainEntry(reuse, directory: true)) return null;
-        var work = reuse ?? Path.Combine(root, folder);
-        var destination = work;
-        if (series)
-        {
-            var season = Number(episode, "season");
-            var seasonFolder = OrganizerRules.Render(rules.SeasonFolder, values);
-            if (!OrganizerRules.UsableSegment(seasonFolder)) return null;
-            var matches = reuse == null ? Array.Empty<string>() : Directory.EnumerateDirectories(work)
-                .Where(dir => Same(Path.GetFileName(dir), seasonFolder) || SeasonNumber(Path.GetFileName(dir)) == season).Take(2).ToArray();
-            if (matches.Length > 1 || (matches.Length == 1 && !PlainEntry(matches[0], directory: true))) return null;
-            destination = matches.SingleOrDefault() ?? Path.Combine(work, seasonFolder);
-        }
-        var otherStems = files.Where(file => file != video && VideoExtensions.Contains(Path.GetExtension(file)))
-            .Select(file => Path.GetFileNameWithoutExtension(file)).Where(other => other.Length > stem.Length).ToArray();
-        var sources = files.Where(file => MovesSidecar(file, rules) && IsSidecar(stem, file) && !otherStems.Any(other => IsSidecar(other, file)))
-            .Append(video).ToArray();
-        var plan = new MovePlan(root, work, destination, sources, reuse != null, stem, renamed);
-        return sources.All(source => OrganizerRules.UsableSegment(Path.GetFileName(plan.Target(source)))) ? plan : null;
+        return (reuse ?? Path.Combine(root, folder), reuse != null);
+    }
+
+    private static string? ResolveSeasonDirectory(
+        string work, bool reuse, IReadOnlyDictionary<string, string> values, Match episode, OrganizerRules rules)
+    {
+        var season = Number(episode, "season");
+        var seasonFolder = OrganizerRules.Render(rules.SeasonFolder, values);
+        if (!OrganizerRules.UsableSegment(seasonFolder)) return null;
+        var matches = !reuse ? Array.Empty<string>() : Directory.EnumerateDirectories(work)
+            .Where(dir => Same(Path.GetFileName(dir), seasonFolder) || SeasonNumber(Path.GetFileName(dir)) == season).Take(2).ToArray();
+        if (matches.Length > 1 || (matches.Length == 1 && !PlainEntry(matches[0], directory: true))) return null;
+        return matches.SingleOrDefault() ?? Path.Combine(work, seasonFolder);
     }
 
     private static int SeasonNumber(string name)

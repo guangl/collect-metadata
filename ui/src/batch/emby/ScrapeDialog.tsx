@@ -1,5 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
-import { errorText } from "../types";
+import { errorText } from "../../types";
 
 export type EmbyScrapeChoice =
   | { mode: "standard" | "ai" }
