@@ -18,6 +18,11 @@ use serde_json::{Value, json};
 use crate::{LookupResponse, providers::media::emby::Emby};
 
 pub(crate) use assets::image_bytes;
+#[cfg(feature = "web")]
+pub(crate) async fn download_image(client: &Client, raw: &str) -> Option<(Vec<u8>, &'static str)> {
+    let url = reqwest::Url::parse(raw).ok()?;
+    image_bytes(assets::public_response(client, &url, "image/*", std::time::Duration::from_secs(15)).await?).await
+}
 pub(crate) use settings::ExportPlan;
 pub use settings::{OutputOptions, OutputSettings, OutputSettingsView};
 

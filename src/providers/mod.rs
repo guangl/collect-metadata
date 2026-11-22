@@ -11,7 +11,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-enum Failure {
+pub(crate) enum Failure {
     NotFound,
     Unavailable(String),
 }
@@ -21,7 +21,7 @@ impl Failure {
         Self::Unavailable("页面格式变化，或来源要求登录。".into())
     }
 
-    fn description(&self) -> &str {
+    pub(crate) fn description(&self) -> &str {
         match self {
             Self::NotFound => "来源没有找到此条目。",
             Self::Unavailable(message) => message,

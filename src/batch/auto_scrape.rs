@@ -21,6 +21,7 @@ pub struct AutoScrape {
     url: Option<String>,
     roots: Vec<PathBuf>,
     private_roots: Vec<PathBuf>,
+    central_metadata: bool,
 }
 
 struct Event {
@@ -73,11 +74,14 @@ impl AutoScrape {
         let url = env::var("EMBY_AUTO_SCRAPE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let central_metadata = env::var("EMBY_AUTO_SCRAPE_CENTRAL_METADATA")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
         Ok(Some(Self {
             spool,
             url,
             roots,
             private_roots,
+            central_metadata,
         }))
     }
 
@@ -123,7 +127,7 @@ impl AutoScrape {
                             retries.remove(&event.path);
                             if let Some(count) = done {
                                 eprintln!(
-                                    "Automatic scrape {} {} wrote {count} files and queued an Emby refresh.",
+                                    "Automatic scrape {} {} completed with {count} new sidecar files.",
                                     event.item_type, event.id
                                 );
                             }
@@ -185,9 +189,11 @@ impl AutoScrape {
             .automatic_item(&collector.client, &event.id, item_type)
             .await?;
         let item = &home.data["item"];
-        let Some(path) = item["Path"].as_str().map(Path::new) else {
+        if item["LocationType"] == "Virtual" {
             return Ok(None);
-        };
+        }
+        let path = item["Path"].as_str().filter(|path| !path.is_empty()).map(Path::new)
+            .ok_or("等待 Emby 完成入库并提供媒体路径。")?;
         let private = self.private_roots.iter().any(|root| path.starts_with(root));
         if !private && !self.roots.iter().any(|root| path.starts_with(root)) {
             return Ok(None);
@@ -195,7 +201,6 @@ impl AutoScrape {
         if item["LockData"] == true
             || item["LockData"]["Enabled"] == true
             || item["IsLocked"] == true
-            || item["LocationType"] == "Virtual"
         {
             return Ok(None);
         }
@@ -204,7 +209,7 @@ impl AutoScrape {
         if event.item_type == "Video" && !private {
             return Ok(None);
         }
-        let result = if private {
+        let mut result = if private {
             if kind != MediaKind::Movie {
                 return Ok(None);
             }
@@ -251,14 +256,27 @@ impl AutoScrape {
         } else {
             let candidate = match_work(collector, kind, item).await?;
             collector
-                .gather_automatic_work(&emby, kind, event.id.clone(), &query, home, &candidate)
+                .gather_automatic_work(kind, event.id.clone(), &query, home, &candidate)
                 .await?
         };
+        if self.central_metadata && !private {
+            collector.require_store().await?;
+            let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
+            emby.enrich_automatic_item(&collector.client, &data["item"], &result.record).await?;
+            let fresh = emby.automatic_item(&collector.client, &event.id, item_type).await?;
+            let source = result.record["sources"].as_array_mut().into_iter().flatten()
+                .find(|source| source["provider"] == "Emby")
+                .ok_or("缺少 Emby 文件关联。")?;
+            source["data"]["item"] = fresh.data["item"].clone();
+            let server = emby.automatic_server_id(&collector.client).await?;
+            collector.upsert_emby_item(&server, &event.id, &fresh.data["item"], None).await?;
+        }
         let written = write_automatic(&collector.client, &emby, &paths, &result.record).await;
-        // Even a partial write may have produced a usable NFO. Retry the other files separately.
-        let refresh = emby.refresh_sidecars(&collector.client, &event.id).await;
+        if !self.central_metadata || private {
+            // The legacy route loads local sidecars into Emby.
+            emby.refresh_sidecars(&collector.client, &event.id).await?;
+        }
         let written = written?;
-        refresh?;
         if written > 0 {
             let saved = collector.save_lookup(result).await;
             if let Some(error) = saved.storage_error {
@@ -297,19 +315,8 @@ async fn match_work(
     item: &Value,
 ) -> Result<CandidateChoice, String> {
     let ids = &item["ProviderIds"];
-    for (provider, key) in [
-        (MediaProvider::Tmdb, "Tmdb"),
-        (MediaProvider::Bangumi, "Bangumi"),
-    ] {
-        if let Some(id) = ids[key]
-            .as_str()
-            .filter(|id| id.parse::<u32>().is_ok_and(|id| id > 0))
-        {
-            return Ok(CandidateChoice {
-                provider,
-                id: id.into(),
-            });
-        }
+    if let Some(id) = ids["Tmdb"].as_str().filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0)) {
+        return Ok(CandidateChoice { provider: MediaProvider::Tmdb, id: id.into() });
     }
     if let Some(path) = item["Path"].as_str()
         && let Some(hint) = Path::new(path)
@@ -327,6 +334,9 @@ async fn match_work(
             },
             id: id.into(),
         });
+    }
+    if let Some(id) = ids["Bangumi"].as_str().filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0)) {
+        return Ok(CandidateChoice { provider: MediaProvider::Bangumi, id: id.into() });
     }
     let title = item["OriginalTitle"]
         .as_str()

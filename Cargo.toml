@@ -23,6 +23,7 @@ required-features = ["web"]
 
 [dependencies]
 axum = { version = "0.8", optional = true }
+base64 = "0.22"
 cap-std = "4"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "query", "rustls", "stream", "system-proxy"] }

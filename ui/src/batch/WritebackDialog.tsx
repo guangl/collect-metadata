@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { previewWriteback, queueWriteback } from "../api";
 import { errorText, type WritebackPreview } from "../types";
 
-const kinds = { nfo: "NFO", poster: "海报", backdrop: "背景图（Fanart）", still: "分集截图" };
+const kinds = { nfo: "NFO", poster: "海报", backdrop: "背景图（Fanart）", logo: "透明标题图（Clearlogo）",
+  landscape: "横版缩略图（Landscape）", still: "分集截图" };
 const actions = { create: "新增", replace: "替换并备份", blocked: "不可写入" };
 
 export function WritebackDialog({ batch, row, title, canQueue, onClose, onQueued }: {

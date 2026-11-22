@@ -286,6 +286,8 @@ enum FileKind {
     Nfo,
     Poster,
     Backdrop,
+    Logo,
+    Landscape,
     Still,
 }
 
@@ -295,6 +297,8 @@ impl FileKind {
             Self::Nfo => "nfo",
             Self::Poster => "poster",
             Self::Backdrop => "backdrop",
+            Self::Logo => "logo",
+            Self::Landscape => "landscape",
             Self::Still => "still",
         }
     }
@@ -304,6 +308,8 @@ impl FileKind {
             Self::Nfo => None,
             Self::Poster | Self::Still => Some("Primary"),
             Self::Backdrop => Some("Backdrop"),
+            Self::Logo => Some("Logo"),
+            Self::Landscape => Some("Thumb"),
         }
     }
 }
@@ -538,6 +544,17 @@ fn plan_with_mode(
                     .then(|| image_fields["backdrop_url"].as_str())
                     .flatten(),
             ),
+            (
+                FileKind::Logo,
+                !episode && item["ImageTags"]["Logo"].is_string(),
+                (!episode).then(|| image_fields["logo_url"].as_str()).flatten(),
+            ),
+            (
+                FileKind::Landscape,
+                !episode && item["ImageTags"]["Thumb"].is_string(),
+                (!episode).then(|| image_fields["landscape_url"].as_str()).flatten()
+                    .filter(|url| Some(*url) != image_fields["backdrop_url"].as_str()),
+            ),
         ] {
             let public_image = url
                 .filter(|_| !fill_missing || !emby_available)
@@ -579,6 +596,16 @@ fn plan_with_mode(
                             }
                         }
                         FileKind::Backdrop => image_names(target.backdrop_stem()),
+                        FileKind::Logo => image_names(if target.video.is_some() {
+                            target.video_sidecar("-clearlogo")
+                        } else {
+                            "clearlogo".into()
+                        }),
+                        FileKind::Landscape => image_names(if target.video.is_some() {
+                            target.video_sidecar("-landscape")
+                        } else {
+                            "landscape".into()
+                        }),
                         FileKind::Still => image_names(target.video_sidecar("-thumb")),
                     };
                     Some(
@@ -655,9 +682,24 @@ fn automatic_alternates(kind: FileKind, item: &Value, target: &Target) -> Vec<St
             vec!["backdrop".to_owned(), "fanart".into(), "background".into(), "art".into()]
         }
         FileKind::Backdrop => Vec::new(),
+        FileKind::Logo => match stem {
+            Some(stem) => vec![format!("{stem}-logo")],
+            None => vec!["clearlogo".into(), "logo".into()],
+        },
+        FileKind::Landscape => match stem {
+            Some(stem) => vec![format!("{stem}-thumb")],
+            None => vec!["landscape".into(), "thumb".into()],
+        },
         FileKind::Still => stem.map(|stem| vec![format!("metadata/{stem}")]).unwrap_or_default(),
     };
     let mut image_stems = image_stems;
+    if stem.is_some() && target.backdrop_stem() == "fanart" {
+        match kind {
+            FileKind::Logo => image_stems.extend(["clearlogo".into(), "logo".into()]),
+            FileKind::Landscape => image_stems.extend(["landscape".into(), "thumb".into()]),
+            _ => {}
+        }
+    }
     if matches!(kind, FileKind::Poster) && let Some(stem) = stem {
         image_stems.extend(["", "-poster", "-cover", "-default", "-movie"].map(|suffix| format!("{stem}{suffix}")));
     }
@@ -687,6 +729,9 @@ pub(crate) async fn write_automatic(
         files,
     };
     let output = prepare(client, Some(emby), paths, &job, record, &state).await;
+    if let Some(error) = output.files.iter().find_map(|(_, staged)| staged.as_ref().err()) {
+        return Err(error.clone());
+    }
     let (state, report) = tokio::task::spawn_blocking(move || output.publish(&job.id, state))
         .await.map_err(|_| "无法保存自动写回资料。")?;
     if let Some(error) = state.files.into_values().find_map(|file| match file {
@@ -784,7 +829,7 @@ pub(crate) async fn prepare(
                 .get(id)
                 .map(|item| episode_record(item, episodes.get(id).copied(), record));
             let mut images = images.remove(file.source.as_str()).unwrap_or_default();
-            for kind in ["poster", "backdrop", "still"] {
+            for kind in ["poster", "backdrop", "logo", "landscape", "still"] {
                 if let Some(FileResult::Written { path, .. }) =
                     state.files.get(&format!("{kind}\n{}", file.source))
                     && let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str())
@@ -830,7 +875,7 @@ async fn prepare_image(
             let mut url = emby
                 .image_url(&file.item_id, image_type)
                 .ok_or("Emby 图片地址无效。")?;
-            url.query_pairs_mut().append_pair("format", "jpg");
+            url.query_pairs_mut().append_pair("EnableImageEnhancers", "false");
             emby.image_response(client, &url)
                 .await
                 .ok_or("无法下载 Emby 图片。")?
@@ -1192,6 +1237,28 @@ mod tests {
         publish_file(&files[0], &staged, "no-backup").unwrap();
         assert_eq!(fs::read_to_string(film.join("Film.nfo")).unwrap(), "arrived during staging");
         assert!(!film.join(BACKUP_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn automatic_sidecars_take_logo_and_landscape_from_emby_using_separate_names() {
+        let root = tempfile::tempdir().unwrap();
+        let series = root.path().join("Series");
+        fs::create_dir(&series).unwrap();
+        let paths = MediaPaths::new(
+            vec![PathMapping { server: "/media".into(), local: String::new() }],
+            true, Some(root.path().into()),
+        );
+        let data = json!({"item":{"Id":"1","Type":"Series","Path":"/media/Series",
+            "ImageTags":{"Logo":"png","Thumb":"jpg"}}});
+        let record = json!({"fill_missing":true,"fields":{"logo_url":"https://image.tmdb.org/new.png"}});
+        let files = plan_with_mode(&paths, &data, &record, &WritebackState::default(), true).0;
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].kind.image_type(), Some("Logo"));
+        assert!(files[0].destinations.iter().any(|file| file.name == "clearlogo.png"));
+        assert!(files[0].public_image.is_none());
+        assert_eq!(files[1].kind.image_type(), Some("Thumb"));
+        assert_eq!(files[1].destinations[0].name, "landscape.jpg");
+        assert_eq!(files[2].destinations[0].name, "tvshow.nfo");
     }
 
     #[tokio::test]

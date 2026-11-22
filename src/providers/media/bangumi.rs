@@ -169,7 +169,7 @@ impl Bangumi {
         serde_json::from_str(&text).map_err(|_| Failure::format_changed())
     }
 
-    pub(super) async fn search(
+    pub(crate) async fn search(
         &self,
         client: &Client,
         kind: MediaKind,

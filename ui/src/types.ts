@@ -134,7 +134,7 @@ export interface WritebackPreview {
   writable: number;
   files: {
     source: string;
-    kind: "nfo" | "poster" | "backdrop" | "still";
+    kind: "nfo" | "poster" | "backdrop" | "logo" | "landscape" | "still";
     path: string | null;
     backup: string | null;
     error: string | null;

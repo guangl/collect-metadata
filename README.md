@@ -173,6 +173,8 @@ Web 服务还需要可写的 \`EMBY_WRITEBACK_ROOT\` 和「Emby 媒体写回」�
 
 文件或剧集目录附上 \`[tmdbid=123]\` 或 \`[bangumiid=123]\` 可以指定作品。遇到无法确认的匹配，查看 Web 服务日志。正式停用其他元数据和图片下载器之前，先在测试库验证新电影和新分集能自动生成资料并被 Emby 读取。
 
+将 Web 的 `EMBY_AUTO_SCRAPE_CENTRAL_METADATA` 设为 `true`，普通影视库入库时会按已确认的来源补齐 TMDB、Bangumi ID 和缺少的图片。该模式需要可用的 PostgreSQL。为对应的 Emby 媒体库关闭「将图片保存到媒体文件夹」和 NFO 元数据保存器，保留 NFO 读取器。Emby 将新图片存入服务器元数据目录，Collect Metadata 在视频目录创建缺少的 NFO、海报、Fanart、Clearlogo、Landscape 或适用的季集图，并按 Emby 服务器和条目 ID 更新 PostgreSQL。缺少可信来源的资料保持为空。更新或重试时保留已存在的旁挂文件。
+
 ### 自动整理媒体库根目录（可选）
 
 升级 Emby 插件后，可以直接把电影或有明确季集号的分集放进对应的 Emby 媒体库根目录。插件默认每 2 分钟检查一次，只处理连续两次观察到大小和修改时间未变的视频；大文件建议先复制到库外，完成后再移入，避免复制暂停时被误判为已完成。

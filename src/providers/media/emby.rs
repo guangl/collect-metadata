@@ -14,6 +14,9 @@ use unicode_normalization::UnicodeNormalization;
 use super::MediaKind;
 use crate::{collect::Source, diagnostics, providers::field_map};
 
+#[cfg(feature = "web")]
+mod automatic;
+
 const FIELDS: &str = concat!(
     "Path,Overview,People,ProviderIds,Genres,Studios,Tags,TagItems,Taglines,OriginalTitle,SortName,",
     "ProductionLocations,ProductionYear,CommunityRating,CriticRating,OfficialRating,",
@@ -652,8 +655,8 @@ impl Emby {
     pub(crate) async fn automatic_item(
         &self, client: &Client, id: &str, item_type: &str,
     ) -> Result<Source, String> {
-        let requested = "Path,Overview,ProviderIds,OriginalTitle,ProductionYear,PremiereDate,Settings,LocationType";
-        let item = self.item(client, id, item_type, requested).await?;
+        let requested = format!("{FIELDS},PremiereDate,Settings,LocationType,ParentId,DateCreated,DateLastSaved");
+        let item = self.item(client, id, item_type, &requested).await?;
         let fields = if item_type == "Episode" { episode_fields(&item) } else { fields(&item, &[]) };
         let source_url = self.endpoint(&format!("web/index.html#!/item?id={id}"));
         Ok(Source::found("Emby", &source_url, fields, json!({"item":item})))
@@ -887,7 +890,7 @@ impl Emby {
 
     pub(crate) fn image_url(&self, id: &Value, image_type: &str) -> Option<Url> {
         let id = valid_id(id)?;
-        matches!(image_type, "Primary" | "Backdrop")
+        matches!(image_type, "Primary" | "Backdrop" | "Logo" | "Thumb")
             .then(|| self.endpoint(&format!("Items/{id}/Images/{image_type}")))
     }
 
@@ -1060,7 +1063,7 @@ pub(crate) fn is_item_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 96 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-fn normalize(value: &str) -> String {
+pub(crate) fn normalize(value: &str) -> String {
     value
         .nfkc()
         .collect::<String>()

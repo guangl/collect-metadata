@@ -402,7 +402,7 @@ impl Tmdb {
             .append_pair("append_to_response", &components)
             .append_pair(
                 "include_image_language",
-                &format!("{},en,null", language.split('-').next().unwrap_or(language)),
+                &format!("{},ja,en,ko,null", language.split('-').next().unwrap_or(language)),
             );
         let mut data = match self.get(client, &details).await {
             Ok(data)
@@ -544,6 +544,38 @@ fn image(path: &Value, size: &str) -> Option<String> {
         return None;
     }
     Some(format!("https://image.tmdb.org/t/p/{size}/{path}"))
+}
+
+fn artwork(data: &Value, key: &str, locale: &str, landscape: bool, size: &str) -> Option<String> {
+    let preferred = locale.split('-').next().unwrap_or(locale);
+    let original = data["original_language"].as_str().unwrap_or("");
+    let logo = key == "logos";
+    list(&data["images"][key])
+        .filter_map(|entry| {
+            let language = entry["iso_639_1"].as_str();
+            let path = entry["file_path"].as_str()?;
+            let width = entry["width"].as_u64()?;
+            if logo {
+                if !path.ends_with(".png") || width < 280 { return None; }
+            } else if !(1.7..1.85).contains(&entry["aspect_ratio"].as_f64()?)
+                || (landscape && (language.is_none() || width < 900))
+                || (!landscape && (language.is_some() || width < 1280))
+            {
+                return None;
+            }
+            let preference = match language {
+                Some(lang) if lang == preferred => 4,
+                Some(lang) if lang == original => 3,
+                Some("ja") => 2,
+                Some("en") => 1,
+                Some("ko") | None => 0,
+                _ => return None,
+            };
+            let votes = entry["vote_average"].as_f64().unwrap_or_default();
+            Some((preference, votes, width, image(&entry["file_path"], size)?))
+        })
+        .max_by(|a,b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)))
+        .map(|(_,_,_,url)| url)
 }
 
 fn candidate(kind: MediaKind, data: &Value) -> Option<Candidate> {
@@ -736,8 +768,11 @@ fn fields(kind: MediaKind, id: u32, data: &Value, language: &str) -> Fields {
         ("cover_url", json!(image(&data["poster_path"], "w500"))),
         (
             "backdrop_url",
-            json!(image(&data["backdrop_path"], "w1280")),
+            json!(artwork(data, "backdrops", language, false, "w1280")
+                .or_else(|| image(&data["backdrop_path"], "w1280"))),
         ),
+        ("logo_url", json!(artwork(data, "logos", language, false, "w500"))),
+        ("landscape_url", json!(artwork(data, "backdrops", language, true, "w1280"))),
         ("trailer_url", trailer),
         ("videos", json!(videos)),
         ("official_url", data["homepage"].clone()),
@@ -755,6 +790,21 @@ fn fields(kind: MediaKind, id: u32, data: &Value, language: &str) -> Fields {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn separates_localized_landscape_from_clean_background_and_keeps_png_logos() {
+        let data = json!({"original_language":"ja","images":{
+            "backdrops":[
+                {"file_path":"/background.jpg","width":1920,"aspect_ratio":1.78,"iso_639_1":null},
+                {"file_path":"/landscape.jpg","width":1920,"aspect_ratio":1.78,"iso_639_1":"ja"}],
+            "logos":[{"file_path":"/text.svg","width":800,"iso_639_1":"zh"},
+                {"file_path":"/text.png","width":800,"iso_639_1":"ja"}]
+        }});
+        let result = fields(MediaKind::Series, 100, &data, "zh-CN");
+        assert_eq!(result["backdrop_url"], "https://image.tmdb.org/t/p/w1280/background.jpg");
+        assert_eq!(result["landscape_url"], "https://image.tmdb.org/t/p/w1280/landscape.jpg");
+        assert_eq!(result["logo_url"], "https://image.tmdb.org/t/p/w500/text.png");
+    }
 
     #[test]
     fn maps_tmdb_movies_and_series_without_confusing_localized_and_original_fields() {

@@ -26,6 +26,16 @@ pub use model::{EmbyEpisodeOverview, LookupResponse};
 pub(crate) use model::{Fields, Source};
 pub use tmdb_settings::{TmdbSettings, TmdbStatus};
 
+#[cfg(feature = "web")]
+fn automatic_exact<'a>(candidates: &'a [media::Candidate], name: &str, year: u16) -> Option<&'a media::Candidate> {
+    let name = media::emby::normalize(name);
+    let mut exact = candidates.iter().filter(|candidate| {
+        candidate.year == Some(year) && std::iter::once(&candidate.title)
+            .chain(&candidate.match_titles).any(|title| media::emby::normalize(title) == name)
+    });
+    exact.next().filter(|_| exact.next().is_none())
+}
+
 pub struct Collector {
     pub(crate) client: Client,
     database: Option<PgConnectOptions>,
@@ -279,24 +289,63 @@ impl Collector {
     #[cfg(feature = "web")]
     pub(crate) async fn gather_automatic_work(
         &self,
-        emby: &media::emby::Emby,
         kind: MediaKind,
         id: String,
         query: &str,
         home: Source,
         candidate: &crate::CandidateChoice,
     ) -> Result<LookupResponse, String> {
-        if candidate.provider != MediaProvider::Tmdb {
-            return self.gather_emby(emby, kind, query, (id, home), Some(candidate), false).await;
-        }
-        let tmdb = self.tmdb.provider().ok_or("请先配置 TMDB API 凭据。")?;
-        let catalog_id = candidate.id.parse().map_err(|_| "TMDB ID 无效。")?;
+        use serde_json::json;
+
         let targets = self.languages.targets(None);
-        let source = tmdb.work_details(&self.client, kind, catalog_id, &targets[0], false).await;
-        if source.fields.is_empty() {
-            return Err(source.note.unwrap_or_else(|| "TMDB 未返回可用资料。".into()));
+        let language = &targets[0];
+        let tmdb = self.tmdb.provider();
+        let mut external = if candidate.provider == MediaProvider::Tmdb {
+            let source = tmdb.as_deref().ok_or("请先配置 TMDB API 凭据。")?
+                .work_details(&self.client, kind, candidate.id.parse().map_err(|_| "TMDB ID 无效。")?, language, false)
+                .await;
+            vec![source]
+        } else {
+            self.media_sources(kind, candidate.provider, &candidate.id, language).await?
+        };
+        if external.iter().all(|source| source.fields.is_empty()) {
+            return Err(external.into_iter().find_map(|source| source.note).unwrap_or_else(|| "公开来源未返回可用资料。".into()));
         }
-        let result = make_lookup(kind, query, Some(&format!("Emby-{id}")), vec![source, home])?;
+        let item = &home.data["item"];
+        let name = external.iter().find_map(|source| source.fields.get("title_original")?.as_str())
+            .or_else(|| item["OriginalTitle"].as_str().filter(|name| !name.trim().is_empty()))
+            .or_else(|| item["Name"].as_str().filter(|name| !name.trim().is_empty()));
+        let year = external.iter().find_map(|source| {
+            source.fields.get("release_date")?.as_str()?.get(..4)?.parse::<u16>().ok()
+        }).or_else(|| item["ProductionYear"].as_u64()?.try_into().ok());
+        if let Some((name, year)) = name.zip(year) {
+            let name = name.to_owned();
+            let has = |key: &str, sources: &[Source]| {
+                home.fields.contains_key(key) || sources.iter().any(|source| source.fields.contains_key(key))
+            };
+            if !has("tmdb_id", &external) && let Some(tmdb) = tmdb.as_deref() {
+                let list = tmdb.automatic_candidates(&self.client, kind, &name, language).await;
+                if let Some(id) = automatic_exact(&list, &name, year).and_then(|hit| hit.tmdb_id) {
+                    external.push(tmdb.work_details(&self.client, kind, id, language, false).await);
+                }
+            }
+            if !has("bangumi_id", &external) {
+                let bangumi = self.bangumi.provider();
+                let list = bangumi.search(&self.client, kind, &name).await
+                    .map_err(|error| format!("Bangumi：{}", error.description()))?;
+                if let Some(id) = automatic_exact(&list, &name, year).and_then(|hit| hit.bangumi_id) {
+                    let source = bangumi.details(&self.client, kind, id).await;
+                    if source.fields.is_empty() {
+                        return Err(source.note.unwrap_or_else(|| "Bangumi 未返回作品资料。".into()));
+                    }
+                    external.push(source);
+                }
+            }
+        }
+        let mut sources = vec![home];
+        sources.extend(external);
+        let mut result = make_lookup(kind, query, Some(&format!("Emby-{id}")), sources)?;
+        result.record["fill_missing"] = json!(true);
         Ok(self.localize_lookup(result, targets).await)
     }
 
@@ -319,7 +368,7 @@ impl Collector {
             return Err("多集文件需要确认季集匹配。".into());
         }
         if !season && candidate.provider == MediaProvider::Tmdb {
-            let mut result = self.gather_emby(emby, MediaKind::Series, query, (id, home), Some(candidate), false).await?;
+            let mut result = self.gather_emby(emby, MediaKind::Series, query, (id, home), Some(candidate), true).await?;
             if let Some(details) = result.record["sources"].as_array().into_iter().flatten()
                 .find(|source| source["provider"] == "TMDB")
                 && let Some(id) = details["data"]["episode"]["id"].as_u64()
@@ -373,8 +422,9 @@ impl Collector {
         if external.fields.is_empty() {
             return Err("来源没有该季集的可用资料。".into());
         }
-        let mut result = make_lookup(MediaKind::Series, query, Some(&format!("Emby-{id}")), vec![external, home])?;
+        let mut result = make_lookup(MediaKind::Series, query, Some(&format!("Emby-{id}")), vec![home, external])?;
         result.record["scope"] = json!(if season { "season" } else { "episode" });
+        result.record["fill_missing"] = json!(true);
         Ok(self.localize_lookup(result, targets).await)
     }
 
