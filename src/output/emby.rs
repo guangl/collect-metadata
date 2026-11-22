@@ -715,12 +715,31 @@ pub(crate) async fn write_automatic(
     emby: &Emby,
     paths: &MediaPaths,
     record: &Value,
+    defer_episode_nfo: bool,
 ) -> Result<usize, String> {
     let data = super::emby_source(record).ok_or("缺少 Emby 文件关联。")?;
     let state = WritebackState::default();
-    let (files, _, _) = plan_with_mode(paths, data, record, &state, true);
+    let item = &data["item"];
+    let mut repaired = 0;
+    let (mut files, _, _) = plan_with_mode(paths, data, record, &state, true);
+    if item["Type"] == "Episode" {
+        use crate::providers::media::episode_title::{field_locked, usable};
+        let title = &record["fields"]["title"];
+        if defer_episode_nfo || title.as_str().is_none_or(|title| title.trim().is_empty()) {
+            files.retain(|file| !matches!(file.kind, FileKind::Nfo));
+        } else if !field_locked(item, "Name")
+            && let Some(title) = usable(title, item)
+            && let Some(target) = item["Path"].as_str().and_then(|path| paths.target(path, false))
+        {
+            let item = item.clone();
+            let title = title.to_owned();
+            repaired = tokio::task::spawn_blocking(move || repair_episode_nfo(&target, &item, &title))
+                .await.map_err(|_| "无法补充分集 NFO 标题。")?
+                .map_err(|error| format!("无法补充分集 NFO 标题：{error}"))? as usize;
+        }
+    }
     if files.is_empty() {
-        return Ok(0);
+        return Ok(repaired);
     }
     let job = WritebackJob {
         id: uuid::Uuid::new_v4().simple().to_string(),
@@ -740,7 +759,34 @@ pub(crate) async fn write_automatic(
     }) {
         return Err(error);
     }
-    Ok(report.written)
+    Ok(report.written + repaired)
+}
+
+#[cfg(feature = "web")]
+fn repair_episode_nfo(target: &Target, item: &Value, title: &str) -> io::Result<bool> {
+    use io::Read;
+
+    const MAX_NFO: u64 = 1024 * 1024;
+    let dir = target.directory()?;
+    let name = target.video_sidecar(".nfo");
+    let previous = Existing::read(&dir, &name);
+    if !matches!(&previous, Existing::File { length, .. } if *length <= MAX_NFO) {
+        return Ok(false);
+    }
+    let mut original = Vec::new();
+    dir.open(&name)?.take(MAX_NFO + 1).read_to_end(&mut original)?;
+    if original.len() as u64 > MAX_NFO {
+        return Ok(false);
+    }
+    let Some(updated) = std::str::from_utf8(&original).ok()
+        .and_then(|xml| nfo::fill_episode_title(xml, item, title))
+    else {
+        return Ok(false);
+    };
+    let backup = format!("automatic-{}.bak", uuid::Uuid::new_v4().simple());
+    preserve_existing(&dir, &name, &previous, &backup)?;
+    write_atomic(&dir, &name, updated.as_bytes(), false, || Existing::read(&dir, &name) == previous)?;
+    Ok(true)
 }
 
 fn image_names(stem: String) -> Vec<String> {

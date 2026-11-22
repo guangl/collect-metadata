@@ -677,6 +677,7 @@ dependencies = [
  "cap-std",
  "futures-util",
  "isolang",
+ "quick-xml",
  "regex",
  "reqwest",
  "scraper",

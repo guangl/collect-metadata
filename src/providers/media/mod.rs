@@ -1,5 +1,7 @@
 pub(crate) mod bangumi;
 pub(crate) mod emby;
+#[cfg(feature = "web")]
+pub(crate) mod episode_title;
 mod tmdb;
 mod tvmaze;
 mod wikidata;

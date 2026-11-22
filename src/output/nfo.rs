@@ -426,6 +426,112 @@ fn escape(text: &str) -> String {
     result
 }
 
+#[cfg(feature = "web")]
+pub(super) fn fill_episode_title(xml: &str, item: &Value, title: &str) -> Option<String> {
+    use std::ops::Range;
+
+    use quick_xml::{Reader, escape::unescape, events::Event};
+
+    use crate::providers::media::episode_title::placeholder;
+
+    let mut reader = Reader::from_str(xml);
+    let mut depth = 0usize;
+    let mut root_seen = false;
+    let mut root_end = 0;
+    let mut start = 0;
+    let mut fields: BTreeMap<String, (Range<usize>, bool)> = BTreeMap::new();
+    let tracked = |name: &str| matches!(name, "title" | "sorttitle" | "season" | "episode" | "lockdata" | "lockedfields");
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event().ok()? {
+            Event::Start(tag) => {
+                if depth == 0 {
+                    if root_seen || tag.name().as_ref() != "episodedetails" {
+                        return None;
+                    }
+                    root_seen = true;
+                    root_end = reader.buffer_position() as usize;
+                } else if depth == 1 {
+                    start = reader.buffer_position() as usize;
+                }
+                depth += 1;
+            }
+            Event::End(tag) => {
+                depth = depth.checked_sub(1)?;
+                if depth == 1 {
+                    let name = tag.name();
+                    let name = name.as_ref();
+                    if tracked(name) && fields.insert(name.into(), (start..before, false)).is_some()
+                    {
+                        return None;
+                    }
+                }
+            }
+            Event::Empty(tag) if depth == 1 => {
+                let name = tag.name();
+                let name = name.as_ref();
+                let end = reader.buffer_position() as usize;
+                if tracked(name) && fields.insert(name.into(), (before..end, true)).is_some() {
+                    return None;
+                }
+            }
+            Event::DocType(_) => return None,
+            Event::Eof if root_seen && depth == 0 => break,
+            Event::Eof => return None,
+            _ => {}
+        }
+    }
+    let text = |key: &str| {
+        let (range, empty) = fields.get(key)?;
+        let raw = if *empty { "" } else { xml.get(range.clone())?.trim() };
+        (!raw.contains('<')).then(|| unescape(raw).ok()).flatten()
+    };
+    for (field, number) in [("season", "ParentIndexNumber"), ("episode", "IndexNumber")] {
+        if text(field)?.parse::<u64>().ok()? != item[number].as_u64()? {
+            return None;
+        }
+    }
+    let locks = text("lockedfields").unwrap_or_default();
+    let locked = |name: &str| locks.split('|').any(|field| field.trim().eq_ignore_ascii_case(name));
+    if text("lockdata").is_some_and(|s| s.eq_ignore_ascii_case("true")) || locked("Name")
+        || (fields.contains_key("title") && !placeholder(&text("title")?, item))
+    {
+        return None;
+    }
+    let title = escape(title);
+    let change = |name: &str| {
+        let (range, whole_tag) = fields.get(name).cloned().unwrap_or((root_end..root_end, true));
+        let replacement = if whole_tag { format!("<{name}>{title}</{name}>") } else { title.clone() };
+        (range, replacement)
+    };
+    let mut changes = vec![change("title")];
+    if !locked("SortName") && text("sorttitle").is_some_and(|value| placeholder(&value, item)) {
+        changes.push(change("sorttitle"));
+    }
+    changes.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut result = xml.to_owned();
+    for (range, replacement) in changes {
+        result.replace_range(range, &replacement);
+    }
+    Some(result)
+}
+
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn existing_nfo_title_patch_keeps_other_bytes_and_requires_matching_episode() {
+    let original = "<?xml version=\"1.0\"?>\n<episodedetails>\n  <title>第 7 集</title>\n  <sorttitle>Episode 7</sorttitle>\n  <season>1</season><episode>7</episode>\n  <actor><title>第 7 集</title></actor><plot>A &amp; B</plot>\n</episodedetails>";
+    let mut item = serde_json::json!({"IndexNumber":7,"ParentIndexNumber":1});
+    let patched = fill_episode_title(original, &item, "A & B").unwrap();
+    assert_eq!(patched, original.replacen("第 7 集", "A &amp; B", 1).replacen("Episode 7", "A &amp; B", 1));
+    assert!(fill_episode_title(&patched, &item, "Different").is_none());
+    let blank = original.replacen("<title>第 7 集</title>", "<title/>", 1);
+    assert!(fill_episode_title(&blank, &item, "Filled").unwrap().contains("<title>Filled</title>"));
+    assert!(fill_episode_title(&original.replace("<season>", "<lockedfields>Name|Overview</lockedfields><season>"), &item, "Different").is_none());
+    assert!(fill_episode_title(&original.replace("<season>", "<lockdata>true</lockdata><season>"), &item, "Different").is_none());
+    item["ParentIndexNumber"] = serde_json::json!(2);
+    assert!(fill_episode_title(original, &item, "Different").is_none());
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

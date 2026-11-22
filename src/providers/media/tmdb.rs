@@ -295,6 +295,23 @@ impl Tmdb {
     }
 
     #[cfg(feature = "web")]
+    pub(crate) async fn automatic_episode(
+        &self, client: &Client, emby: &emby::Emby, item: &Value, language: &str, series: u32,
+    ) -> Option<Source> {
+        let mut source = self.emby_episode_with_series(client, emby, item, language, Some(series)).await?;
+        let episode = &source.data["episode"];
+        if let Some(id) = episode["id"].as_u64() {
+            source.fields.insert("tmdb_id", json!(id.to_string()));
+        }
+        if let Some(title) = automatic_episode_title(episode, &source.data["series"], item, language) {
+            source.fields.insert("title", json!(title));
+        } else {
+            source.fields.remove("title");
+        }
+        Some(source)
+    }
+
+    #[cfg(feature = "web")]
     pub(crate) async fn emby_season(
         &self,
         client: &Client,
@@ -468,6 +485,41 @@ impl Tmdb {
         }
         source
     }
+}
+
+#[cfg(feature = "web")]
+fn automatic_episode_title<'a>(
+    episode: &'a Value, series: &Value, item: &Value, language: &str,
+) -> Option<&'a str> {
+    let (lang, region) = language.split_once('-').unwrap_or((language, ""));
+    let translations = &episode["translations"]["translations"];
+    let matching = |language: &str, region: Option<&str>| {
+        list(translations)
+            .filter(|entry| entry["iso_639_1"] == language && region.is_none_or(|r| entry["iso_3166_1"] == r))
+            .find_map(|entry| super::episode_title::usable(&entry["data"]["name"], item))
+    };
+    matching(lang, Some(region))
+        .or_else(|| matching(lang, None))
+        .or_else(|| super::episode_title::usable(&episode["name"], item))
+        .or_else(|| series["original_language"].as_str().and_then(|lang| matching(lang, None)))
+        .or_else(|| matching("en", None))
+}
+
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn automatic_episode_title_ignores_numbered_translations() {
+    let mut episode = json!({"name":"第 7 集", "translations":{"translations":[
+        {"iso_639_1":"zh", "iso_3166_1":"CN", "data":{"name":"第7集"}},
+        {"iso_639_1":"zh", "iso_3166_1":"TW", "data":{"name":"重逢"}},
+        {"iso_639_1":"ja", "iso_3166_1":"JP", "data":{"name":"再会"}}
+    ]}});
+    let series = json!({"original_language":"ja"});
+    let item = json!({"IndexNumber":7});
+    assert_eq!(automatic_episode_title(&episode, &series, &item, "zh-CN"), Some("重逢"));
+    episode["translations"]["translations"][1]["data"]["name"] = json!("第７話");
+    assert_eq!(automatic_episode_title(&episode, &series, &item, "zh-CN"), Some("再会"));
+    episode["translations"] = Value::Null;
+    assert_eq!(automatic_episode_title(&episode, &series, &item, "zh-CN"), None);
 }
 
 pub(super) fn id(value: &str) -> Option<u32> {

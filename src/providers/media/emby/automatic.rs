@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use super::{Emby, is_item_id, list, nonempty_text};
 use crate::output::download_image;
+use crate::providers::media::episode_title::{field_locked, needs_title, usable};
 
 impl Emby {
     pub(crate) async fn automatic_server_id(&self, client: &Client) -> Result<String, String> {
@@ -55,6 +56,7 @@ impl Emby {
             return Err("Emby 条目已锁定。".into());
         }
         if merge_missing(&mut current, fields) {
+            let expected_name = current["Name"].clone();
             self.automatic_post(
                 client,
                 self.endpoint(&format!("Items/{id}")),
@@ -63,7 +65,7 @@ impl Emby {
             )
             .await?;
             let mut saved = self.read_json(client, url).await?;
-            if merge_missing(&mut saved, fields) {
+            if saved["Name"] != expected_name || merge_missing(&mut saved, fields) {
                 return Err("Emby 没有保存全部可写的补充字段。".into());
             }
         }
@@ -187,6 +189,15 @@ impl Emby {
 
 fn merge_missing(item: &mut Value, fields: &Value) -> bool {
     let mut changed = false;
+    if needs_title(item) && let Some(title) = usable(&fields["title"], item) {
+        let title = json!(title);
+        if !field_locked(item, "SortName") && usable(&item["ForcedSortName"], item).is_none() {
+            item["ForcedSortName"] = title.clone();
+            item["SortName"] = title.clone();
+        }
+        item["Name"] = title;
+        changed = true;
+    }
     for (key, source) in [("Tmdb", "tmdb_id"), ("Bangumi", "bangumi_id")] {
         if nonempty_text(&item["ProviderIds"][key]).is_none()
             && !list(&item["LockedFields"])
@@ -232,5 +243,26 @@ mod tests {
             json!({"Overview":"Keep this", "ProviderIds":{"Tmdb":"83","Imdb":"tt1","Bangumi":"29"},
             "LockedFields":["OfficialRating"],"OriginalTitle":"Original"})
         );
+    }
+
+    #[test]
+    fn fills_episode_display_title_without_overwriting_manual_metadata() {
+        let mut item = json!({"Type":"Episode", "Name":"第 7 集", "IndexNumber":7,
+            "ForcedSortName":"第 7 集","SortName":"第 7 集", "Overview":"Keep this",
+            "LockedFields":["Overview"]});
+        let fields = json!({"title":"重逢", "description":"Other"});
+        assert!(!merge_missing(&mut item, &json!({"title":"Episode 7"})));
+        assert!(merge_missing(&mut item, &fields));
+        assert_eq!(item["Name"], "重逢");
+        assert_eq!(item["ForcedSortName"], "重逢");
+        assert_eq!(item["Overview"], "Keep this");
+        assert!(!merge_missing(&mut item, &json!({"title":"Alternate"})));
+
+        item["Name"] = json!("第 7 集");
+        item["LockedFields"] = json!(["Name"]);
+        assert!(!merge_missing(&mut item, &fields));
+        item["LockedFields"] = json!(["SortName"]);
+        assert!(merge_missing(&mut item, &json!({"title":"会合"})));
+        assert_eq!(item["ForcedSortName"], "重逢");
     }
 }

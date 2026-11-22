@@ -356,27 +356,20 @@ impl Collector {
         home: Source,
         query: &str,
         candidate: &crate::CandidateChoice,
-        season: bool,
+        series: &serde_json::Value,
     ) -> Result<LookupResponse, String> {
         use serde_json::{Value, json};
 
         let item = &home.data["item"];
+        let season = item["Type"] == "Season";
         let id = item["Id"].as_str().ok_or("Emby 条目缺少 ID。")?.to_owned();
         if !season && item["IndexNumberEnd"].as_u64().zip(item["IndexNumber"].as_u64())
             .is_some_and(|(end, first)| end > first)
         {
             return Err("多集文件需要确认季集匹配。".into());
         }
-        if !season && candidate.provider == MediaProvider::Tmdb {
-            let mut result = self.gather_emby(emby, MediaKind::Series, query, (id, home), Some(candidate), true).await?;
-            if let Some(details) = result.record["sources"].as_array().into_iter().flatten()
-                .find(|source| source["provider"] == "TMDB")
-                && let Some(id) = details["data"]["episode"]["id"].as_u64()
-            {
-                result.record["fields"]["tmdb_id"] = json!(id.to_string());
-                result.record["field_sources"]["tmdb_id"] = json!("TMDB");
-            }
-            return Ok(result);
+        if !season && matches!(candidate.provider, MediaProvider::Tmdb | MediaProvider::Bangumi) {
+            return self.gather_automatic_episode(emby, home, query, &id, candidate, series).await;
         }
 
         let targets = self.languages.targets(None);
@@ -395,18 +388,16 @@ impl Collector {
             let records = detail.record["fields"]["episodes"].as_array().ok_or("来源暂无分集资料。")?;
             let mut exact = records.iter().filter(|episode| {
                 episode["number"].as_u64() == Some(number)
-                    && (episode["season"].as_u64() == Some(season)
-                    || (candidate.provider == MediaProvider::Bangumi && season == 1 && episode["season"].is_null()))
+                    && episode["season"].as_u64() == Some(season)
             });
             let episode = exact.next().filter(|_| exact.next().is_none()).ok_or("来源找不到唯一的季集。")?;
             let source = detail.record["sources"].as_array().into_iter().flatten()
                 .find(|source| source["status"] == "ok" || source["status"] == "partial")
                 .ok_or("分集来源不可用。")?;
             let provider = match candidate.provider {
-                MediaProvider::Bangumi => "Bangumi",
                 MediaProvider::Tvmaze => "TVmaze",
                 MediaProvider::Wikidata => "Wikidata",
-                MediaProvider::Tmdb => unreachable!(),
+                MediaProvider::Tmdb | MediaProvider::Bangumi => unreachable!(),
             };
             let url = source["url"].as_str().and_then(|value| reqwest::Url::parse(value).ok())
                 .ok_or("分集来源地址无效。")?;
@@ -422,8 +413,51 @@ impl Collector {
         if external.fields.is_empty() {
             return Err("来源没有该季集的可用资料。".into());
         }
-        let mut result = make_lookup(MediaKind::Series, query, Some(&format!("Emby-{id}")), vec![home, external])?;
+        let sources = if season { vec![home, external] } else { automatic_episode_sources(home, vec![external]) };
+        let mut result = make_lookup(MediaKind::Series, query, Some(&format!("Emby-{id}")), sources)?;
         result.record["scope"] = json!(if season { "season" } else { "episode" });
+        result.record["fill_missing"] = json!(true);
+        Ok(self.localize_lookup(result, targets).await)
+    }
+
+    #[cfg(feature = "web")]
+    async fn gather_automatic_episode(
+        &self, emby: &media::emby::Emby, home: Source, query: &str, id: &str,
+        candidate: &crate::CandidateChoice, series: &serde_json::Value,
+    ) -> Result<LookupResponse, String> {
+        use serde_json::json;
+
+        let targets = self.languages.targets(None);
+        let language = &targets[0];
+        let item = &home.data["item"];
+        let (tmdb, bangumi) = if candidate.provider == MediaProvider::Tmdb {
+            let id = candidate.id.parse().map_err(|_| "剧集 TMDB ID 无效。")?;
+            let tmdb = match self.tmdb.provider() {
+                Some(provider) => provider.automatic_episode(&self.client, emby, item, language, id).await,
+                None => None,
+            };
+            let bangumi = series["ProviderIds"]["Bangumi"].as_str().and_then(media::bangumi::id);
+            (tmdb, bangumi)
+        } else {
+            (None, media::bangumi::id(&candidate.id))
+        };
+        let mut external = tmdb.into_iter().collect::<Vec<_>>();
+        if !external.iter().any(|source| source.fields.contains_key("title")) && let Some(subject) = bangumi {
+            let mut match_item = item.clone();
+            if item["PremiereDate"].is_null() && let Some(date) = external.first().and_then(|s| s.fields.get("release_date")) {
+                match_item["PremiereDate"] = date.clone();
+            }
+            if let Some(source) = self.bangumi.provider().automatic_episode(&self.client, subject, &match_item, language).await {
+                external.push(source);
+            }
+        }
+        if !media::episode_title::needs_title(item) && external.iter().all(|source| source.fields.is_empty()) {
+            return Err(external.into_iter().find_map(|source| source.note)
+                .unwrap_or_else(|| "分集来源暂无可用资料。".into()));
+        }
+        let sources = automatic_episode_sources(home, external);
+        let mut result = make_lookup(MediaKind::Series, query, Some(&format!("Emby-{id}")), sources)?;
+        result.record["scope"] = json!("episode");
         result.record["fill_missing"] = json!(true);
         Ok(self.localize_lookup(result, targets).await)
     }
@@ -721,6 +755,53 @@ fn merge_emby_episodes(home: &mut Source, external: &mut [Source], prefer_emby: 
             }
         }
     }
+}
+
+#[cfg(feature = "web")]
+fn automatic_episode_sources(mut home: Source, mut external: Vec<Source>) -> Vec<Source> {
+    use media::episode_title::{needs_title, usable};
+    use serde_json::json;
+
+    let item = &home.data["item"];
+    for source in &mut external {
+        if source.fields.get("title").and_then(|title| usable(title, item)).is_none() {
+            source.fields.remove("title");
+        }
+    }
+    if needs_title(item) {
+        if external.iter().any(|source| source.fields.contains_key("title")) {
+            home.fields.remove("title");
+        } else if let Some(title) = usable(&item["ForcedSortName"], item) {
+            home.fields.insert("title", json!(title));
+        } else if !home.fields.contains_key("title") {
+            // An old original-language title can belong to a different season.
+            home.fields.remove("title_original");
+        }
+    }
+    external.insert(0, home);
+    external
+}
+
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn automatic_episode_sources_replace_only_placeholder_display_names() {
+    use serde_json::json;
+
+    let item = json!({"Type":"Episode", "Name":"第 7 集", "ForcedSortName":"排序中的集名", "IndexNumber":7});
+    let page = reqwest::Url::parse("https://www.themoviedb.org/").unwrap();
+    let home = |item: &serde_json::Value| Source::found("Emby", &page,
+        media::emby::episode_fields(item), json!({"item":item}));
+    let tmdb = |name| Source::found("TMDB", &page, Fields::from([("title", json!(name))]), json!(null));
+    let merged = |item: &serde_json::Value, sources| {
+        make_lookup(MediaKind::Series, "emby-episode:7", None, automatic_episode_sources(home(item), sources)).unwrap().record
+    };
+    let preferred = merged(&item, vec![tmdb("重逢")]);
+    assert_eq!(preferred["fields"]["title"], "重逢");
+    assert_eq!(preferred["field_sources"]["title"], "TMDB");
+    assert_eq!(merged(&item, vec![tmdb("Episode 7")])["fields"]["title"], "排序中的集名");
+    let mut item = item;
+    item["Name"] = json!("人工维护的标题");
+    assert_eq!(merged(&item, vec![tmdb("重逢")])["fields"]["title"], "人工维护的标题");
 }
 
 fn make_lookup(

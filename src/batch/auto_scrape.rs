@@ -13,8 +13,16 @@ use super::{CandidateChoice, folder};
 use crate::{
     Collector, MediaKind, MediaProvider,
     output::write_automatic,
-    providers::media::emby::{EPISODE_QUERY_PREFIX, is_item_id},
+    providers::media::{emby::{EPISODE_QUERY_PREFIX, is_item_id}, episode_title::{needs_title, usable}},
 };
+
+const TITLE_RETRY_WINDOW: Duration = Duration::from_secs(7 * 24 * 3600);
+
+enum Outcome {
+    Skipped,
+    Written(usize),
+    AwaitingTitle,
+}
 
 pub struct AutoScrape {
     spool: PathBuf,
@@ -121,11 +129,16 @@ impl AutoScrape {
                 })
                 .buffer_unordered(4);
             while let Some((event, result)) = results.next().await {
+                let mut title_pending = false;
                 let error = match result {
+                    Ok(Outcome::AwaitingTitle) => {
+                        title_pending = true;
+                        "来源尚未提供可核对的分集标题。".into()
+                    }
                     Ok(done) => match tokio::fs::remove_file(&event.path).await {
                         Ok(()) => {
                             retries.remove(&event.path);
-                            if let Some(count) = done {
+                            if let Outcome::Written(count) = done {
                                 eprintln!(
                                     "Automatic scrape {} {} completed with {count} new sidecar files.",
                                     event.item_type, event.id
@@ -139,7 +152,11 @@ impl AutoScrape {
                     Err(error) => error,
                 };
                 let attempt = retries.get(&event.path).map_or(1, |(count, _)| count + 1);
-                let delay = Duration::from_secs((5 * 2_u64.pow(attempt.min(9) - 1)).min(1800));
+                let delay = if title_pending {
+                    Duration::from_secs(if attempt == 1 { 1800 } else { 6 * 3600 })
+                } else {
+                    Duration::from_secs((5 * 2_u64.pow(attempt.min(9) - 1)).min(1800))
+                };
                 retries.insert(event.path, (attempt, Instant::now() + delay));
                 eprintln!(
                     "Automatic scrape {} {}: {error}; retry in {}s.",
@@ -171,7 +188,7 @@ impl AutoScrape {
         Ok(result)
     }
 
-    async fn process(&self, collector: &Collector, event: &Event) -> Result<Option<usize>, String> {
+    async fn process(&self, collector: &Collector, event: &Event) -> Result<Outcome, String> {
         let _permit = collector.batch_permit().await;
         let emby = collector
             .emby_settings()
@@ -190,28 +207,28 @@ impl AutoScrape {
             .await?;
         let item = &home.data["item"];
         if item["LocationType"] == "Virtual" {
-            return Ok(None);
+            return Ok(Outcome::Skipped);
         }
         let path = item["Path"].as_str().filter(|path| !path.is_empty()).map(Path::new)
             .ok_or("等待 Emby 完成入库并提供媒体路径。")?;
         let private = self.private_roots.iter().any(|root| path.starts_with(root));
         if !private && !self.roots.iter().any(|root| path.starts_with(root)) {
-            return Ok(None);
+            return Ok(Outcome::Skipped);
         }
         if item["LockData"] == true
             || item["LockData"]["Enabled"] == true
             || item["IsLocked"] == true
         {
-            return Ok(None);
+            return Ok(Outcome::Skipped);
         }
         let settings = collector.output_settings().ok_or("自动写回设置不可用。")?;
         let paths = settings.media_paths();
         if event.item_type == "Video" && !private {
-            return Ok(None);
+            return Ok(Outcome::Skipped);
         }
         let mut result = if private {
             if kind != MediaKind::Movie {
-                return Ok(None);
+                return Ok(Outcome::Skipped);
             }
             let code = path
                 .file_stem()
@@ -250,7 +267,7 @@ impl AutoScrape {
                     home,
                     &query,
                     &candidate,
-                    event.item_type == "Season",
+                    &series,
                 )
                 .await?
         } else {
@@ -259,7 +276,8 @@ impl AutoScrape {
                 .gather_automatic_work(kind, event.id.clone(), &query, home, &candidate)
                 .await?
         };
-        if self.central_metadata && !private {
+        let central = self.central_metadata && !private;
+        if central {
             collector.require_store().await?;
             let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
             emby.enrich_automatic_item(&collector.client, &data["item"], &result.record).await?;
@@ -268,22 +286,48 @@ impl AutoScrape {
                 .find(|source| source["provider"] == "Emby")
                 .ok_or("缺少 Emby 文件关联。")?;
             source["data"]["item"] = fresh.data["item"].clone();
+            if event.item_type == "Episode" {
+                // Sidecars use the title actually saved by Emby, including a concurrent manual edit.
+                for (key, field) in [("title", "Name"), ("sort_title", "SortName")] {
+                    let actual = &fresh.data["item"][field];
+                    if result.record["fields"][key] != *actual {
+                        result.record["fields"][key] = actual.clone();
+                        result.record["field_sources"][key] = json!("Emby");
+                    }
+                }
+            }
             let server = emby.automatic_server_id(&collector.client).await?;
             collector.upsert_emby_item(&server, &event.id, &fresh.data["item"], None).await?;
+        } else if event.item_type == "Episode" {
+            let item = &crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?["item"];
+            if !needs_title(item) {
+                result.record["fields"]["title"] = item["Name"].clone();
+                result.record["field_sources"]["title"] = json!("Emby");
+            }
         }
-        let written = write_automatic(&collector.client, &emby, &paths, &result.record).await;
-        if !self.central_metadata || private {
+        let item = &crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?["item"];
+        let missing_title = needs_title(item) && usable(&result.record["fields"]["title"], item).is_none();
+        let awaiting_title = missing_title && tokio::fs::metadata(&event.path).await
+            .and_then(|entry| entry.modified()).map_err(|error| format!("无法读取入库事件时间：{error}"))?
+            .elapsed().unwrap_or_default() < TITLE_RETRY_WINDOW;
+        let written = write_automatic(&collector.client, &emby, &paths, &result.record, awaiting_title).await?;
+        if !central && (!awaiting_title || written > 0) {
             // The legacy route loads local sidecars into Emby.
             emby.refresh_sidecars(&collector.client, &event.id).await?;
         }
-        let written = written?;
         if written > 0 {
             let saved = collector.save_lookup(result).await;
             if let Some(error) = saved.storage_error {
                 eprintln!("Automatic scrape {} snapshot: {error}", event.id);
             }
         }
-        Ok(Some(written))
+        if awaiting_title {
+            return Ok(Outcome::AwaitingTitle);
+        }
+        if missing_title {
+            eprintln!("Automatic scrape Episode {} retained its episode number after seven days without a sourced title.", event.id);
+        }
+        Ok(Outcome::Written(written))
     }
 }
 

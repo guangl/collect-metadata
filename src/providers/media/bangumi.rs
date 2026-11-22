@@ -286,6 +286,30 @@ impl Bangumi {
         ))
     }
 
+    #[cfg(feature = "web")]
+    pub(crate) async fn automatic_episode(
+        &self, client: &Client, subject: u32, item: &Value, language: &str,
+    ) -> Option<Source> {
+        let (episodes, complete) = self.episodes(client, subject, MediaKind::Series).await;
+        if !complete {
+            return None;
+        }
+        let episode = automatic_episode_match(&episodes, item)?;
+        let id = episode["id"].as_u64().filter(|id| *id > 0)?;
+        let page = Url::parse(&format!("https://bgm.tv/ep/{id}")).ok()?;
+        let native = episode_title::usable(&episode["name"], item);
+        let chinese = episode_title::usable(&episode["name_cn"], item);
+        let title = if language.starts_with("zh-") { chinese.or(native) } else { native.or(chinese) };
+        Some(Source::found(NAME, &page, field_map([
+            ("title", json!(title)),
+            ("title_original", json!(native)),
+            ("bangumi_id", json!(id.to_string())),
+            ("description", episode["desc"].clone()),
+            ("release_date", episode["airdate"].clone()),
+            ("runtime_minutes", json!(episode_minutes(episode))),
+        ]), json!({"episode":episode})))
+    }
+
     pub(crate) async fn details(&self, client: &Client, kind: MediaKind, id: u32) -> Source {
         let page = Url::parse(&format!("https://bgm.tv/subject/{id}")).unwrap();
         let subject = match self.subject(client, id).await {
@@ -377,6 +401,61 @@ fn matching_episode<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value
     });
     let matched = matches.next()?;
     matches.next().is_none().then_some(matched)
+}
+
+#[cfg(feature = "web")]
+fn automatic_episode_match<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
+    let number = item["IndexNumber"].as_u64().filter(|&number| number > 0)?;
+    if item["ParentIndexNumber"].as_u64()? == 0
+        || item["IndexNumberEnd"].as_u64().is_some_and(|end| end > number)
+    {
+        return None;
+    }
+    let expected_id = text(&item["ProviderIds"]["Bangumi"]).and_then(id).map(u64::from);
+    let premiere = calendar_date(&item["PremiereDate"]);
+    let mut matches = episodes.iter().filter(|episode| {
+        if episode["type"] != 0 || !["ep", "sort"].iter().any(|key| episode[key].as_f64() == Some(number as f64)) {
+            return false;
+        }
+        let episode_id = episode["id"].as_u64();
+        // Emby may store local midnight as the previous day in UTC.
+        let date_matches = premiere.zip(calendar_date(&episode["airdate"]))
+            .is_some_and(|(a, b)| (a - b).whole_days().abs() <= 1);
+        if let Some(expected) = expected_id {
+            episode_id == Some(expected) && (premiere.is_none() || episode["airdate"].is_null() || date_matches)
+        } else {
+            date_matches || (premiere.is_none() && item["ParentIndexNumber"] == 1)
+        }
+    });
+    matches.next().filter(|_| matches.next().is_none())
+}
+
+#[cfg(feature = "web")]
+fn calendar_date(value: &Value) -> Option<time::Date> {
+    let date = text(value)?.get(..10)?;
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month = time::Month::try_from(parts.next()?.parse::<u8>().ok()?).ok()?;
+    let day = parts.next()?.parse().ok()?;
+    time::Date::from_calendar_date(year, month, day).ok()
+}
+
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn automatic_episode_matches_date_and_catalog_number_without_crossing_seasons() {
+    let episodes = vec![
+        json!({"id":101,"type":0,"ep":7,"airdate":"2023-11-15"}),
+        json!({"id":201,"type":0,"ep":7,"airdate":"2026-11-15"}),
+        json!({"id":301,"type":1,"ep":7,"airdate":"2026-11-15"}),
+    ];
+    let mut item = json!({"IndexNumber":7,"ParentIndexNumber":2,"PremiereDate":"2026-11-14T16:00:00Z"});
+    assert_eq!(automatic_episode_match(&episodes, &item).unwrap()["id"], 201);
+    item["PremiereDate"] = Value::Null;
+    assert!(automatic_episode_match(&episodes, &item).is_none());
+    item["ProviderIds"] = json!({"Bangumi":"201"});
+    assert_eq!(automatic_episode_match(&episodes, &item).unwrap()["id"], 201);
+    item["IndexNumberEnd"] = json!(8);
+    assert!(automatic_episode_match(&episodes, &item).is_none());
 }
 
 #[cfg(test)]
