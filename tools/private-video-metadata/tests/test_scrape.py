@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import subprocess
@@ -183,6 +184,101 @@ class PrivateMetadataTest(TestCase):
         self.assertEqual(nfo.findtext('premiered'), '2026-11-06')
         self.assertIsNone(nfo.find('releasedate'))
         self.assertEqual(nfo.findtext('tagline'), '目录日期 2026-11-06')
+
+    def test_new_scrape_retries_a_failed_synopsis_sentence_and_keeps_the_original(self):
+        first = '海辺の町で育った。'
+        left = 'ある日の練習中に、'
+        right = 'ひざにけがをした。'
+        original = first + '\n' + left + right
+        catalog = {'code': 'IDPC-032', 'title': 'Test', 'source': 'publisher', 'plot': original}
+        translations = {
+            first: '在海边小镇长大。',
+            left + right: '受伤，受伤，受伤，受伤。',
+            left: '有一天训练时，',
+            right: '膝盖受了伤。',
+        }
+
+        with TemporaryDirectory() as temp:
+            folder = Path(temp, 'IDPC-032')
+            folder.mkdir()
+            (folder / 'IDPC-032.mp4').touch()
+            with (
+                patch.object(scrape, 'collect_metadata', return_value=catalog),
+                patch.object(scrape, 'probe_video', return_value={}),
+                patch.object(localize, 'chinese', side_effect=lambda text: translations.get(text, text)),
+            ):
+                result, _ = scrape.scrape_one(folder, Mock(), SimpleNamespace(force=False))
+            self.assertEqual(result, 'OK')
+            for name in ('IDPC-032.nfo', 'movie.nfo'):
+                nfo = ET.parse(folder / name)
+                self.assertEqual(nfo.findtext('plot'), '在海边小镇长大。\n有一天训练时，膝盖受了伤。')
+                self.assertEqual(nfo.findtext('originalplot'), original)
+
+    def test_synopsis_keeps_complete_translated_sentences_when_a_retry_fails(self):
+        sentence = '海辺の町で育った。'
+        left = 'ある日の練習中に、'
+        unresolved = left + 'ひざにけがをした。'
+        translations = {sentence: '在海边小镇长大。', left: '有一天训练时，'}
+        with patch.object(localize, 'chinese', side_effect=lambda text: translations.get(text, text)) as model:
+            self.assertEqual(localize.synopsis_chinese(sentence + unresolved), '在海边小镇长大。')
+            model.assert_any_call(left)
+            self.assertEqual(localize.synopsis_chinese(sentence + unresolved, allow_partial=False),
+                             sentence + unresolved)
+            self.assertEqual(localize.synopsis_chinese(unresolved), unresolved)
+
+    def test_deepseek_retranslates_the_whole_synopsis_once_for_all_sidecars(self):
+        first = '海辺の町で育った。'
+        left = 'ある日の練習中に、'
+        right = 'ひざにけがをした。'
+        original = first + left + right
+        catalog = {'code': 'IDPC-032', 'title': 'Test', 'source': 'publisher', 'plot': original}
+        local = {first: '在山村长大。', left: '有一天训练时，', right: '膝盖受了伤。'}
+        response = Mock()
+        response.read.return_value = json.dumps({
+            'translations': ['在海邊小鎮長大。有一天訓練時，膝蓋受了傷。'],
+        }).encode()
+
+        with TemporaryDirectory() as temp:
+            folder = Path(temp, 'IDPC-032')
+            folder.mkdir()
+            (folder / 'IDPC-032.mp4').touch()
+            token = Path(temp, 'token')
+            token.write_text('example', encoding='utf-8')
+            with (
+                patch.dict('os.environ', {'PRIVATE_METADATA_TRANSLATION_URL': 'http://bridge:7100/translate',
+                                          'PRIVATE_METADATA_TRANSLATION_TOKEN_FILE': str(token)}),
+                patch.object(scrape, 'collect_metadata', return_value=catalog),
+                patch.object(scrape, 'probe_video', return_value={}),
+                patch.object(localize, 'chinese', side_effect=lambda text: local.get(text, text)),
+                patch.object(localize, 'urlopen', return_value=nullcontext(response)) as request,
+            ):
+                result, _ = scrape.scrape_one(folder, Mock(), SimpleNamespace(force=False))
+            self.assertEqual(result, 'OK')
+            request.assert_called_once()
+            sent = request.call_args.args[0]
+            self.assertEqual(json.loads(sent.data), {'target_language': 'zh', 'texts': [original]})
+            self.assertEqual(sent.get_header('Authorization'), 'Bearer example')
+            for name in ('IDPC-032.nfo', 'movie.nfo'):
+                nfo = ET.parse(folder / name)
+                self.assertEqual(nfo.findtext('plot'), '在海边小镇长大。有一天训练时，膝盖受了伤。')
+                self.assertEqual(nfo.findtext('originalplot'), original)
+
+    def test_unusable_deepseek_translation_keeps_the_local_result(self):
+        good = '海辺の町で育った。'
+        failed = 'ひざにけがをした。'
+        response = Mock()
+        response.read.return_value = json.dumps({
+            'translations': ['很抱歉，我无法翻译这段内容。'],
+        }).encode()
+        with (
+            patch.dict('os.environ', {'PRIVATE_METADATA_TRANSLATION_URL': 'http://bridge:7100/translate',
+                                      'PRIVATE_METADATA_TRANSLATION_TOKEN_FILE': '/run/test-token'}),
+            patch.object(Path, 'read_text', return_value='example'),
+            patch.object(localize, 'chinese', side_effect=lambda text: '在海边小镇长大。' if text == good else text),
+            patch.object(localize, 'urlopen', return_value=nullcontext(response)),
+            self.assertLogs(localize.LOGGER, level='WARNING'),
+        ):
+            self.assertEqual(localize.synopsis_chinese(good + failed), '在海边小镇长大。')
 
     def test_title_translation_retries_and_preserves_the_source_on_failure(self):
         source = '青春を舞台に捧げた歌手'

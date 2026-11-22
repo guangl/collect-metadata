@@ -1,17 +1,37 @@
-"""Simplify Chinese metadata and translate Japanese display text locally."""
+"""Simplify Chinese metadata and translate Japanese display text."""
 
+import json
+import logging
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
 from opencc import OpenCC
 
 MODEL = Path('/opt/translation-model')
+LOGGER = logging.getLogger(__name__)
 KANA = re.compile(r'[\u3040-\u30ff\uff66-\uff9d]')
 HAN = re.compile(r'[\u3400-\u9fff]')
 CONVERTER = OpenCC('t2s')
 BROKEN_TEXT = re.compile(r'[�⁇]|[?？]{2,}')
+SYNOPSIS_SENTENCES = re.compile(r'(?<=[。！？!?])(?![。！？!?])|(\n+)')
+CLAUSE_PUNCTUATION = re.compile(r'[、，,；;：:]\s*')
+CLAUSE_END = re.compile(
+    r'てきた|したあと|した後|していた|ていた|ている|けれども|けれど|ながら|として|'
+    r'ので|から|[くぐるた]と|して|した|が'
+)
+CLAUSE_START = re.compile(r'(?=ある日|その日|その後|それから|次は)')
+SCRIPT_BOUNDARY = re.compile(r'(?<=[ぁ-ゖ])(?=[\u3400-\u9fffァ-ヺ])|(?<=[\u3400-\u9fffァ-ヺ])(?=[A-Za-z])')
+CLAUSE_JOIN = re.compile(r'[、，,；;：:。.!！?？]$')
+REPEATED_PHRASE = re.compile(r'([\u3400-\u9fff]{2,12})(?:[、，,]\s*\1){3}')
+DECLINED_TRANSLATION = re.compile(r'^(?:很?抱歉|对不起|我(?:无法|不能)(?:翻译|提供)|由于内容)')
+MAX_BRIDGE_RESPONSE = 32_000
+MIN_CLAUSE_LENGTH = 6
+MAX_CLAUSE_SPLITS = 3
 KANJI_PAIRS = re.compile(r'(?=([\u3400-\u9fff]{2}))')
 GENRE_NAMES = {
     'アクメ・オーガズム': '高潮',
@@ -57,14 +77,101 @@ def chinese(text):
     return CONVERTER.convert(text)
 
 
-def synopsis_chinese(text):
+def split_clause(text):
+    for patterns in ((CLAUSE_PUNCTUATION,), (CLAUSE_END, CLAUSE_START), (SCRIPT_BOUNDARY,)):
+        cuts = [match.end() for pattern in patterns for match in pattern.finditer(text)
+                if MIN_CLAUSE_LENGTH <= match.end() <= len(text) - MIN_CLAUSE_LENGTH]
+        if cuts:
+            cut = min(cuts, key=lambda index: abs(len(text) - 2 * index))
+            return text[:cut].rstrip(), text[cut:].lstrip()
+    return None
+
+
+def valid_synopsis_text(text):
+    return bool(text and not KANA.search(text) and not BROKEN_TEXT.search(text)
+                and not REPEATED_PHRASE.search(text))
+
+
+def translate_synopsis_sentence(text, splits=MAX_CLAUSE_SPLITS):
+    translated = chinese(text)
+    if valid_synopsis_text(translated):
+        return translated
+    parts = split_clause(text) if splits else None
+    if not parts:
+        return None
+    left = translate_synopsis_sentence(parts[0], splits - 1)
+    if left is None:
+        return None
+    right = translate_synopsis_sentence(parts[1], splits - 1)
+    if right is None:
+        return None
+    separator = '' if CLAUSE_JOIN.search(left) else '，'
+    return left + separator + right
+
+
+def translate_synopsis_remote(text):
+    endpoint = os.getenv('PRIVATE_METADATA_TRANSLATION_URL')
+    token_file = os.getenv('PRIVATE_METADATA_TRANSLATION_TOKEN_FILE')
+    if not endpoint or not token_file or len(text.strip()) > 4000:
+        return None
+    try:
+        token = Path(token_file).read_text(encoding='utf-8').strip()
+        if not token:
+            raise ValueError('Empty translation token')
+        # The source is known to be Japanese. The bridge's "zh" target bypasses its
+        # Chinese language heuristic, which can misclassify Japanese with many kanji.
+        payload = json.dumps({'target_language': 'zh', 'texts': [text]}, ensure_ascii=False)
+        request = Request(endpoint, data=payload.encode('utf-8'), headers={
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json',
+        })
+        with urlopen(request, timeout=25) as response:
+            body = response.read(MAX_BRIDGE_RESPONSE + 1)
+        if len(body) > MAX_BRIDGE_RESPONSE:
+            raise ValueError('Oversized translation response')
+        data = json.loads(body)
+    except HTTPError as error:
+        LOGGER.warning('Synopsis translation fallback returned HTTP %s.', error.code)
+        return None
+    except (OSError, ValueError):
+        LOGGER.warning('Synopsis translation fallback unavailable.')
+        return None
+
+    values = data.get('translations') if isinstance(data, dict) else None
+    if isinstance(values, list) and len(values) == 1 and isinstance(values[0], str):
+        translated = CONVERTER.convert(values[0].strip())
+        if (valid_synopsis_text(translated) and HAN.search(translated)
+                and not DECLINED_TRANSLATION.match(translated) and len(translated) * 3 >= len(text.strip())):
+            return translated
+    LOGGER.warning('Synopsis translation fallback returned unusable text.')
+    return None
+
+
+def synopsis_chinese(text, *, allow_partial=True):
     if not KANA.search(text):
         return chinese(text)
-    sentences = re.split(r'(?<=[。！？])(?![。！？])\s*|\n+', text)
-    translated = [chinese(sentence.strip()) for sentence in sentences if sentence.strip()]
-    if any(KANA.search(sentence) or BROKEN_TEXT.search(sentence) for sentence in translated):
+    translated = []
+    needs_retry = False
+    for part in filter(None, SYNOPSIS_SENTENCES.split(text)):
+        if part.isspace():
+            translated.append(part)
+            continue
+        sentence = part.strip()
+        direct = translate_synopsis_sentence(sentence, splits=0)
+        if direct is None:
+            needs_retry = True
+            direct = translate_synopsis_sentence(sentence)
+        translated.append(direct)
+    if needs_retry and allow_partial:
+        # Re-translate the source as a whole so DeepSeek can fix errors in even the
+        # locally accepted sentences and use the surrounding sentences for context.
+        remote = translate_synopsis_remote(text)
+        if remote:
+            return remote
+    if not allow_partial and None in translated:
         return text
-    return ''.join(translated) or text
+    # The NFO keeps the complete source in originalplot, including failed sentences.
+    return ''.join(filter(None, translated)).strip() or text
 
 
 def numbered_series(title, series):
@@ -114,7 +221,7 @@ def title_chinese(text):
     return ' '.join(translated)
 
 
-def localize(root, *, catalog_title=False, catalog_plot=False):
+def localize(root, *, catalog_title=False, plot_localized=False):
     code = (root.findtext('num') or root.findtext('sorttitle') or '').strip()
     actors = {name.text for name in root.findall('actor/name') if name.text}
     title = root.find('title')
@@ -149,13 +256,14 @@ def localize(root, *, catalog_title=False, catalog_plot=False):
                 translated = ''.join(localized)
         title.text = ((prefix if code else '') + series_title + translated).strip()
     for field in ('plot', 'outline', 'tagline', 'genre', 'tag', 'set/name'):
+        if field == 'plot' and plot_localized:
+            continue
         seen = set()
         for element in root.findall(field):
             if element.text:
-                if field == 'plot' and catalog_plot:
-                    element.text = CONVERTER.convert(element.text)
-                elif field in ('plot', 'outline'):
-                    element.text = synopsis_chinese(element.text)
+                if field in ('plot', 'outline'):
+                    allow_partial = field == 'plot' and root.findtext('originalplot') == element.text
+                    element.text = synopsis_chinese(element.text, allow_partial=allow_partial)
                 elif field == 'genre' or (field == 'tag' and element.text not in actors):
                     value = element.text.strip()
                     element.text = GENRE_NAMES.get(value.casefold()) or (

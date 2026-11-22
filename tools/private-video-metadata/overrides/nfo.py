@@ -4,7 +4,7 @@ import re
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
-from .localize import localize
+from .localize import CONVERTER, localize, synopsis_chinese
 from .publisher import official_url
 from .sources import JAVBUS, _same_code
 
@@ -44,7 +44,15 @@ def supplement_nfo(content, code, data):
     return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n", added
 
 
-def build_nfo(data, tags, folder_name, video_info=None):
+def localized_synopsis(data):
+    if data.get("plot_cn"):
+        return CONVERTER.convert(data["plot_cn"])
+    if data.get("plot"):
+        return synopsis_chinese(data["plot"])
+    return None
+
+
+def build_nfo(data, tags, folder_name, video_info=None, *, synopsis=None):
     root = ET.Element("movie")
 
     def add(parent, tag, text):
@@ -66,7 +74,7 @@ def build_nfo(data, tags, folder_name, video_info=None):
     add(root, "title", f"{code} {display_title}".strip())
     add(root, "originaltitle", original_title or display_title)
     add(root, "sorttitle", code)
-    add(root, "plot", data.get("plot_cn") or data.get("plot"))
+    add(root, "plot", synopsis if synopsis is not None else localized_synopsis(data))
     add(root, "originalplot", data.get("plot"))
     add(root, "website", data.get("website"))
     add(root, "num", code)
@@ -135,7 +143,7 @@ def build_nfo(data, tags, folder_name, video_info=None):
     add(root, "source", data.get("source"))
     add(root, "originalfolder", folder_name)
 
-    localize(root, catalog_title=bool(data.get("title_cn")), catalog_plot=bool(data.get("plot_cn")))
+    localize(root, catalog_title=bool(data.get("title_cn")), plot_localized=True)
     _add_supplemental_fields(root, data)
     raw = ET.tostring(root, encoding="utf-8")
     return minidom.parseString(raw).toprettyxml(indent="  ", encoding="UTF-8")

@@ -20,7 +20,7 @@ from .backdrops import publish_sample_backdrops
 from .catalog import VIDEO_EXT, normalize
 from .filesystem import atomic_write_bytes
 from .intake import intake_tags
-from .nfo import build_nfo, supplement_nfo
+from .nfo import build_nfo, localized_synopsis, supplement_nfo
 from .publisher import fetch_publisher, merge_publisher
 from .sources import fetch_javbus, fetch_javdb, fetch_r18_text, merge_sources
 
@@ -136,10 +136,13 @@ def _build_sidecars(nfo_path, videos, data, tags, *, force):
         tags.extend(intake_tags(video))
         if (measured[video].get("width") or 0) >= 3840:
             tags.append("4K")
+    # Translate once so every NFO for this title gets the same synopsis and shares one request.
+    synopsis = localized_synopsis(data)
     # A sidecar shared by multiple files cannot carry any single file's runtime.
     return {
         path: build_nfo(
-            data, tags, nfo_path.parent.name, measured[items[0]] if len(items) == 1 else {}
+            data, tags, nfo_path.parent.name, measured[items[0]] if len(items) == 1 else {},
+            synopsis=synopsis,
         )
         for path, items in groups.items()
     }
