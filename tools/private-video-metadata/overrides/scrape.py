@@ -19,6 +19,7 @@ from .artwork import (
 from .backdrops import publish_sample_backdrops
 from .catalog import VIDEO_EXT, normalize
 from .filesystem import atomic_write_bytes
+from .intake import intake_tags
 from .nfo import build_nfo, supplement_nfo
 from .publisher import fetch_publisher, merge_publisher
 from .sources import fetch_javbus, fetch_javdb, fetch_r18_text, merge_sources
@@ -154,6 +155,11 @@ def scrape_one(folder, fetcher, args):
         if sidecar != nfo_path and (args.force or not sidecar.exists()):
             groups.setdefault(sidecar, []).append(video)
     measured = {video: probe_video(video) for video in videos}
+    if len(videos) == 1:
+        video = videos[0]
+        tags.extend(intake_tags(video))
+        if (measured[video].get("width") or 0) >= 3840:
+            tags.append("4K")
     # A sidecar shared by multiple files cannot carry any single file's runtime.
     payloads = {
         path: build_nfo(data, tags, folder.name, measured[items[0]] if len(items) == 1 else {})

@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from xml.etree import ElementTree as ET
 
 from javlibrarian import localize, scrape
+from javlibrarian.intake import intake_tags, prepare
 from javlibrarian.nfo import build_nfo
 from javlibrarian.publisher import fetch_publisher
 from javlibrarian.sources import JAVBUS, JAVDB, R18
@@ -41,6 +42,61 @@ class FakeFetcher:
 
 
 class PrivateMetadataTest(TestCase):
+    def test_incoming_video_and_generated_sidecar_use_catalog_number(self):
+        with TemporaryDirectory() as temp:
+            source = Path(temp, 's169bbs.com@SNOS-384-UC_[4K].MKV')
+            source.write_bytes(b'video')
+            stat = source.stat()
+            folder = prepare(source)
+            video = folder / 'SNOS-384.mkv'
+            self.assertEqual(folder.name, 'SNOS-384')
+            self.assertEqual(video.stat().st_ino, stat.st_ino)
+            self.assertEqual(intake_tags(video), ['无码破解', '中文字幕'])
+            catalog = {'code': 'SNOS-384', 'title': 'Test', 'source': 'publisher'}
+            with (
+                patch.object(scrape, 'collect_metadata', return_value=catalog),
+                patch.object(scrape, 'probe_video', return_value={'width': 3840, 'height': 2160}),
+            ):
+                result, _ = scrape.scrape_one(folder, Mock(), SimpleNamespace(force=False))
+            self.assertEqual(result, 'OK')
+            self.assertEqual({p.name for p in folder.iterdir()}, {
+                'SNOS-384.mkv', 'SNOS-384.nfo', 'movie.nfo',
+            })
+            nfo = ET.parse(folder / 'SNOS-384.nfo')
+            self.assertEqual(nfo.findtext('num'), 'SNOS-384')
+            self.assertEqual({e.text for e in nfo.findall('tag')}, {'无码破解', '中文字幕', '4K', 'SNOS'})
+
+    def test_incoming_folder_renames_video_and_matching_subtitles(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp, 'site.com@IDPC-032_[4K]')
+            folder.mkdir()
+            video = folder / 'some label.mkv'
+            video.write_bytes(b'video')
+            video.with_suffix('.zh.srt').write_bytes(b'subtitles')
+            target = prepare(folder, [video.name])
+            self.assertEqual(target.name, 'IDPC-032')
+            self.assertEqual((target / 'IDPC-032.mkv').read_bytes(), b'video')
+            self.assertEqual((target / 'IDPC-032.zh.srt').read_bytes(), b'subtitles')
+
+    def test_collisions_and_multi_video_folders_keep_the_incoming_paths(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            left = root / 'site.com@SNOS-384_[4K].mkv'
+            right = root / 'SNOS-384.mp4'
+            left.touch()
+            right.touch()
+            with self.assertRaises(FileExistsError):
+                prepare(left)
+            self.assertEqual(set(root.iterdir()), {left, right})
+            folder = root / 'IDPC-032_[4K]'
+            folder.mkdir()
+            names = ['part1.mkv', 'part2.mkv']
+            for name in names:
+                (folder / name).touch()
+            with self.assertRaises(ValueError):
+                prepare(folder, names)
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), names)
+
     def test_catalog_chinese_wins_per_field_and_short_tags_skip_the_model(self):
         search = f'{JAVDB}/search?q=IDPC-032&f=all'
         primary = f'{JAVDB}/v/matching?locale=zh'

@@ -1,6 +1,8 @@
 # Private video metadata worker overlay
 
-Build this directory against the NAS's existing local `homelab/private-metadata:13d1b6a-reviewed` image. Point the private metadata Compose worker at the new image and remove the old bind mount for `javlibrarian/publisher.py` so the worker loads the publisher adapter from the image. Keep the other Compose mounts.
+Build this directory against the NAS's existing local `homelab/private-metadata:13d1b6a-reviewed` image. Set the private metadata Compose entrypoint to `["python", "-m", "javlibrarian.worker"]` and use the new image. Remove legacy bind mounts for the worker and publisher Python files. Keep the library, translation model, Emby key, and portrait helper mounts.
+
+The watcher prepares stable single-video imports as `NUMBER/NUMBER.ext` and writes `NUMBER.nfo` alongside the video. Matching subtitles follow the video basename, including their language suffixes. Filename-derived tags are retained as a video attribute for retry, and UHD resolution is measured by ffprobe. Duplicate numbers and multi-video inputs are deferred for manual selection.
 
 The worker saves the original `Samples/sampleN.jpg` and copies each image to the Emby-compatible `extrafanart/fanartN.jpg`. The NFO writer includes verified source links and known country, publisher and series values. The additive NFO helper preserves existing descriptions, cast, and other fields.
 
