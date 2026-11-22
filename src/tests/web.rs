@@ -208,12 +208,13 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let path = uri.path();
-    if path.contains("/Images/") {
-        return (
-            [("content-type", "image/jpeg")],
-            vec![255_u8, 216, 255, 224],
-        )
-            .into_response();
+    if let Some((_, kind)) = path.split_once("/Images/") {
+        let (mime, bytes): (&str, &[u8]) = match kind {
+            "Logo" => ("image/png", b"\x89PNG\r\n\x1a\n"),
+            "Primary" | "Backdrop" | "Thumb" => ("image/jpeg", &[255, 216, 255, 224]),
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        };
+        return ([("content-type", mime)], bytes).into_response();
     }
     if path.ends_with("/Library/MediaFolders") {
         return Json(json!({"Items":[
@@ -254,7 +255,7 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
         "Overview":"这是简介","Genres":["悬疑"],"CommunityRating":8.5,"CriticRating":96,"OfficialRating":"R",
         "ProviderIds":{"Tmdb":"496243","Imdb":"tt6751668","Bangumi":"303162"},
         "TagItems":[{"Id":19,"Name":"剧情"}],
-        "ImageTags":{"Primary":"3"},"BackdropImageTags":["4"],"People":[{"Id":"99","Name":"导演","Type":"Director","PrimaryImageTag":"3"},
+        "ImageTags":{"Primary":"3","Logo":"5","Thumb":"6"},"BackdropImageTags":["4"],"People":[{"Id":"99","Name":"导演","Type":"Director","PrimaryImageTag":"3"},
             {"Id":"98","Name":"声优","Type":"Actor","Role":"角色 (voice)","PrimaryImageTag":"2"},
             {"Id":"bad/path","Name":"无照片编剧","Type":"Writer","PrimaryImageTag":"hidden"}]
     });
@@ -303,6 +304,7 @@ async fn emby_fixture(headers: HeaderMap, OriginalUri(uri): OriginalUri) -> impl
                 "Path":"/media/资料剧集/Season 2/S01E01.mkv"}),
         ],
         (_, Some("7")) => {
+            assert_eq!(args["EnableImageTypes"], "Primary,Backdrop,Logo,Thumb");
             let first = args.get("StartIndex").is_some_and(|index| index == "0");
             return Json(json!({"TotalRecordCount":2,"Items":[if first { film } else { show }]}))
                 .into_response();
@@ -386,16 +388,19 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
     let film = &catalog[0]["works"][0];
     assert_eq!(film["poster"], "3");
     assert_eq!(film["backdrop"], "4");
+    assert_eq!(film["logo"], "5");
+    assert_eq!(film["landscape"], "6");
     assert_eq!(film["overview"], "这是简介");
     assert_eq!(film["year"], 2019);
     assert_eq!(film["rating"], 8.5);
     assert_eq!(film["critic_rating"], 96.0);
     assert_eq!(film["official_rating"], "R");
     assert_eq!(film["tags"], json!(["剧情"]));
+    assert_eq!(film["tmdb_id"], "496243");
     assert_eq!(film["bangumi_id"], "303162");
     assert_eq!(film["imdb_rating"], json!({"value":8.6,"count":12345}));
     assert_eq!(film["runtime_minutes"], 12);
-    for image in ["poster", "backdrop"] {
+    for image in ["poster", "backdrop", "landscape"] {
         let response = api
             .send(&format!("/api/emby/images/30/{image}"), None)
             .await;
@@ -406,6 +411,10 @@ async fn emby_catalog_previews_multiple_libraries_and_proxies_existing_art() {
             &[255, 216, 255, 224]
         );
     }
+    let logo = api.send("/api/emby/images/30/logo", None).await;
+    assert_eq!(logo.status(), 200);
+    assert_eq!(logo.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(logo.bytes().await.unwrap().as_ref(), b"\x89PNG\r\n\x1a\n");
     assert_eq!(
         api.send("/api/emby/images/invalid%2Fid/poster", None)
             .await

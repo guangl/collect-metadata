@@ -11,6 +11,8 @@ import type { EmbyCredit, EmbyEpisodePreview, EmbyLibraryPreview, EmbyScrapeTarg
 const artworkClasses: Record<EmbyImage, string> = {
   poster: "poster-art",
   backdrop: "fanart-art",
+  logo: "logo-art",
+  landscape: "fanart-art",
   episode: "episode-art",
   portrait: "credit-art",
 };
@@ -18,6 +20,8 @@ const artworkClasses: Record<EmbyImage, string> = {
 const artworkNames: Record<EmbyImage, string> = {
   poster: "海报",
   backdrop: "背景图",
+  logo: "透明标题图",
+  landscape: "横版缩略图",
   episode: "剧照",
   portrait: "头像",
 };
@@ -306,7 +310,7 @@ function EpisodeSynopsis({ episode, revision }: { episode: EmbyEpisodePreview; r
 }
 
 function WorkSynopsis({ work }: { work: EmbyWorkPreview }) {
-  const hasDetails = work.official_rating || work.critic_rating != null || work.imdb_rating || work.bangumi_id || !!work.tags?.length;
+  const hasDetails = work.official_rating || work.critic_rating != null || work.imdb_rating || work.tmdb_id || work.bangumi_id || !!work.tags?.length;
   return <div className="work-panel work-synopsis">
     <div>
       <h3>剧情简介</h3>
@@ -318,6 +322,7 @@ function WorkSynopsis({ work }: { work: EmbyWorkPreview }) {
         {work.official_rating && <div><dt>内容分级</dt><dd>{work.official_rating}</dd></div>}
         {work.critic_rating != null && <div><dt>影评人评分</dt><dd>{work.critic_rating} / 100</dd></div>}
         {work.imdb_rating && <div><dt>IMDb 评分</dt><dd>{work.imdb_rating.value.toFixed(1)} / 10 · {work.imdb_rating.count.toLocaleString("zh-CN")} 人评价</dd></div>}
+        {work.tmdb_id && <div><dt>TMDB ID</dt><dd>{work.tmdb_id}</dd></div>}
         {work.bangumi_id && <div><dt>Bangumi ID</dt><dd>{work.bangumi_id}</dd></div>}
         {!!work.tags?.length && <div><dt>标签</dt><dd>
           <ul className="work-chips" role="list">{work.tags.map((tag) => <li key={tag}>{tag}</li>)}</ul>
@@ -336,6 +341,14 @@ function WorkPictures({ work }: { work: EmbyWorkPreview }) {
     <figure>
       <figcaption>背景图（Fanart）</figcaption>
       <EmbyArtwork id={work.id} tag={work.backdrop} image="backdrop" alt={`《${work.title}》背景图`} />
+    </figure>
+    <figure>
+      <figcaption>透明标题图（Clearlogo）</figcaption>
+      <EmbyArtwork id={work.id} tag={work.logo ?? null} image="logo" alt={`《${work.title}》透明标题图`} />
+    </figure>
+    <figure>
+      <figcaption>横版缩略图（Landscape）</figcaption>
+      <EmbyArtwork id={work.id} tag={work.landscape ?? null} image="landscape" alt={`《${work.title}》横版缩略图`} />
     </figure>
   </div>;
 }

@@ -269,7 +269,7 @@ export function getEmbyCredits(id: string): Promise<EmbyCredit[]> {
   return invoke ? invoke("emby_credits", { id }) : request(`/api/emby/credits/${encodeURIComponent(id)}`, { cache: "no-store" });
 }
 
-export type EmbyImage = "poster" | "backdrop" | "episode" | "portrait";
+export type EmbyImage = "poster" | "backdrop" | "logo" | "landscape" | "episode" | "portrait";
 
 export async function loadEmbyImage(id: string, image: EmbyImage): Promise<string> {
   if (!invoke) throw new Error(errorText("Emby 图片暂不可用。", "EMBY_IMAGE_UNAVAILABLE"));

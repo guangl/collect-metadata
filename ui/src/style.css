@@ -259,8 +259,9 @@
   .work-pictures { @apply grid items-start gap-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,2.5fr)]; }
   .work-pictures figcaption { @apply mb-2 text-sm font-semibold; }
   .work-pictures .poster-art { @apply max-w-[12rem] rounded-lg border border-line; }
-  .fanart-art { @apply relative grid aspect-video w-full place-items-center overflow-hidden rounded-lg border border-line bg-raised; }
-  .work-pictures :is(.poster-art, .fanart-art) img { @apply absolute inset-0 block size-full object-contain; }
+  .fanart-art, .logo-art { @apply relative grid aspect-video w-full place-items-center overflow-hidden rounded-lg border border-line bg-raised; }
+  .logo-art { @apply max-w-[18rem]; }
+  .work-pictures :is(.poster-art, .fanart-art, .logo-art) img { @apply absolute inset-0 block size-full object-contain; }
   .series-episodes { @apply bg-header; }
 
   .credit-grid li { @apply grid min-w-0 content-start gap-1 [overflow-wrap:anywhere]; }

@@ -72,11 +72,14 @@ pub struct EmbyWorkPreview {
     official_rating: Option<String>,
     critic_rating: Option<f64>,
     imdb_rating: Option<ImdbRating>,
+    tmdb_id: Option<String>,
     bangumi_id: Option<String>,
     tags: Vec<String>,
     runtime_minutes: Option<u64>,
     poster: Option<String>,
     backdrop: Option<String>,
+    logo: Option<String>,
+    landscape: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -128,6 +131,8 @@ pub struct EmbyCredit {
 pub enum EmbyPreviewImage {
     Poster,
     Backdrop,
+    Logo,
+    Landscape,
     Episode,
     Portrait,
 }
@@ -469,7 +474,7 @@ impl Emby {
                         ("SortBy", "SortName"),
                         ("Fields", PREVIEW_FIELDS),
                         ("EnableImages", "true"),
-                        ("EnableImageTypes", "Primary,Backdrop"),
+                        ("EnableImageTypes", "Primary,Backdrop,Logo,Thumb"),
                         ("ImageTypeLimit", "1"),
                         ("Limit", "100"),
                         ("StartIndex", &offset.to_string()),
@@ -500,6 +505,7 @@ impl Emby {
                     official_rating: nonempty_text(&item["OfficialRating"]),
                     critic_rating: item["CriticRating"].as_f64(),
                     imdb_rating: self.imdb_rating(item),
+                    tmdb_id: nonempty_text(&item["ProviderIds"]["Tmdb"]),
                     bangumi_id: nonempty_text(&item["ProviderIds"]["Bangumi"]),
                     tags: item_tags(item),
                     runtime_minutes: runtime(item),
@@ -508,6 +514,8 @@ impl Emby {
                         .as_array()
                         .and_then(|tags| tags.first())
                         .and_then(nonempty_text),
+                    logo: nonempty_text(&item["ImageTags"]["Logo"]),
+                    landscape: nonempty_text(&item["ImageTags"]["Thumb"]),
                 })
             }));
             offset += items.len();
@@ -983,6 +991,8 @@ impl Emby {
         let (kind, width, height) = match image {
             EmbyPreviewImage::Poster => ("Primary", "420", "630"),
             EmbyPreviewImage::Backdrop => ("Backdrop", "1280", "720"),
+            EmbyPreviewImage::Logo => ("Logo", "800", "400"),
+            EmbyPreviewImage::Landscape => ("Thumb", "1280", "720"),
             EmbyPreviewImage::Episode => ("Primary", "640", "360"),
             EmbyPreviewImage::Portrait => ("Primary", "256", "384"),
         };
