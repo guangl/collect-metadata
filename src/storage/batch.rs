@@ -322,7 +322,7 @@ impl Store {
             return Ok(None);
         };
         if let Some(id) = item.get::<Option<i64>, _>("snapshot_id") {
-            let (saved, record) = self.load(id).await?;
+            let (saved, record) = self.load(id, true).await?;
             return Ok(Some(LookupResponse {
                 record,
                 saved: Some(saved),

@@ -37,6 +37,7 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: Emb
   let rows = initialRows;
   let status = "running";
   let id = initialRows.length > 0 ? 9 : 0;
+  let historyCleared = false;
   handle.mockImplementation(async (route, options) => {
     const body = options?.body ? JSON.parse(String(options.body)) : null;
     if (route === "/api/settings/ai") return response(aiConfigured);
@@ -55,8 +56,13 @@ function harness(initialRows: BatchRow[] = [], hasStorage = true, libraries: Emb
       { enabled: false, server: "", configured: false });
     if (route === "/api/settings/emby/test") return response(null, 204);
     if (route === "/api/history/7") return response({ record, saved, storage_error: null });
-    if (route === "/api/history/languages") return response(["ko"]);
-    if (route.startsWith("/api/history?")) return response(route.includes("before=") ? [] :
+    if (route === "/api/history/clear" && options?.method === "POST") {
+      const count = historyCleared ? 0 : 50;
+      historyCleared = true;
+      return response(count);
+    }
+    if (route === "/api/history/languages") return response(historyCleared ? [] : ["ko"]);
+    if (route.startsWith("/api/history?")) return response(historyCleared || route.includes("before=") ? [] :
       route.includes("kind=series") ? [] : Array.from({ length: 50 }, (_, n) => n ? { ...saved, id: n + 9, title: "影片 " + n } : saved));
     if (route === "/api/emby/catalog") return response(libraries);
     if (/^\/api\/emby\/items\/\d+\/scrape$/.test(route) && options?.method === "POST") {
@@ -343,6 +349,45 @@ describe("海报与详情", () => {
     await screen.findByText("没有符合条件的采集记录。");
     click("关于");
     expect(screen.getByRole("heading", { name: "关于 Collect Metadata" })).toBeTruthy();
+  });
+
+  it("确认后清空全部采集历史，失败时可以重试", async () => {
+    const calls = harness();
+    render(<App />);
+    click("采集历史");
+    await screen.findByRole("button", { name: /寄生虫/ });
+    await screen.findByRole("option", { name: languageName("ko") });
+    setLabel("原始语言", "ko");
+    setLabel("作品类型", "series");
+    await screen.findByText("没有符合条件的采集记录。");
+
+    click("清空历史");
+    expect(document.activeElement).toBe(button("取消"));
+    click("取消");
+    expect(document.activeElement).toBe(button("清空历史"));
+    expect(calls.mock.calls.some(([route]) => route === "/api/history/clear")).toBe(false);
+
+    click("清空历史");
+    calls.mockImplementationOnce(async () => response({ error: "无法清空历史。" }, 503));
+    click("确认清空");
+    const dialog = screen.getByRole("dialog", { name: "清空采集历史？" });
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("无法清空历史。");
+    expect((screen.getByLabelText("原始语言") as HTMLSelectElement).value).toBe("ko");
+    click("确认清空");
+
+    await screen.findByText("已清空 50 条采集记录。");
+    await screen.findByText("没有符合条件的采集记录。");
+    expect(calls).toHaveBeenCalledWith("/api/history/clear", expect.objectContaining({
+      method: "POST", body: "null",
+    }));
+    expect(dialog.open).toBe(false);
+    expect((screen.getByLabelText("作品类型") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByLabelText("原始语言") as HTMLSelectElement).value).toBe("");
+    expect(screen.queryByRole("option", { name: languageName("ko") })).toBeNull();
+
+    click("清空历史");
+    click("确认清空");
+    await screen.findByText("采集历史已为空。");
   });
 });
 

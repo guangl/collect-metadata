@@ -38,6 +38,7 @@ pub enum ErrorCode {
     MediaSearchFailed,
     MediaCollectionFailed,
     HistoryReadFailed,
+    HistoryClearFailed,
     BatchCreateFailed,
     AiBatchCreateFailed,
     BatchReadFailed,

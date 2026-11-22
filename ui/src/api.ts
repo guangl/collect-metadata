@@ -104,6 +104,10 @@ export function getHistoryLanguages(): Promise<string[]> {
   return invoke ? invoke("history_languages") : request("/api/history/languages");
 }
 
+export function clearHistory(): Promise<number> {
+  return invoke ? invoke("clear_history") : post("/api/history/clear", null);
+}
+
 export function loadSnapshot(id: number): Promise<LookupResponse> {
   return invoke
     ? invoke("load_snapshot", { id })

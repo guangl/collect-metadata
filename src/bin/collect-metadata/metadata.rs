@@ -79,6 +79,16 @@ pub(crate) async fn history(
 }
 
 #[tauri::command]
+pub(crate) async fn clear_history(state: State<'_, DesktopState>) -> Result<i64, AppError> {
+    diagnostics::desktop_command(
+        "clear_history",
+        ErrorCode::HistoryClearFailed,
+        state.collector().clear_history(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub(crate) async fn load_snapshot(
     state: State<'_, DesktopState>,
     id: i64,

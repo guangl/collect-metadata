@@ -74,6 +74,12 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
             super::batch::migrate(&mut transaction).await?;
+            sqlx::query(
+                "ALTER TABLE collect_metadata_snapshots
+                 ADD COLUMN IF NOT EXISTS history_visible boolean NOT NULL DEFAULT true",
+            )
+            .execute(&mut *transaction)
+            .await?;
             transaction.commit().await
         };
         migrate.await.map_err(|error| {
@@ -173,7 +179,7 @@ impl Store {
     ) -> Result<Vec<HistoryItem>, String> {
         let statement = format!(
             "SELECT {HISTORY_FIELDS} FROM collect_metadata_snapshots
-             WHERE id < $1
+             WHERE history_visible AND id < $1
              AND ($2::text IS NULL OR coalesce(document->>'media_type', 'av') = $2)
              AND ($3::text IS NULL
                   OR ($3 = 'und' AND coalesce(document->'fields'->'original_languages', '[]'::jsonb) = '[]'::jsonb)
@@ -203,16 +209,48 @@ impl Store {
             "SELECT DISTINCT language
              FROM collect_metadata_snapshots
              CROSS JOIN LATERAL jsonb_array_elements_text(document->'fields'->'original_languages') as languages(language)
+             WHERE history_visible
              ORDER BY language"
         ).fetch_all(&self.pool).await.map_err(|error| { diagnostics::postgres_error("postgres_history_languages_failed", &error); "无法读取历史记录中的语言。".into() })
     }
 
-    pub(crate) async fn load(&self, id: i64) -> Result<(HistoryItem, Value), String> {
+    pub(crate) async fn clear_history(&self) -> Result<i64, String> {
+        // A batch publishes its snapshot and reference in the same transaction.
+        // Keep those documents available for batch results and file writeback.
+        sqlx::query_scalar(
+            "WITH batch_snapshots AS (
+                SELECT snapshot_id FROM collect_metadata_batch_rows WHERE snapshot_id IS NOT NULL
+             ), retained AS (
+                UPDATE collect_metadata_snapshots s SET history_visible = false
+                WHERE history_visible AND EXISTS (SELECT 1 FROM batch_snapshots b WHERE b.snapshot_id = s.id)
+                RETURNING 1
+             ), removed AS (
+                DELETE FROM collect_metadata_snapshots s
+                WHERE NOT EXISTS (SELECT 1 FROM batch_snapshots b WHERE b.snapshot_id = s.id)
+                RETURNING history_visible
+             )
+             SELECT (SELECT count(*) FROM retained) + (SELECT count(*) FROM removed WHERE history_visible)",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            diagnostics::postgres_error("postgres_history_clear_failed", &error);
+            "无法清空 PostgreSQL 中的采集历史。请检查数据库连接和写入权限。".into()
+        })
+    }
+
+    pub(crate) async fn load(
+        &self,
+        id: i64,
+        include_cleared: bool,
+    ) -> Result<(HistoryItem, Value), String> {
         let statement = format!(
-            "SELECT {HISTORY_FIELDS}, document FROM collect_metadata_snapshots WHERE id = $1"
+            "SELECT {HISTORY_FIELDS}, document FROM collect_metadata_snapshots
+             WHERE id = $1 AND ($2 OR history_visible)"
         );
         let row = sqlx::query(AssertSqlSafe(statement))
             .bind(id)
+            .bind(include_cleared)
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| {

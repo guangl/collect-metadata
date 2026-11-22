@@ -972,6 +972,34 @@ async fn verify_web_routes(test_url: Url) {
     fs::write(&film_nfo, "manual edit after first writeback").unwrap();
     let retry = api.preview_writeback(imported, Some(film_id)).await;
     assert_eq!(retry["writable"], 1);
+
+    let history = api.success("/api/history?kind=movie", None).await;
+    let saved_film = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["title"] == "海报电影")
+        .unwrap();
+    assert_eq!(saved_film["year"], 2019);
+    let id = saved_film["id"].as_i64().unwrap();
+    let history_detail = format!("/api/history/{id}");
+    assert_eq!(
+        api.success(&history_detail, None).await["record"]["fields"]["title"],
+        "海报电影"
+    );
+    api.success("/api/history/languages", None).await;
+    assert_eq!(api.send("/api/history/99999", None).await.status(), 404);
+    assert_eq!(
+        api.send("/api/history?language=%23", None).await.status(),
+        503
+    );
+    let cleared = api.success("/api/history/clear", Some(Value::Null)).await;
+    assert!(cleared.as_i64().unwrap() > 0);
+    assert_eq!(api.success("/api/history", None).await, json!([]));
+    assert_eq!(api.success("/api/history/languages", None).await, json!([]));
+    assert_eq!(api.send(&history_detail, None).await.status(), 404);
+    assert_eq!(api.success("/api/history/clear", Some(Value::Null)).await, 0);
+
     let finished = api.apply_writeback(imported, Some(film_id), &retry).await;
     let film = finished["rows"].as_array().unwrap().iter().find(|row| row["id"] == film_id).unwrap();
     assert_eq!(film["writeback"], "done");
@@ -993,25 +1021,6 @@ async fn verify_web_routes(test_url: Url) {
     let nfo = fs::read_to_string(video_exports.join("2024旅行.nfo")).unwrap();
     assert!(nfo.contains("<title>家庭旅行</title>"));
     assert!(nfo.contains("自己的旅行记录"));
-    let history = api.success("/api/history?kind=movie", None).await;
-    let saved_film = history
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["title"] == "海报电影")
-        .unwrap();
-    assert_eq!(saved_film["year"], 2019);
-    let id = saved_film["id"].as_i64().unwrap();
-    assert_eq!(
-        api.success(&format!("/api/history/{id}"), None).await["record"]["fields"]["title"],
-        "海报电影"
-    );
-    api.success("/api/history/languages", None).await;
-    assert_eq!(api.send("/api/history/99999", None).await.status(), 404);
-    assert_eq!(
-        api.send("/api/history?language=%23", None).await.status(),
-        503
-    );
     api.success("/api/batches", None).await;
     api.success(&format!("/api/batches?before={imported}"), None)
         .await;

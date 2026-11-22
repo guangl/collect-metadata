@@ -49,6 +49,7 @@ pub(super) fn routes() -> Router<Arc<Collector>> {
         .route("/api/works", post(collect_media))
         .route("/api/history", get(history))
         .route("/api/history/languages", get(history_languages))
+        .route("/api/history/clear", post(clear_history))
         .route("/api/history/{id}", get(load_snapshot))
 }
 
@@ -117,6 +118,23 @@ async fn history_languages(State(collector): AppState) -> Result<impl IntoRespon
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 ErrorCode::HistoryReadFailed,
+                error,
+            )
+        })
+}
+
+async fn clear_history(
+    State(collector): AppState,
+    Json(()): Json<()>,
+) -> Result<impl IntoResponse, ApiError> {
+    collector
+        .clear_history()
+        .await
+        .map(|count| ([(header::CACHE_CONTROL, "no-store")], Json(count)))
+        .map_err(|error| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::HistoryClearFailed,
                 error,
             )
         })

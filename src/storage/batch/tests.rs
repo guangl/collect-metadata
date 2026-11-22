@@ -31,6 +31,81 @@ async fn claim_when_free(store: &Store) -> Claim {
 
 #[tokio::test]
 #[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
+async fn clearing_history_deletes_standalone_snapshots_and_keeps_batch_results() {
+    let (admin, options, schema) = test_database().await;
+    let store = Store::connect(&options).await.unwrap();
+    let document = json!({
+        "query": "ABC-001",
+        "fields": {"title": "Fixture", "original_languages": ["ja"]}
+    });
+    let standalone = store.save("ABC-001", &document).await.unwrap();
+    let batch = store
+        .create_batch(
+            vec![BatchItemInput {
+                kind: MediaKind::Av,
+                query: "ABC-001".into(),
+                source_files: Vec::new(),
+            }],
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let claim = claim_when_free(&store).await;
+    let outcome = Outcome {
+        stage: "success",
+        message: None,
+        candidates: None,
+        result: Some(LookupResponse {
+            record: document.clone(),
+            saved: None,
+            storage_error: None,
+        }),
+        remembered_match: None,
+        output: None,
+    };
+    assert!(store.finish(&claim, outcome).await.unwrap());
+
+    sqlx::query("ALTER TABLE collect_metadata_snapshots DROP COLUMN history_visible")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let store = Store::connect(&options).await.unwrap();
+    assert_eq!(store.history(None, None, None).await.unwrap().len(), 2);
+    assert_eq!(store.history_languages().await.unwrap(), ["ja"]);
+    let (first, second) = tokio::join!(store.clear_history(), store.clear_history());
+    assert_eq!(first.unwrap() + second.unwrap(), 2);
+    assert!(store.history(None, None, None).await.unwrap().is_empty());
+    assert!(store.history_languages().await.unwrap().is_empty());
+    assert!(store.load(standalone.id, true).await.is_err());
+    let batch_result = store
+        .batch_row_result(batch, claim.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch_result.record, document);
+    let retained = batch_result.saved.unwrap().id;
+    assert!(store.load(retained, false).await.is_err());
+
+    let fresh = store.save("ABC-001", &document).await.unwrap();
+    let history = store
+        .history(None, Some(MediaKind::Av), Some("ja"))
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, fresh.id);
+    assert!(fresh.id > retained);
+    store.pool.close().await;
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
 async fn correction_reuses_the_row_and_saves_only_a_successful_match() {
     let (admin, options, schema) = test_database().await;
     let store = Store::connect(&options).await.unwrap();

@@ -58,6 +58,8 @@ pub(in crate::storage) async fn migrate(connection: &mut PgConnection) -> Result
         )",
         "CREATE INDEX IF NOT EXISTS collect_metadata_batch_rows_batch_idx
             ON collect_metadata_batch_rows(batch_id, id)",
+        "CREATE INDEX IF NOT EXISTS collect_metadata_batch_rows_snapshot_idx
+            ON collect_metadata_batch_rows(snapshot_id) WHERE snapshot_id IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS collect_metadata_batch_rows_claim_idx
             ON collect_metadata_batch_rows(id) WHERE stage IN ('queued','searching','collecting')",
     ] {

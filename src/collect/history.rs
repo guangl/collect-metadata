@@ -90,9 +90,14 @@ impl Collector {
         }
     }
 
+    pub async fn clear_history(&self) -> Result<i64, String> {
+        let store = self.store().await?.ok_or("未连接 PostgreSQL。")?;
+        store.clear_history().await
+    }
+
     pub async fn load(&self, id: i64) -> Result<LookupResponse, String> {
         let store = self.store().await?.ok_or("未连接 PostgreSQL。")?;
-        let (saved, record) = store.load(id).await?;
+        let (saved, record) = store.load(id, false).await?;
         Ok(LookupResponse {
             record,
             saved: Some(saved),

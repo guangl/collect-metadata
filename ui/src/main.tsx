@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { getHistory, getHistoryLanguages, getStorageStatus, loadSnapshot } from "./api";
+import { clearHistory, getHistory, getHistoryLanguages, getStorageStatus, loadSnapshot } from "./api";
 import { Batch } from "./batch/Batch";
 import type { FolderSelection } from "./batch/engine";
 import { ExternalLink, LanguageSelect, languageText, PosterCard } from "./Catalog";
@@ -101,8 +101,15 @@ function History({ storage, onStorage, onOpen, onError }: {
   const [language, setLanguage] = useState("");
   const [codes, setCodes] = useState<string[]>([]);
   const [languageError, setLanguageError] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
+  const [clearedCount, setClearedCount] = useState<number | null>(null);
+  const [historyVersion, setHistoryVersion] = useState(0);
   const sequence = useRef(0);
   const openingSequence = useRef(0);
+  const clearDialog = useRef<HTMLDialogElement>(null);
+  const clearButton = useRef<HTMLButtonElement>(null);
+  const cancelClearButton = useRef<HTMLButtonElement>(null);
   const canRead = storage !== "none" && storage !== "pending";
 
   const refresh = useCallback(async (before: number | null = null) => {
@@ -131,7 +138,7 @@ function History({ storage, onStorage, onOpen, onError }: {
   useEffect(() => {
     if (canRead) refresh();
     return () => { sequence.current += 1; };
-  }, [canRead, refresh]);
+  }, [canRead, historyVersion, refresh]);
 
   useEffect(() => {
     let active = true;
@@ -140,7 +147,33 @@ function History({ storage, onStorage, onOpen, onError }: {
       (error) => { if (active) setLanguageError(errorText(error)); },
     );
     return () => { active = false; openingSequence.current += 1; };
-  }, [canRead]);
+  }, [canRead, historyVersion]);
+
+  function closeClearDialog() {
+    clearDialog.current?.close();
+    clearButton.current?.focus();
+  }
+
+  async function confirmClear() {
+    if (clearing) return;
+    setClearing(true);
+    setClearError(null);
+    try {
+      const count = await clearHistory();
+      sequence.current += 1;
+      setItems([]);
+      setMore(false);
+      setKind("");
+      setLanguage("");
+      setClearedCount(count);
+      setHistoryVersion((version) => version + 1);
+      closeClearDialog();
+    } catch (error) {
+      setClearError(errorText(error));
+    } finally {
+      setClearing(false);
+    }
+  }
 
   async function open(id: number, opener: HTMLButtonElement) {
     const request = ++openingSequence.current;
@@ -172,10 +205,39 @@ function History({ storage, onStorage, onOpen, onError }: {
           </select>
         </label>
         <LanguageSelect codes={codes} value={language} onChange={setLanguage} disabled={!canRead} />
-        <button type="button" className="secondary sm:ms-auto" onClick={() => refresh()} disabled={busy || !canRead}>刷新</button>
+        <div className="flex flex-wrap gap-2 sm:ms-auto">
+          <button type="button" className="secondary" onClick={() => refresh()} disabled={busy || !canRead}>刷新</button>
+          <button type="button" className="secondary text-danger" ref={clearButton} disabled={storage !== "ready" || opening}
+            onClick={() => {
+              setClearError(null);
+              clearDialog.current?.showModal();
+              cancelClearButton.current?.focus();
+            }}>清空历史</button>
+        </div>
       </div>
+      <dialog className="work-preview max-w-[30rem]" ref={clearDialog} aria-labelledby="clear-history-title"
+        aria-describedby="clear-history-description" onCancel={(event) => {
+          event.preventDefault();
+          if (!clearing) closeClearDialog();
+        }}>
+        <div className="space-y-4 p-4 sm:p-6">
+          <h2 id="clear-history-title">清空采集历史？</h2>
+          <p id="clear-history-description">
+            此操作将清空所有采集历史，包括当前筛选条件之外的记录，且无法撤销。后台任务仍可查看结果并写回文件。
+          </p>
+          {clearError && <p className="batch-error" role="alert">{clearError}</p>}
+          <div className="flex flex-wrap justify-end gap-2">
+            <button type="button" className="secondary" ref={cancelClearButton} disabled={clearing} onClick={closeClearDialog}>取消</button>
+            <button type="button" className="secondary border-danger text-danger enabled:hover:border-danger enabled:hover:bg-danger/10"
+              disabled={clearing} onClick={() => void confirmClear()}>{clearing ? "正在清空…" : "确认清空"}</button>
+          </div>
+        </div>
+      </dialog>
       {languageError && <p className="batch-error" role="alert">{languageError}</p>}
       {error && <p className="batch-error" role="alert">{error}</p>}
+      {clearedCount !== null && <p className="mb-3 text-sm text-accent" role="status">
+        {clearedCount === 0 ? "采集历史已为空。" : `已清空 ${clearedCount} 条采集记录。`}
+      </p>}
       {status && <p className="catalog-empty" role="status">{status}</p>}
       <div className="poster-grid">
         {items.map((item) => <PosterCard key={item.id} title={item.title || item.code}

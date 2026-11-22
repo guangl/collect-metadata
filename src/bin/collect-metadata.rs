@@ -223,6 +223,7 @@ fn main() {
             metadata::history_languages,
             metadata::history,
             metadata::load_snapshot,
+            metadata::clear_history,
             settings::storage_configured,
             settings::check_storage,
             metadata::export_json
