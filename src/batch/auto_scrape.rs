@@ -76,6 +76,7 @@ pub struct AutoScrape {
     private_roots: Vec<PathBuf>,
     central_metadata: bool,
     season_map: SeasonMap,
+    database_season_map: bool,
 }
 
 struct Event {
@@ -145,6 +146,8 @@ impl AutoScrape {
             private_roots,
             central_metadata,
             season_map,
+            database_season_map: env::var("EMBY_AUTO_SCRAPE_DB_SEASON_MAP")
+                .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
         }))
     }
 
@@ -306,7 +309,41 @@ impl AutoScrape {
         if event.item_type == "Video" && !private {
             return Ok(Outcome::Skipped);
         }
-        let mapped_subjects = self.season_map.subjects(item);
+        let episode_complete = event.item_type == "Episode" && complete_episode(item);
+        let season_field = if event.item_type == "Episode" {
+            "ParentIndexNumber"
+        } else {
+            "IndexNumber"
+        };
+        let mut server_id = None;
+        let mut database_subjects = None;
+        if self.database_season_map
+            && !private
+            && !episode_complete
+            && matches!(event.item_type, "Season" | "Episode")
+            && let Some(series) = item["SeriesId"].as_str()
+            && let Some(season) = item[season_field]
+                .as_i64()
+                .and_then(|no| i32::try_from(no).ok())
+            && season > 0
+        {
+            let server = emby.automatic_server_id(&collector.client).await?;
+            database_subjects = collector
+                .require_store()
+                .await?
+                .verified_bangumi_season(&server, series, season)
+                .await?;
+            if database_subjects.is_some() {
+                eprintln!(
+                    "Automatic scrape {} {} using PostgreSQL season mapping.",
+                    event.item_type, event.id
+                );
+            }
+            server_id = Some(server);
+        }
+        let mapped_subjects = database_subjects
+            .as_deref()
+            .unwrap_or_else(|| self.season_map.subjects(item));
         let mut result = if private {
             if kind != MediaKind::Movie {
                 return Ok(Outcome::Skipped);
@@ -331,7 +368,7 @@ impl AutoScrape {
                 .ok_or("采集记录缺少来源。")?;
             sources.push(json!(home));
             result
-        } else if event.item_type == "Episode" && complete_episode(item) {
+        } else if episode_complete {
             collector.existing_automatic_episode(home, &query, &event.id)?
         } else if !mapped_subjects.is_empty() {
             collector
@@ -394,7 +431,10 @@ impl AutoScrape {
                     result.record["field_sources"]["description"] = json!("Emby");
                 }
             }
-            let server = emby.automatic_server_id(&collector.client).await?;
+            let server = match server_id {
+                Some(server) => server,
+                None => emby.automatic_server_id(&collector.client).await?,
+            };
             collector.upsert_emby_item(&server, &event.id, &fresh.data["item"], None).await?;
         } else if event.item_type == "Episode" {
             let item = &crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?["item"];

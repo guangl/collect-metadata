@@ -119,6 +119,36 @@ impl Store {
             })
     }
 
+    #[cfg(feature = "web")]
+    pub(crate) async fn verified_bangumi_season(
+        &self,
+        server_id: &str,
+        series_id: &str,
+        season: i32,
+    ) -> Result<Option<Vec<u32>>, String> {
+        let ids: Option<Vec<i32>> = sqlx::query_scalar(
+            "SELECT bangumi_subject_ids FROM collect_metadata_anime_verified_seasons
+             WHERE server_id=$1 AND emby_series_id=$2 AND season_number=$3",
+        )
+        .bind(server_id)
+        .bind(series_id)
+        .bind(season)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| {
+            diagnostics::postgres_error("postgres_anime_mapping_read_failed", &error);
+            "读取 PostgreSQL 的已核对分季映射失败。".to_owned()
+        })?;
+        ids.map(|ids| {
+            let distinct: std::collections::HashSet<_> = ids.iter().collect();
+            if ids.is_empty() || distinct.len() != ids.len() || ids.iter().any(|id| *id <= 0) {
+                return Err("PostgreSQL 的分季映射包含空值、重复或无效的 Bangumi ID。".to_owned());
+            }
+            Ok(ids.into_iter().map(|id| id as u32).collect())
+        })
+        .transpose()
+    }
+
     pub(crate) async fn check_connection(&self) -> Result<(), String> {
         sqlx::query("SELECT 1")
             .execute(&self.pool)
