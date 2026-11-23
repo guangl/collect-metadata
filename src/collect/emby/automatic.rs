@@ -300,16 +300,6 @@ impl Collector {
             let season = bangumi
                 .mapped_season(&self.client, subjects, number)
                 .await?;
-            for (local, field) in [
-                (&item["Overview"], "description"),
-                (&item["ImageTags"]["Primary"], "poster_url"),
-            ] {
-                if local.as_str().is_none_or(|value| value.trim().is_empty())
-                    && !season.fields.contains_key(field)
-                {
-                    return Err(format!("已核对的 Bangumi 季条目缺少 {field}。"));
-                }
-            }
             ("season", vec![home, season])
         } else {
             let bangumi = bangumi
@@ -399,7 +389,7 @@ impl Collector {
                 }
                 let tmdb = self.tmdb.provider().ok_or("请先配置 TMDB API 凭据。")?;
                 let series = candidate.id.parse().map_err(|_| "剧集 TMDB ID 无效。")?;
-                tmdb.emby_season(&self.client, series, item, &targets[0], timezone)
+                tmdb.emby_season(&self.client, emby, series, item, &targets[0], timezone)
                     .await
             }
             .await;

@@ -346,6 +346,7 @@ impl Tmdb {
     pub(crate) async fn emby_season(
         &self,
         client: &Client,
+        emby: &emby::Emby,
         series: u32,
         item: &Value,
         language: &str,
@@ -361,7 +362,14 @@ impl Tmdb {
             .get(client, &endpoint)
             .await
             .map_err(|error| format!("TMDB：{}", error.description()))?;
-        if !season_matches(&data, item, timezone) {
+        if !season_matches(&data, item, timezone)
+            && (!compatible_season(&data, item)
+                || !season_matches_episodes(
+                    &data,
+                    &emby.season_episodes(client, item).await?,
+                    timezone,
+                ))
+        {
             return Err("TMDB 季号、季 ID 或首播日与 Emby 冲突，需要核对分季映射。".into());
         }
         let page = Url::parse(&format!("https://www.themoviedb.org/{path}")).unwrap();
@@ -515,7 +523,7 @@ fn local_premiere_date(item: &Value, timezone: &jiff::tz::TimeZone) -> Option<ti
 }
 
 #[cfg(feature = "web")]
-fn season_matches(data: &Value, item: &Value, timezone: &jiff::tz::TimeZone) -> bool {
+fn season_ids(data: &Value, item: &Value) -> (Option<bool>, Option<bool>) {
     let tmdb = emby::provider_id(item, "Tmdb")
         .and_then(id)
         .map(|expected| data["id"].as_u64() == Some(u64::from(expected)));
@@ -523,15 +531,85 @@ fn season_matches(data: &Value, item: &Value, timezone: &jiff::tz::TimeZone) -> 
         .and_then(id)
         .zip(data["external_ids"]["tvdb_id"].as_u64())
         .map(|(expected, actual)| u64::from(expected) == actual);
+    (tmdb, tvdb)
+}
+
+#[cfg(feature = "web")]
+fn compatible_season(data: &Value, item: &Value) -> bool {
+    let (tmdb, tvdb) = season_ids(data, item);
     data["season_number"].as_u64() == item["IndexNumber"].as_u64()
+        && data["id"].as_u64().is_some_and(|id| id > 0)
         && data["name"].as_str().is_some()
         && tmdb != Some(false)
         && tvdb != Some(false)
+}
+
+#[cfg(feature = "web")]
+fn season_matches(data: &Value, item: &Value, timezone: &jiff::tz::TimeZone) -> bool {
+    let (tmdb, tvdb) = season_ids(data, item);
+    compatible_season(data, item)
         && (tmdb == Some(true)
             || tvdb == Some(true)
             || local_premiere_date(item, timezone)
                 .zip(episode_title::calendar_date(&data["air_date"]))
                 .is_none_or(|(local, source)| (local - source).whole_days().abs() <= 1))
+}
+
+#[cfg(feature = "web")]
+fn season_matches_episodes(data: &Value, local: &[Value], timezone: &jiff::tz::TimeZone) -> bool {
+    let mut verified = std::collections::HashSet::new();
+    for item in local {
+        let Some(number) = item["IndexNumber"].as_u64().filter(|&number| number > 0) else {
+            return false;
+        };
+        if item["IndexNumberEnd"]
+            .as_u64()
+            .is_some_and(|end| end > number)
+        {
+            return false;
+        }
+        let Some(id) = emby::provider_id(item, "Tmdb").and_then(id) else {
+            return false;
+        };
+        let mut hits = list(&data["episodes"]).filter(|episode| {
+            episode["episode_number"] == number && episode["season_number"] == data["season_number"]
+        });
+        let Some(episode) = hits.next().filter(|_| hits.next().is_none()) else {
+            return false;
+        };
+        if episode["id"] != id {
+            return false;
+        }
+        if let Some((local_date, source_date)) = local_premiere_date(item, timezone)
+            .zip(episode_title::calendar_date(&episode["air_date"]))
+        {
+            if (local_date - source_date).whole_days().abs() > 1 {
+                return false;
+            }
+            verified.insert(number);
+        }
+    }
+    verified.len() >= 3
+}
+
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn season_episode_evidence_requires_distinct_matching_ids_and_dates() {
+    let zone = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
+    let source = json!({"season_number":2,"episodes":[
+        {"season_number":2,"episode_number":1,"id":31,"air_date":"2026-09-04"},
+        {"season_number":2,"episode_number":2,"id":32,"air_date":"2026-09-11"},
+        {"season_number":2,"episode_number":3,"id":33,"air_date":"2026-09-18"}
+    ]});
+    let mut local = vec![
+        json!({"IndexNumber":1,"ProviderIds":{"Tmdb":"31"},"PremiereDate":"2026-09-04"}),
+        json!({"IndexNumber":2,"ProviderIds":{"Tmdb":"32"},"PremiereDate":"2026-09-11"}),
+        json!({"IndexNumber":3,"ProviderIds":{"Tmdb":"33"},"PremiereDate":"2026-09-18"}),
+    ];
+    assert!(season_matches_episodes(&source, &local, &zone));
+    assert!(!season_matches_episodes(&source, &local[..2], &zone));
+    local[2]["ProviderIds"]["Tmdb"] = json!("34");
+    assert!(!season_matches_episodes(&source, &local, &zone));
 }
 
 #[cfg(all(test, feature = "web"))]
