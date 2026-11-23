@@ -43,6 +43,7 @@ struct WritebackConfirmation {
 
 pub(super) fn routes() -> Router<Arc<Collector>> {
     Router::new()
+        .route("/api/auto-scrape/state", get(auto_scrape_state))
         .route("/api/batches", get(list_batches).post(create_batch))
         .route("/api/batches/ai", post(create_ai_batch))
         .route(
@@ -78,6 +79,12 @@ pub(super) fn routes() -> Router<Arc<Collector>> {
             "/api/batches/{batch}/rows/{row}/candidate",
             post(choose_batch_candidate),
         )
+}
+
+async fn auto_scrape_state(State(collector): AppState) -> Result<impl IntoResponse, ApiError> {
+    collector.auto_scrape_state().await.map(|state| ([(header::CACHE_CONTROL,"no-store")],Json(state))).map_err(|error| {
+        api_error(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::BatchReadFailed, error)
+    })
 }
 
 async fn list_batches(

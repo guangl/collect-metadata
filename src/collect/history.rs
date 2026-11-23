@@ -3,6 +3,14 @@ use crate::{HistoryItem, MediaKind, diagnostics, storage::Store};
 use super::{Collector, LookupResponse, localization};
 
 impl Collector {
+    #[cfg(feature = "web")]
+    pub async fn auto_scrape_state(&self) -> Result<serde_json::Value, String> {
+        self.require_store().await?.auto_scrape_state().await.map_err(|error| {
+            diagnostics::postgres_error("postgres_auto_scrape_state_failed", &error);
+            "读取自动刮削任务状态失败。".to_owned()
+        })
+    }
+
     pub async fn upsert_emby_item(
         &self,
         server: &str,

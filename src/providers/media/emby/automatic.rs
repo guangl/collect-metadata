@@ -9,6 +9,21 @@ use crate::output::download_image;
 use crate::providers::media::episode_title::{field_locked, needs_title, usable};
 
 impl Emby {
+    pub(crate) async fn automatic_ready(&self, client: &Client) -> Result<(), String> {
+        let info = self.read_json(client, self.endpoint("System/Info/Public")).await?;
+        if info["IsShuttingDown"] == true
+            || !info["Id"].as_str().is_some_and(is_item_id)
+        {
+            return Err("Emby 尚未完成启动。".into());
+        }
+        let items = self.read_json(client, self.endpoint("Items?Limit=1&EnableTotalRecordCount=false")).await?;
+        if !items["Items"].is_array() {
+            return Err("Emby 尚未就绪，媒体库读取未返回有效结果。".into());
+        }
+        Ok(())
+    }
+
+
     pub(crate) async fn repair_anime_metadata(
         &self,
         client: &Client,
@@ -134,8 +149,20 @@ impl Emby {
             )
             .await?;
             let mut saved = self.read_json(client, url).await?;
-            if saved["Name"] != expected_name || merge_missing(&mut saved, fields) {
-                return Err("Emby 没有保存全部可写的补充字段。".into());
+            let mut unconfirmed = Vec::new();
+            if saved["Name"] != expected_name {
+                unconfirmed.push("Name".to_owned());
+            }
+            let readback = saved.clone();
+            if merge_missing(&mut saved, fields) {
+                for (field, value) in saved.as_object().into_iter().flatten() {
+                    if readback[field] != *value && !unconfirmed.contains(field) {
+                        unconfirmed.push(field.clone());
+                    }
+                }
+            }
+            if !unconfirmed.is_empty() {
+                return Err(format!("Emby 没有保存全部可写的补充字段（{}）。", unconfirmed.join("、")));
             }
         }
 
