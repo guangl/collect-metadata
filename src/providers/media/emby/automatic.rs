@@ -4,7 +4,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{Client, Response, Url};
 use serde_json::{Value, json};
 
-use super::{Emby, has_provider_id, is_item_id, list, nonempty_text, provider_id};
+use super::{Emby, has_provider_id, is_item_id, list, missing_people, nonempty_text, provider_id};
 use crate::output::download_image;
 use crate::providers::media::episode_title::{field_locked, needs_title, usable};
 
@@ -116,6 +116,7 @@ impl Emby {
         client: &Client,
         item: &Value,
         record: &Value,
+        people: &[Value],
     ) -> Result<(), String> {
         let id = item["Id"]
             .as_str()
@@ -139,8 +140,15 @@ impl Emby {
         if current["LockData"] == true || current["IsLocked"] == true {
             return Err("Emby 条目已锁定。".into());
         }
-        if merge_missing(&mut current, fields) {
-            let expected_name = current["Name"].clone();
+        let fill_people = !people.is_empty() && missing_people(&current);
+        if fill_people && !same_credit_target(item, &current) {
+            return Err("Emby 条目在采集演职员期间发生变化，请重试。".into());
+        }
+        let fields_changed = merge_missing(&mut current, fields);
+        if fill_people {
+            current["People"] = json!(people);
+        }
+        if fields_changed || fill_people {
             self.automatic_post(
                 client,
                 self.endpoint(&format!("Items/{id}")),
@@ -150,8 +158,11 @@ impl Emby {
             .await?;
             let mut saved = self.read_json(client, url).await?;
             let mut unconfirmed = Vec::new();
-            if saved["Name"] != expected_name {
+            if saved["Name"] != current["Name"] {
                 unconfirmed.push("Name".to_owned());
+            }
+            if fill_people && !confirmed_people(&current, &saved, people) {
+                unconfirmed.push("People".to_owned());
             }
             let readback = saved.clone();
             if merge_missing(&mut saved, fields) {
@@ -162,7 +173,10 @@ impl Emby {
                 }
             }
             if !unconfirmed.is_empty() {
-                return Err(format!("Emby 没有保存全部可写的补充字段（{}）。", unconfirmed.join("、")));
+                return Err(format!(
+                    "Emby 没有保存全部可写的补充字段（{}）。",
+                    unconfirmed.join("、")
+                ));
             }
         }
 
@@ -293,11 +307,57 @@ impl Emby {
         Ok(true)
     }
 
+    pub(crate) async fn fill_automatic_people(
+        &self,
+        client: &Client,
+        original: &Value,
+        people: &[Value],
+    ) -> Result<bool, String> {
+        if people.is_empty() {
+            return Ok(false);
+        }
+        let id = original["Id"]
+            .as_str()
+            .filter(|id| is_item_id(id))
+            .ok_or("Emby 条目 ID 无效。")?;
+        let url = self.automatic_edit_url(client, id).await?;
+        let mut current = self.read_json(client, url.clone()).await?;
+        if !same_credit_target(original, &current) {
+            return Err("Emby 条目在采集演职员期间发生变化，请重试。".into());
+        }
+        if current["LockData"] == true
+            || current["LockData"]["Enabled"] == true
+            || current["IsLocked"] == true
+            || !missing_people(&current)
+        {
+            return Ok(false);
+        }
+        let path = current["Path"]
+            .as_str()
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .ok_or("Emby 条目缺少媒体路径。")?;
+        self.internal_storage_root(client, path).await?;
+        current["People"] = json!(people);
+        self.automatic_post(
+            client,
+            self.endpoint(&format!("Items/{id}")),
+            "application/json",
+            current.to_string(),
+        )
+        .await?;
+        let saved = self.read_json(client, url).await?;
+        if !confirmed_people(&current, &saved, people) {
+            return Err("Emby 没有确认演职员写入。".into());
+        }
+        Ok(true)
+    }
+
     async fn automatic_edit_url(&self, client: &Client, id: &str) -> Result<Url, String> {
         let admin = self.extras_user(client).await?;
         let mut url = self.endpoint(&format!("Users/{admin}/Items/{id}"));
         url.query_pairs_mut()
-            .append_pair("Fields", "ChannelMappingInfo")
+            .append_pair("Fields", "ChannelMappingInfo,People")
             .append_pair(
                 "ExcludeFields",
                 "Chapters,MediaSources,MediaStreams,Subviews",
@@ -374,9 +434,39 @@ fn merge_missing_provider_id(item: &mut Value, key: &str, id: Option<&str>) -> b
     false
 }
 
+fn same_credit_target(original: &Value, current: &Value) -> bool {
+    [
+        "Id",
+        "Path",
+        "Type",
+        "ProviderIds",
+        "SeriesId",
+        "ParentIndexNumber",
+        "IndexNumber",
+    ]
+    .into_iter()
+    .all(|key| original[key] == current[key])
+}
+
+fn confirmed_people(expected: &Value, saved: &Value, people: &[Value]) -> bool {
+    ["Name", "Overview", "ImageTags", "BackdropImageTags"]
+        .into_iter()
+        .all(|key| expected[key] == saved[key])
+        && people.iter().all(|person| {
+            list(&saved["People"]).any(|stored| {
+                stored["Name"] == person["Name"]
+                    && stored["Type"] == person["Type"]
+                    && stored["Role"].as_str().unwrap_or_default()
+                        == person["Role"].as_str().unwrap_or_default()
+            })
+        })
+}
+
 fn merge_missing(item: &mut Value, fields: &Value) -> bool {
     let mut changed = false;
-    if needs_title(item) && let Some(title) = usable(&fields["title"], item) {
+    if needs_title(item)
+        && let Some(title) = usable(&fields["title"], item)
+    {
         let title = json!(title);
         if !field_locked(item, "SortName") && usable(&item["ForcedSortName"], item).is_none() {
             item["ForcedSortName"] = title.clone();
@@ -407,6 +497,87 @@ fn merge_missing(item: &mut Value, fields: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn writes_missing_cast_once_and_keeps_other_metadata() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+
+        let original = json!({"Id":"41", "Type":"Series", "Path":"/media/series/show",
+            "Name":"已有标题", "Overview":"已有简介", "ImageTags":{"Primary":"image"},
+            "BackdropImageTags":["backdrop"], "People":[], "LockedFields":[]});
+        let people = [json!({"Name":"声优", "Type":"Actor", "Role":"角色 (voice)"})];
+        let mut expected = original.clone();
+        expected["People"] = json!(people);
+        let stored = Arc::new(Mutex::new((original.clone(), Vec::new())));
+        let app = Router::new()
+            .route(
+                "/emby/Users/Query",
+                get(|| async {
+                    Json(json!({"Items":[{"Id":"7","Policy":{"IsAdministrator":true}}]}))
+                }),
+            )
+            .route(
+                "/emby/Library/VirtualFolders",
+                get(|| async {
+                    Json(json!([{"Locations":["/media/series"],
+                    "LibraryOptions":{"SaveLocalMetadata":false,"MetadataSavers":[]}}]))
+                }),
+            )
+            .route(
+                "/emby/Items/41/Images",
+                get(|| async { Json(json!([{"ImageType":"Primary"},{"ImageType":"Backdrop"}])) }),
+            )
+            .route(
+                "/emby/Users/7/Items/41",
+                get(
+                    |State(items): State<Arc<Mutex<(Value, Vec<Value>)>>>| async move {
+                        Json(items.lock().unwrap().0.clone())
+                    },
+                ),
+            )
+            .route(
+                "/emby/Items/41",
+                axum::routing::post(
+                    |State(items): State<Arc<Mutex<(Value, Vec<Value>)>>>,
+                     Json(body): Json<Value>| async move {
+                        let mut items = items.lock().unwrap();
+                        items.0 = body.clone();
+                        items.1.push(body);
+                        StatusCode::NO_CONTENT
+                    },
+                ),
+            )
+            .with_state(Arc::clone(&stored));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let emby = Emby::new(&base, "fixture-key", &Arc::default()).unwrap();
+        let client = Client::new();
+        let record = json!({"fields":{"title":"其他标题","description":"其他简介",
+            "poster_url":"https://example.invalid/poster.jpg","backdrop_url":"https://example.invalid/backdrop.jpg"}});
+        for _ in 0..2 {
+            emby.enrich_automatic_item(&client, &original, &record, &people)
+                .await
+                .unwrap();
+        }
+        assert_eq!(stored.lock().unwrap().1, vec![expected]);
+
+        {
+            let mut items = stored.lock().unwrap();
+            items.0["People"] = json!([]);
+            items.0["LockedFields"] = json!(["Cast"]);
+        }
+        assert!(
+            !emby
+                .fill_automatic_people(&client, &original, &people)
+                .await
+                .unwrap()
+        );
+        assert_eq!(stored.lock().unwrap().1.len(), 1);
+        server.abort();
+    }
 
     #[test]
     fn fills_only_the_missing_bangumi_id_for_a_complete_episode() {

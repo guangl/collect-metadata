@@ -11,12 +11,16 @@ use crate::{collect::Source, diagnostics, providers::field_map};
 #[cfg(feature = "web")]
 mod automatic;
 mod catalog;
+#[cfg(feature = "web")]
+mod credits;
 mod settings;
 pub(crate) mod source_links;
 
 pub use catalog::{
     EmbyCredit, EmbyLibraryPreview, EmbyPreviewImage, EmbySeriesPreview, EmbyWorkPreview,
 };
+#[cfg(feature = "web")]
+pub(crate) use credits::{missing_people, record_people, tmdb_people};
 pub use settings::{EmbyInput, EmbySettings, EmbySettingsView};
 pub use source_links::ScrapeSourceLink;
 

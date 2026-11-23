@@ -95,9 +95,14 @@ impl Tmdb {
         let path = format!("tv/{series}/season/{season}/episode/{number}");
         let page = Url::parse(&format!("https://www.themoviedb.org/{path}")).unwrap();
         let mut endpoint = self.endpoint(&path, language);
+        let extras = if series_override.is_some() {
+            "external_ids,translations,credits"
+        } else {
+            "external_ids,translations"
+        };
         endpoint
             .query_pairs_mut()
-            .append_pair("append_to_response", "external_ids,translations");
+            .append_pair("append_to_response", extras);
         let series_endpoint = self.endpoint(&format!("tv/{series}"), language);
         let (details, show) = tokio::join!(
             self.get(client, &endpoint),
@@ -174,6 +179,30 @@ impl Tmdb {
             source.note = note;
         }
         Some(source)
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn verified_episode_credits(
+        &self,
+        client: &Client,
+        item: &Value,
+        series: u32,
+        language: &str,
+    ) -> Option<Value> {
+        let expected = emby::provider_id(item, "Tmdb").and_then(id)?;
+        let season = item["ParentIndexNumber"].as_u64()?;
+        let number = item["IndexNumber"].as_u64().filter(|number| *number > 0)?;
+        if item["IndexNumberEnd"]
+            .as_u64()
+            .is_some_and(|end| end > number)
+        {
+            return None;
+        }
+        let path = format!("tv/{series}/season/{season}/episode/{number}/credits");
+        self.get(client, &self.endpoint(&path, language))
+            .await
+            .ok()
+            .filter(|credits| credits["id"].as_u64() == Some(u64::from(expected)))
     }
 
     #[cfg(feature = "web")]

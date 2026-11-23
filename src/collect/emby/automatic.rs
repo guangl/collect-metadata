@@ -5,6 +5,30 @@ use crate::{MediaKind, MediaProvider, providers::media};
 use super::super::{Collector, LookupResponse, Source, make_lookup};
 
 impl Collector {
+    pub(crate) async fn verified_episode_people(
+        &self,
+        emby: &media::emby::Emby,
+        item: &Value,
+    ) -> Vec<Value> {
+        let Some(tmdb) = self.tmdb.provider() else {
+            return Vec::new();
+        };
+        if !media::emby::has_provider_id(item, "Tmdb") {
+            return Vec::new();
+        }
+        let Some(series) = emby
+            .series_provider_id(&self.client, item, "Tmdb")
+            .await
+            .and_then(|id| id.parse::<u32>().ok().filter(|&id| id > 0))
+        else {
+            return Vec::new();
+        };
+        let targets = self.languages.targets(None);
+        tmdb.verified_episode_credits(&self.client, item, series, &targets[0])
+            .await
+            .map_or_else(Vec::new, |credits| media::emby::tmdb_people(&credits))
+    }
+
     pub(crate) async fn automatic_tmdb_search(
         &self,
         kind: MediaKind,
