@@ -137,7 +137,9 @@ fn official_catalog(record: &Value, targets: &[String]) -> (Translations, Transl
                     ("description", "overview"),
                     ("tagline", "tagline"),
                 ] {
-                    if is_episode && (field != "description" || (target == "zh-CN" && has_emby_chinese)) {
+                    if is_episode
+                        && (field != "description" || (target == "zh-CN" && has_emby_chinese))
+                    {
                         continue;
                     }
                     if let Some(value) = entries.iter().find_map(|(_, data)| text(&data[key])) {
@@ -375,9 +377,19 @@ pub(crate) async fn sync_document(
             .or_default()
             .insert("description".into(), overview.into());
     }
+    let incoming = &document["_collect_metadata"]["catalog"];
     let mut document = document.clone();
     document["_collect_metadata"] =
         json!({"metadata_languages": targets, "localized_metadata": variants});
+    let catalog = &previous_metadata["catalog"];
+    // The incoming item can include newly collected fields alongside the Emby DTO.
+    let mut combined = catalog.as_object().cloned().unwrap_or_default();
+    if let Some(entries) = incoming.as_object() {
+        combined.extend(entries.clone());
+    }
+    if !combined.is_empty() {
+        document["_collect_metadata"]["catalog"] = Value::Object(combined);
+    }
     if let Some((source, _)) = supplemental_overview {
         document["_collect_metadata"]["overview_source"] = json!(source);
     }

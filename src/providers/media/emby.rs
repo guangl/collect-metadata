@@ -427,6 +427,47 @@ impl Emby {
     }
 
     #[cfg(feature = "web")]
+    pub(crate) async fn season_episodes(
+        &self,
+        client: &Client,
+        season: &Value,
+    ) -> Result<Vec<Value>, String> {
+        let id = season["Id"]
+            .as_str()
+            .filter(|id| is_item_id(id))
+            .ok_or("Emby 季条目 ID 无效。")?;
+        let mut page = self
+            .items(
+                client,
+                &[
+                    ("ParentId", id),
+                    ("IncludeItemTypes", "Episode"),
+                    ("Recursive", "true"),
+                    ("Limit", "250"),
+                    (
+                        "Fields",
+                        "ProviderIds,OriginalTitle,PremiereDate,LocationType",
+                    ),
+                ],
+            )
+            .await?;
+        let count = page["TotalRecordCount"].as_u64();
+        let items = page["Items"].as_array_mut().ok_or("Emby 分集清单无效。")?;
+        if count != Some(items.len() as u64) {
+            return Err("Emby 未返回完整的本季分集清单。".into());
+        }
+        Ok(std::mem::take(items)
+            .into_iter()
+            .filter(|item| {
+                item["Type"] == "Episode"
+                    && item["LocationType"] != "Virtual"
+                    && item["SeriesId"] == season["SeriesId"]
+                    && item["ParentIndexNumber"] == season["IndexNumber"]
+            })
+            .collect())
+    }
+
+    #[cfg(feature = "web")]
     pub(crate) async fn automatic_item(
         &self,
         client: &Client,

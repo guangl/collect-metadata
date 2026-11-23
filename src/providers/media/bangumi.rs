@@ -6,10 +6,12 @@ use reqwest::header;
 use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
 
-use super::*;
 #[cfg(feature = "web")]
 use super::episode_title::calendar_date;
+use super::*;
 use crate::providers::{field_map, request_text};
+#[cfg(feature = "web")]
+use jiff::{Timestamp, civil::Date, tz::TimeZone};
 
 #[cfg(feature = "web")]
 #[derive(Clone, Copy)]
@@ -254,6 +256,12 @@ impl Bangumi {
     }
 
     async fn episodes(&self, client: &Client, id: u32, kind: MediaKind) -> (Vec<Value>, bool) {
+        let key = format!("episodes:{}:{id}", kind.code());
+        if let Some(data) = self.cache.get(&key)
+            && let Some(episodes) = data.as_array()
+        {
+            return (episodes.clone(), true);
+        }
         let mut episodes = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
         for _ in 0..10 {
@@ -279,6 +287,8 @@ impl Bangumi {
             let empty = page.is_empty();
             episodes.append(page);
             if episodes.len() as u64 >= total {
+                self.cache
+                    .insert(&key, Arc::new(Value::Array(episodes.clone())));
                 return (episodes, true);
             }
             if empty {
@@ -295,7 +305,9 @@ impl Bangumi {
         item: &Value,
     ) -> Option<Source> {
         let series_id = emby.series_provider_id(client, item, "Bangumi").await?;
-        let (episodes, complete) = self.episodes(client, id(&series_id)?, MediaKind::Series).await;
+        let (episodes, complete) = self
+            .episodes(client, id(&series_id)?, MediaKind::Series)
+            .await;
         if !complete {
             return None;
         }
@@ -313,7 +325,11 @@ impl Bangumi {
 
     #[cfg(feature = "web")]
     pub(crate) async fn automatic_episode(
-        &self, client: &Client, subject: u32, item: &Value, language: &str,
+        &self,
+        client: &Client,
+        subject: u32,
+        item: &Value,
+        language: &str,
     ) -> Option<Source> {
         let (episodes, complete) = self.episodes(client, subject, MediaKind::Series).await;
         if !complete {
@@ -321,6 +337,60 @@ impl Bangumi {
         }
         let episode = automatic_episode_match(&episodes, item)?;
         automatic_episode_source(episode, item, language)
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn existing_episode(
+        &self,
+        client: &Client,
+        item: &Value,
+        language: &str,
+    ) -> Result<Option<Source>, String> {
+        let Some(id) = emby::provider_id(item, "Bangumi").and_then(id) else {
+            return Ok(None);
+        };
+        match self.api(client, &format!("episodes/{id}"), None).await {
+            Ok(episode) if episode["id"].as_u64() == Some(u64::from(id)) => {
+                Ok(automatic_episode_source(&episode, item, language))
+            }
+            Ok(_) | Err(Failure::NotFound) => Ok(None),
+            Err(error) => Err(format!("Bangumi：{}", error.description())),
+        }
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn linked_episode(
+        &self,
+        client: &Client,
+        subject: u32,
+        item: &Value,
+        tmdb: Option<&Source>,
+        language: &str,
+    ) -> Option<Source> {
+        let (episodes, complete) = self.episodes(client, subject, MediaKind::Series).await;
+        if !complete {
+            return None;
+        }
+        if let Some(tmdb) = tmdb
+            && let Some(native) = tmdb.fields.get("title_original").and_then(Value::as_str)
+            && let Some(date) = tmdb.fields.get("release_date").and_then(calendar_date)
+        {
+            let mut hits = episodes.iter().filter(|episode| {
+                episode["type"] == 0
+                    && episode["subject_id"] == subject
+                    && episode_fields(episode).and_then(|fields| fields["number"].as_u64())
+                        == item["IndexNumber"].as_u64()
+                    && text(&episode["name"])
+                        .is_some_and(|name| episode_title(name) == episode_title(native))
+                    && calendar_date(&episode["airdate"])
+                        .is_some_and(|airdate| (date - airdate).whole_days().abs() <= 1)
+            });
+            if let Some(episode) = hits.next().filter(|_| hits.next().is_none()) {
+                return automatic_episode_source(episode, item, language);
+            }
+        }
+        automatic_episode_match(&episodes, item)
+            .and_then(|episode| automatic_episode_source(episode, item, language))
     }
 
     #[cfg(feature = "web")]
@@ -345,7 +415,9 @@ impl Bangumi {
         let parts: Vec<Vec<Value>> = stream::iter(subjects.iter().copied())
             .map(|subject| async move {
                 let (episodes, complete) = self.episodes(client, subject, MediaKind::Series).await;
-                complete.then_some(episodes).ok_or("Bangumi 未返回完整分集清单。")
+                complete
+                    .then_some(episodes)
+                    .ok_or("Bangumi 未返回完整分集清单。")
             })
             .buffered(4)
             .try_collect()
@@ -359,6 +431,106 @@ impl Bangumi {
             .ok_or("无法用已核对的 Bangumi 分季映射唯一匹配此分集。")?;
         automatic_episode_source(episode, item, language)
             .ok_or_else(|| "Bangumi 分集 ID 无效。".into())
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn related_season(
+        &self,
+        client: &Client,
+        first: u32,
+        number: u64,
+        local: &[Value],
+        timezone: &TimeZone,
+    ) -> Result<Source, String> {
+        let evidence = local
+            .iter()
+            .map(|episode| {
+                let date = episode["PremiereDate"].as_str()?;
+                let date = date.parse::<Date>().ok().or_else(|| {
+                    date.parse::<Timestamp>()
+                        .ok()
+                        .map(|stamp| timezone.to_datetime(stamp).date())
+                })?;
+                let index = episode["IndexNumber"].as_u64().filter(|&index| index > 0)?;
+                if episode["IndexNumberEnd"]
+                    .as_u64()
+                    .is_some_and(|end| end > index)
+                {
+                    return None;
+                }
+                Some((index, date, episode))
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or("本季分集缺少可核对的日期或集号。")?;
+        let dates = evidence
+            .iter()
+            .map(|(_, date, _)| *date)
+            .collect::<HashSet<_>>();
+        if dates.len() < 3 || !evidence.iter().any(|(index, _, _)| *index == 1) {
+            return Err("需至少三个不同放送日及首集，才能从 Bangumi 续集核对分季。".into());
+        }
+        let mut queue = std::collections::VecDeque::from([first]);
+        let mut seen = HashSet::new();
+        let mut matches = Vec::new();
+        while let Some(subject) = queue.pop_front() {
+            if !seen.insert(subject) {
+                continue;
+            }
+            if seen.len() > 24 {
+                return Err("Bangumi 续集关系过多，需要已核对的季集映射。".into());
+            }
+            let identity = self
+                .subject(client, subject)
+                .await
+                .map_err(|error| format!("Bangumi 续集：{}", error.description()))?;
+            if identity["platform"] != "TV" {
+                continue;
+            }
+            if (subject != first || number == 1)
+                && identity["date"]
+                    .as_str()
+                    .and_then(|date| date.parse::<Date>().ok())
+                    .is_none_or(|start| {
+                        evidence.iter().any(|(index, date, _)| {
+                            *index == 1 && (start - *date).get_days().abs() <= 2
+                        })
+                    })
+            {
+                let (episodes, complete) = self.episodes(client, subject, MediaKind::Series).await;
+                if !complete {
+                    return Err("Bangumi 未返回完整的续集分集清单。".into());
+                }
+                if evidence.iter().all(|&(index, date, item)| {
+                    related_episode(&episodes, subject, index, date, item)
+                }) {
+                    matches.push(subject);
+                }
+            }
+            // Once the catalog starts after the whole local season, its sequels
+            // cannot establish the identity of this season.
+            if identity["date"]
+                .as_str()
+                .and_then(|date| date.parse::<Date>().ok())
+                .is_some_and(|start| dates.iter().all(|date| (start - *date).get_days() > 2))
+            {
+                continue;
+            }
+            let relations = self
+                .api(client, &format!("subjects/{subject}/subjects"), None)
+                .await
+                .map_err(|error| format!("Bangumi 续集关系：{}", error.description()))?;
+            let rows = relations.as_array().ok_or("Bangumi 续集关系格式无效。")?;
+            queue.extend(
+                rows.iter()
+                    .filter(|row| row["type"] == 2 && row["relation"] == "续集")
+                    .filter_map(|row| u32::try_from(row["id"].as_u64()?).ok())
+                    .filter(|&id| id > 0),
+            );
+        }
+        if matches.len() != 1 {
+            return Err("Bangumi 未找到分集日期和集次一致的唯一续集。".into());
+        }
+        self.mapped_season(client, &matches, number).await
     }
 
     #[cfg(feature = "web")]
@@ -462,6 +634,46 @@ impl Bangumi {
     }
 }
 
+#[cfg(feature = "web")]
+fn related_episode(episodes: &[Value], subject: u32, index: u64, date: Date, item: &Value) -> bool {
+    let known_id = emby::provider_id(item, "Bangumi")
+        .and_then(id)
+        .map(u64::from);
+    let mut hits = episodes.iter().filter(|episode| {
+        if episode["type"] != 0
+            || episode["subject_id"] != subject
+            || episode["ep"]
+                .as_f64()
+                .filter(|number| *number > 0.)
+                .or_else(|| episode["sort"].as_f64())
+                != Some(index as f64)
+            || !episode["id"]
+                .as_u64()
+                .is_some_and(|id| id > 0 && known_id.is_none_or(|known| known == id))
+        {
+            return false;
+        }
+        let Some(airdate) = episode["airdate"]
+            .as_str()
+            .and_then(|date| date.parse::<Date>().ok())
+        else {
+            return false;
+        };
+        let same_title = [&item["OriginalTitle"], &item["Name"]]
+            .into_iter()
+            .filter_map(|title| super::episode_title::usable(title, item))
+            .any(|name| {
+                [&episode["name"], &episode["name_cn"]]
+                    .into_iter()
+                    .filter_map(text)
+                    .any(|candidate| episode_title(name) == episode_title(candidate))
+            });
+        date == airdate
+            || ((same_title || known_id.is_some()) && (date - airdate).get_days().abs() <= 1)
+    });
+    hits.next().is_some() && hits.next().is_none()
+}
+
 #[cfg(all(test, feature = "web"))]
 #[tokio::test]
 async fn validates_the_token_using_the_authenticated_user_endpoint() {
@@ -484,17 +696,24 @@ async fn validates_the_token_using_the_authenticated_user_endpoint() {
 }
 
 pub(crate) fn chinese_overview(value: &str) -> bool {
-    whatlang::detect(value).is_some_and(|info| info.is_reliable() && info.lang() == whatlang::Lang::Cmn)
+    whatlang::detect(value)
+        .is_some_and(|info| info.is_reliable() && info.lang() == whatlang::Lang::Cmn)
 }
 
 fn matching_episode<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
     let number = item["IndexNumber"].as_u64().filter(|&number| number > 0)?;
-    let season = item["ParentIndexNumber"].as_u64().filter(|&season| season > 0)?;
-    if item["IndexNumberEnd"].as_u64().is_some_and(|end| end > number) {
+    let season = item["ParentIndexNumber"]
+        .as_u64()
+        .filter(|&season| season > 0)?;
+    if item["IndexNumberEnd"]
+        .as_u64()
+        .is_some_and(|end| end > number)
+    {
         return None;
     }
     let premiere = text(&item["PremiereDate"]).and_then(|date| date.get(..10));
-    let titles = [&item["Name"], &item["OriginalTitle"]].into_iter()
+    let titles = [&item["Name"], &item["OriginalTitle"]]
+        .into_iter()
         .filter_map(text)
         .map(episode_title)
         .filter(|title| !title.is_empty())
@@ -507,8 +726,13 @@ fn matching_episode<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value
         }
         match (premiere, text(&episode["airdate"])) {
             (Some(premiere), Some(airdate)) => premiere == airdate,
-            _ => season == 1 && [&episode["name_cn"], &episode["name"]]
-                .into_iter().filter_map(text).any(|name| titles.contains(&episode_title(name))),
+            _ => {
+                season == 1
+                    && [&episode["name_cn"], &episode["name"]]
+                        .into_iter()
+                        .filter_map(text)
+                        .any(|name| titles.contains(&episode_title(name)))
+            }
         }
     });
     let matched = matches.next()?;
@@ -550,7 +774,9 @@ fn catalog_episode_matches_live(
 ) -> bool {
     live["type"] == 0
         && ["id", "subject_id", "sort"].iter().all(|key| {
-            cached[key].as_u64().is_some_and(|expected| live[key].as_u64() == Some(expected))
+            cached[key]
+                .as_u64()
+                .is_some_and(|expected| live[key].as_u64() == Some(expected))
         })
         && airdate.matches(item, &live["airdate"])
 }
@@ -562,11 +788,16 @@ fn mapped_episode_match<'a>(
     airdate: MappedAirdate,
 ) -> Option<&'a Value> {
     let episode = mapped_episode_candidate(episodes, item)?;
-    airdate.matches(item, &episode["airdate"]).then_some(episode)
+    airdate
+        .matches(item, &episode["airdate"])
+        .then_some(episode)
 }
 
 #[cfg(feature = "web")]
-pub(crate) fn mapped_episode_candidate<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
+pub(crate) fn mapped_episode_candidate<'a>(
+    episodes: &'a [Value],
+    item: &Value,
+) -> Option<&'a Value> {
     let number = item["IndexNumber"].as_u64().filter(|&number| number > 0)?;
     if item["IndexNumberEnd"]
         .as_u64()
@@ -599,22 +830,32 @@ pub(crate) fn mapped_episode_candidate<'a>(episodes: &'a [Value], item: &Value) 
 fn automatic_episode_match<'a>(episodes: &'a [Value], item: &Value) -> Option<&'a Value> {
     let number = item["IndexNumber"].as_u64().filter(|&number| number > 0)?;
     if item["ParentIndexNumber"].as_u64()? == 0
-        || item["IndexNumberEnd"].as_u64().is_some_and(|end| end > number)
+        || item["IndexNumberEnd"]
+            .as_u64()
+            .is_some_and(|end| end > number)
     {
         return None;
     }
-    let expected_id = text(&item["ProviderIds"]["Bangumi"]).and_then(id).map(u64::from);
+    let expected_id = text(&item["ProviderIds"]["Bangumi"])
+        .and_then(id)
+        .map(u64::from);
     let premiere = calendar_date(&item["PremiereDate"]);
     let mut matches = episodes.iter().filter(|episode| {
-        if episode["type"] != 0 || !["ep", "sort"].iter().any(|key| episode[key].as_f64() == Some(number as f64)) {
+        if episode["type"] != 0
+            || !["ep", "sort"]
+                .iter()
+                .any(|key| episode[key].as_f64() == Some(number as f64))
+        {
             return false;
         }
         let episode_id = episode["id"].as_u64();
         // Emby may store local midnight as the previous day in UTC.
-        let date_matches = premiere.zip(calendar_date(&episode["airdate"]))
+        let date_matches = premiere
+            .zip(calendar_date(&episode["airdate"]))
             .is_some_and(|(a, b)| (a - b).whole_days().abs() <= 1);
         if let Some(expected) = expected_id {
-            episode_id == Some(expected) && (premiere.is_none() || episode["airdate"].is_null() || date_matches)
+            episode_id == Some(expected)
+                && (premiere.is_none() || episode["airdate"].is_null() || date_matches)
         } else {
             date_matches || (premiere.is_none() && item["ParentIndexNumber"] == 1)
         }
@@ -630,31 +871,46 @@ async fn mapped_episode_validates_archive_and_falls_back_to_the_live_season() {
         extract::{Path, Query, State},
         routing::get,
     };
-    use std::{collections::HashMap, sync::atomic::{AtomicUsize, Ordering}};
+    use std::{
+        collections::HashMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     let list_requests = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
-        .route("/episodes/{id}", get(|Path(id): Path<u64>| async move {
-            // ID 99 has been moved to a different subject since the archive.
-            let subject = if id == 101 { 11 } else { 90 };
-            Json(json!({"id":id,"subject_id":subject,"sort":26,"type":0,
+        .route(
+            "/episodes/{id}",
+            get(|Path(id): Path<u64>| async move {
+                // ID 99 has been moved to a different subject since the archive.
+                let subject = if id == 101 { 11 } else { 90 };
+                Json(json!({"id":id,"subject_id":subject,"sort":26,"type":0,
                 "airdate":"2026-04-02","name_cn":"实时片名","desc":"实时简介"}))
-        }))
-        .route("/episodes", get(|State(requests): State<Arc<AtomicUsize>>, Query(query): Query<HashMap<String, String>>| async move {
-            requests.fetch_add(1, Ordering::Relaxed);
-            let (id, subject, sort, title) = if query["subject_id"] == "11" {
-                (101, 11, 26, "上篇")
-            } else {
-                (202, 12, 27, "下篇")
-            };
-            Json(json!({"offset":0,"total":1,
+            }),
+        )
+        .route(
+            "/episodes",
+            get(
+                |State(requests): State<Arc<AtomicUsize>>,
+                 Query(query): Query<HashMap<String, String>>| async move {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    let (id, subject, sort, title) = if query["subject_id"] == "11" {
+                        (101, 11, 26, "上篇")
+                    } else {
+                        (202, 12, 27, "下篇")
+                    };
+                    Json(json!({"offset":0,"total":1,
                 "data":[{"id":id,"subject_id":subject,"sort":sort,"type":0,"name_cn":title}]}))
-        }))
+                },
+            ),
+        )
         .with_state(Arc::clone(&list_requests));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_root = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let bangumi = Bangumi { api_root, ..Bangumi::default() };
+    let bangumi = Bangumi {
+        api_root,
+        ..Bangumi::default()
+    };
     let client = Client::new();
     let mut archived = [
         json!({"id":101,"subject_id":11,"sort":26,"type":0,"airdate":"2026-04-02"}),
@@ -662,7 +918,14 @@ async fn mapped_episode_validates_archive_and_falls_back_to_the_live_season() {
     ];
     let item = json!({"Type":"Episode","IndexNumber":1,"PremiereDate":"2026-04-01T16:00:00Z"});
     let source = bangumi
-        .mapped_episode(&client, &[11, 12], &archived, &item, MappedAirdate::Legacy, "zh-CN")
+        .mapped_episode(
+            &client,
+            &[11, 12],
+            &archived,
+            &item,
+            MappedAirdate::Legacy,
+            "zh-CN",
+        )
         .await
         .unwrap();
     assert_eq!(source.fields["description"], "实时简介");
@@ -671,7 +934,14 @@ async fn mapped_episode_validates_archive_and_falls_back_to_the_live_season() {
     archived[1]["id"] = json!(99);
     let item = json!({"Type":"Episode","IndexNumber":2});
     let source = bangumi
-        .mapped_episode(&client, &[11, 12], &archived, &item, MappedAirdate::Legacy, "zh-CN")
+        .mapped_episode(
+            &client,
+            &[11, 12],
+            &archived,
+            &item,
+            MappedAirdate::Legacy,
+            "zh-CN",
+        )
         .await
         .unwrap();
     assert_eq!(source.fields["bangumi_id"], "202");
@@ -689,7 +959,10 @@ fn mapped_episode_uses_continuous_sort_across_cours_and_rejects_conflicts() {
     ];
     let mut item = json!({"IndexNumber":3,"ParentIndexNumber":2});
     let legacy = MappedAirdate::Legacy;
-    assert_eq!(mapped_episode_match(&episodes, &item, legacy).unwrap()["id"], 120);
+    assert_eq!(
+        mapped_episode_match(&episodes, &item, legacy).unwrap()["id"],
+        120
+    );
     assert!(mapped_episode_match(&episodes[1..], &item, legacy).is_none());
     assert!(
         mapped_episode_match(
@@ -722,12 +995,19 @@ fn automatic_episode_matches_date_and_catalog_number_without_crossing_seasons() 
         json!({"id":201,"type":0,"ep":7,"airdate":"2026-11-15"}),
         json!({"id":301,"type":1,"ep":7,"airdate":"2026-11-15"}),
     ];
-    let mut item = json!({"IndexNumber":7,"ParentIndexNumber":2,"PremiereDate":"2026-11-14T16:00:00Z"});
-    assert_eq!(automatic_episode_match(&episodes, &item).unwrap()["id"], 201);
+    let mut item =
+        json!({"IndexNumber":7,"ParentIndexNumber":2,"PremiereDate":"2026-11-14T16:00:00Z"});
+    assert_eq!(
+        automatic_episode_match(&episodes, &item).unwrap()["id"],
+        201
+    );
     item["PremiereDate"] = Value::Null;
     assert!(automatic_episode_match(&episodes, &item).is_none());
     item["ProviderIds"] = json!({"Bangumi":"201"});
-    assert_eq!(automatic_episode_match(&episodes, &item).unwrap()["id"], 201);
+    assert_eq!(
+        automatic_episode_match(&episodes, &item).unwrap()["id"],
+        201
+    );
     item["IndexNumberEnd"] = json!(8);
     assert!(automatic_episode_match(&episodes, &item).is_none());
 }
@@ -753,7 +1033,11 @@ fn matches_regular_episodes_by_number_and_date_or_first_season_title() {
 }
 
 fn episode_title(value: &str) -> String {
-    value.nfkc().filter(|value| value.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+    value
+        .nfkc()
+        .filter(|value| value.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn wrong_kind() -> Failure {

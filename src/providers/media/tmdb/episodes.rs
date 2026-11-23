@@ -9,15 +9,14 @@ use crate::{
 };
 
 use super::super::emby;
-#[cfg(feature = "web")]
 use super::list;
 use super::{NAME, Tmdb, id, image, languages, rating};
 
-struct Episode {
-    series: u32,
-    season: u64,
-    number: u64,
-    id: Option<u64>,
+pub(super) struct Episode {
+    pub(super) series: u32,
+    pub(super) season: u64,
+    pub(super) number: u64,
+    pub(super) id: Option<u64>,
 }
 
 impl Tmdb {
@@ -86,6 +85,22 @@ impl Tmdb {
                 }
             }
         };
+        Some(
+            self.episode_source(client, item, language, episode, series_override.is_some())
+                .await,
+        )
+    }
+
+    async fn episode_source(
+        &self,
+        client: &Client,
+        item: &Value,
+        language: &str,
+        episode: Episode,
+        automatic: bool,
+    ) -> Source {
+        let ids = &item["ProviderIds"];
+        let expected_id = ids["Tmdb"].as_str().and_then(super::id).map(u64::from);
         let Episode {
             series,
             season,
@@ -95,7 +110,7 @@ impl Tmdb {
         let path = format!("tv/{series}/season/{season}/episode/{number}");
         let page = Url::parse(&format!("https://www.themoviedb.org/{path}")).unwrap();
         let mut endpoint = self.endpoint(&path, language);
-        let extras = if series_override.is_some() {
+        let extras = if automatic {
             "external_ids,translations,credits"
         } else {
             "external_ids,translations"
@@ -103,10 +118,9 @@ impl Tmdb {
         endpoint
             .query_pairs_mut()
             .append_pair("append_to_response", extras);
-        let series_endpoint = self.endpoint(&format!("tv/{series}"), language);
         let (details, show) = tokio::join!(
             self.get(client, &endpoint),
-            self.get(client, &series_endpoint)
+            self.episode_series_details(client, series, language)
         );
         let details = match details {
             Ok(data)
@@ -134,8 +148,8 @@ impl Tmdb {
             {
                 data
             }
-            Ok(_) => return Some(Source::failure(NAME, &page, Failure::NotFound)),
-            Err(error) => return Some(Source::failure(NAME, &page, error)),
+            Ok(_) => return Source::failure(NAME, &page, Failure::NotFound),
+            Err(error) => return Source::failure(NAME, &page, error),
         };
         let show = show.and_then(|data| {
             (data["id"].as_u64() == Some(u64::from(series)))
@@ -156,8 +170,21 @@ impl Tmdb {
             ("release_date", details["air_date"].clone()),
             ("rating", rating(&details)),
             ("original_languages", json!(languages(&series_data))),
+            ("imdb_id", details["external_ids"]["imdb_id"].clone()),
+            (
+                "tvdb_id",
+                json!(
+                    details["external_ids"]["tvdb_id"]
+                        .as_u64()
+                        .map(|id| id.to_string())
+                ),
+            ),
+            (
+                "title_original",
+                original_episode_name(&details, &series_data),
+            ),
         ]);
-        if series_override.is_some() {
+        if automatic {
             fields.extend(field_map([
                 ("title", details["name"].clone()),
                 ("description", details["overview"].clone()),
@@ -178,7 +205,27 @@ impl Tmdb {
             source.status = "partial";
             source.note = note;
         }
-        Some(source)
+        source
+    }
+
+    async fn episode_series_details(
+        &self,
+        client: &Client,
+        series: u32,
+        language: &str,
+    ) -> Result<Value, Failure> {
+        let key = format!("{series}:{language}");
+        if let Some(entry) = self.series_details.get(&key) {
+            return Ok((*entry).clone());
+        }
+        let data = self
+            .get(client, &self.endpoint(&format!("tv/{series}"), language))
+            .await?;
+        if data["id"].as_u64() == Some(u64::from(series)) {
+            self.series_details
+                .insert(&key, std::sync::Arc::new(data.clone()));
+        }
+        Ok(data)
     }
 
     #[cfg(feature = "web")]
@@ -214,21 +261,85 @@ impl Tmdb {
         language: &str,
         series: u32,
     ) -> Option<Source> {
-        let mut source = self
+        let source = self
             .emby_episode_with_series(client, emby, item, language, Some(series))
             .await?;
-        let episode = &source.data["episode"];
-        if let Some(id) = episode["id"].as_u64() {
-            source.fields.insert("tmdb_id", json!(id.to_string()));
+        Some(prepare_automatic_source(source, item, language))
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn matched_group_episode(
+        &self,
+        client: &Client,
+        item: &Value,
+        language: &str,
+        series: u32,
+        timezone: &jiff::tz::TimeZone,
+    ) -> Result<Option<Source>, String> {
+        let Some((episode, airdate)) = self.grouped_episode(client, item, series, timezone).await?
+        else {
+            return Ok(None);
+        };
+        let source = self
+            .episode_source(client, item, language, episode, true)
+            .await;
+        if source.data["episode"].is_null() {
+            return if source.status == "not_found" {
+                Ok(None)
+            } else {
+                Err(source
+                    .note
+                    .unwrap_or_else(|| "TMDB 分组分集读取失败。".into()))
+            };
         }
-        if let Some(title) =
-            automatic_episode_title(episode, &source.data["series"], item, language)
+        if source.data["episode"]["air_date"]
+            .as_str()
+            .and_then(|date| date.parse::<jiff::civil::Date>().ok())
+            != Some(airdate)
         {
-            source.fields.insert("title", json!(title));
-        } else {
-            source.fields.remove("title");
+            return Ok(None);
         }
-        Some(source)
+        Ok(Some(prepare_automatic_source(source, item, language)))
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) fn uses_episode_group(item: &Value, series: u32) -> bool {
+        item["ParentIndexNumber"]
+            .as_u64()
+            .is_some_and(|season| super::episode_groups::has_group(series, season))
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) async fn matched_automatic_episode(
+        &self,
+        client: &Client,
+        emby: &emby::Emby,
+        item: &Value,
+        language: &str,
+        series: u32,
+        timezone: &jiff::tz::TimeZone,
+    ) -> Result<Option<Source>, String> {
+        if Self::uses_episode_group(item, series) {
+            return self
+                .matched_group_episode(client, item, language, series, timezone)
+                .await;
+        }
+        let Some(source) = self
+            .automatic_episode(client, emby, item, language, series)
+            .await
+        else {
+            return Ok(None);
+        };
+        let episode = &source.data["episode"];
+        if episode.is_null() {
+            // The automatic match reports identity conflicts as NotFound.
+            return if source.status == "not_found" {
+                Ok(None)
+            } else {
+                Err(source.note.unwrap_or_else(|| "TMDB 分集读取失败。".into()))
+            };
+        }
+        Ok(verified_episode_identity(item, episode, timezone).then_some(source))
     }
 
     #[cfg(feature = "web")]
@@ -238,14 +349,19 @@ impl Tmdb {
         series: u32,
         item: &Value,
         language: &str,
+        timezone: &jiff::tz::TimeZone,
     ) -> Result<Source, String> {
         let number = item["IndexNumber"].as_u64().ok_or("Emby 条目缺少季号。")?;
         let path = format!("tv/{series}/season/{number}");
+        let mut endpoint = self.endpoint(&path, language);
+        endpoint
+            .query_pairs_mut()
+            .append_pair("append_to_response", "external_ids,aggregate_credits");
         let data = self
-            .get(client, &self.endpoint(&path, language))
+            .get(client, &endpoint)
             .await
             .map_err(|error| format!("TMDB：{}", error.description()))?;
-        if !season_matches(&data, item) {
+        if !season_matches(&data, item, timezone) {
             return Err("TMDB 季号、季 ID 或首播日与 Emby 冲突，需要核对分季映射。".into());
         }
         let page = Url::parse(&format!("https://www.themoviedb.org/{path}")).unwrap();
@@ -254,6 +370,15 @@ impl Tmdb {
             ("description", data["overview"].clone()),
             ("poster_url", json!(image(&data["poster_path"], "w500"))),
             ("release_date", data["air_date"].clone()),
+            ("rating", rating(&data)),
+            (
+                "tvdb_id",
+                json!(
+                    data["external_ids"]["tvdb_id"]
+                        .as_u64()
+                        .map(|id| id.to_string())
+                ),
+            ),
             ("season_number", json!(number)),
             (
                 "tmdb_id",
@@ -311,30 +436,138 @@ impl Tmdb {
 }
 
 #[cfg(feature = "web")]
-fn season_matches(data: &Value, item: &Value) -> bool {
+fn prepare_automatic_source(mut source: Source, item: &Value, language: &str) -> Source {
+    let episode = &source.data["episode"];
+    if let Some(id) = episode["id"].as_u64() {
+        source.fields.insert("tmdb_id", json!(id.to_string()));
+    }
+    if let Some(title) = automatic_episode_title(episode, &source.data["series"], item, language) {
+        source.fields.insert("title", json!(title));
+    } else {
+        source.fields.remove("title");
+    }
+    source
+}
+
+fn original_episode_name(episode: &Value, series: &Value) -> Value {
+    let language = series["original_language"].as_str();
+    list(&episode["translations"]["translations"])
+        .find_map(|entry| {
+            (language.is_some() && entry["iso_639_1"].as_str() == language)
+                .then(|| {
+                    entry["data"]["name"]
+                        .as_str()
+                        .filter(|name| !name.trim().is_empty())
+                })
+                .flatten()
+        })
+        .map_or(Value::Null, |name| json!(name))
+}
+
+#[cfg(feature = "web")]
+fn verified_episode_identity(item: &Value, episode: &Value, timezone: &jiff::tz::TimeZone) -> bool {
+    let exact_id = [
+        ("Tmdb", episode["id"].as_u64().map(|id| id.to_string())),
+        (
+            "Tvdb",
+            episode["external_ids"]["tvdb_id"]
+                .as_u64()
+                .map(|id| id.to_string()),
+        ),
+        (
+            "Imdb",
+            episode["external_ids"]["imdb_id"]
+                .as_str()
+                .map(str::to_owned),
+        ),
+    ]
+    .into_iter()
+    .any(|(provider, source)| {
+        source
+            .as_deref()
+            .is_some_and(|id| emby::provider_id(item, provider) == Some(id))
+    });
+    if exact_id {
+        return true;
+    }
+    let local = [&item["Name"], &item["OriginalTitle"]]
+        .into_iter()
+        .filter_map(|title| episode_title::usable(title, item))
+        .map(emby::normalize)
+        .collect::<Vec<_>>();
+    let matched_title = std::iter::once(&episode["name"])
+        .chain(list(&episode["translations"]["translations"]).map(|entry| &entry["data"]["name"]))
+        .filter_map(|title| episode_title::usable(title, item))
+        .any(|title| local.contains(&emby::normalize(title)));
+    let dates =
+        local_premiere_date(item, timezone).zip(episode_title::calendar_date(&episode["air_date"]));
+    matched_title && dates.is_none_or(|(local, source)| (local - source).whole_days().abs() <= 1)
+        || dates.is_some_and(|(local, source)| local == source)
+}
+
+#[cfg(feature = "web")]
+fn local_premiere_date(item: &Value, timezone: &jiff::tz::TimeZone) -> Option<time::Date> {
+    let local_date = item["PremiereDate"]
+        .as_str()
+        .and_then(|date| date.parse::<jiff::Timestamp>().ok())
+        .map(|timestamp| json!(timezone.to_datetime(timestamp).date().to_string()));
+    episode_title::calendar_date(local_date.as_ref().unwrap_or(&item["PremiereDate"]))
+}
+
+#[cfg(feature = "web")]
+fn season_matches(data: &Value, item: &Value, timezone: &jiff::tz::TimeZone) -> bool {
+    let tmdb = emby::provider_id(item, "Tmdb")
+        .and_then(id)
+        .map(|expected| data["id"].as_u64() == Some(u64::from(expected)));
+    let tvdb = emby::provider_id(item, "Tvdb")
+        .and_then(id)
+        .zip(data["external_ids"]["tvdb_id"].as_u64())
+        .map(|(expected, actual)| u64::from(expected) == actual);
     data["season_number"].as_u64() == item["IndexNumber"].as_u64()
         && data["name"].as_str().is_some()
-        && item["ProviderIds"]["Tmdb"]
-            .as_str()
-            .and_then(id)
-            .is_none_or(|expected| data["id"].as_u64() == Some(u64::from(expected)))
-        && episode_title::calendar_date(&item["PremiereDate"])
-            .zip(episode_title::calendar_date(&data["air_date"]))
-            .is_none_or(|(local, source)| (local - source).whole_days().abs() <= 1)
+        && tmdb != Some(false)
+        && tvdb != Some(false)
+        && (tmdb == Some(true)
+            || tvdb == Some(true)
+            || local_premiere_date(item, timezone)
+                .zip(episode_title::calendar_date(&data["air_date"]))
+                .is_none_or(|(local, source)| (local - source).whole_days().abs() <= 1))
+}
+
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn backfill_requires_evidence_beyond_episode_number() {
+    let zone = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
+    let source = json!({"id":55,"name":"惊喜","air_date":"2022-10-30","episode_number":3});
+    let mut item = json!({"Type":"Episode","Name":"第 3 集","IndexNumber":3});
+    assert!(!verified_episode_identity(&item, &source, &zone));
+    item["PremiereDate"] = json!("2022-10-29T16:00:00Z");
+    assert!(verified_episode_identity(&item, &source, &zone));
+    item["PremiereDate"] = json!("2022-11-05T16:00:00Z");
+    assert!(!verified_episode_identity(&item, &source, &zone));
 }
 
 #[cfg(all(test, feature = "web"))]
 #[test]
 fn automatic_season_requires_consistent_local_evidence() {
-    let source = json!({"season_number":2,"name":"Season 2","id":123,"air_date":"2026-09-27"});
+    let zone = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
+    let source = json!({"season_number":2,"name":"Season 2","id":123,"air_date":"2026-09-27",
+                        "external_ids":{"tvdb_id":27}});
     let mut item =
         json!({"IndexNumber":2,"ProviderIds":{"Tmdb":"123"},"PremiereDate":"2026-09-26T16:00:00Z"});
-    assert!(season_matches(&source, &item));
+    assert!(season_matches(&source, &item, &zone));
     item["ProviderIds"]["Tmdb"] = json!("124");
-    assert!(!season_matches(&source, &item));
+    assert!(!season_matches(&source, &item, &zone));
     item["ProviderIds"]["Tmdb"] = Value::Null;
     item["PremiereDate"] = json!("2026-08-27");
-    assert!(!season_matches(&source, &item));
+    assert!(!season_matches(&source, &item, &zone));
+    item["ProviderIds"]["Tvdb"] = json!("27");
+    assert!(season_matches(&source, &item, &zone));
+    item["ProviderIds"]["Tvdb"] = json!("28");
+    assert!(!season_matches(&source, &item, &zone));
+    item["ProviderIds"]["Tvdb"] = Value::Null;
+    item["PremiereDate"] = json!("2026-09-25T16:00:00Z");
+    assert!(season_matches(&source, &item, &zone));
 }
 
 #[cfg(feature = "web")]

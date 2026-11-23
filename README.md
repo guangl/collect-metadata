@@ -171,6 +171,10 @@ Web 服务还需要可写的 \`EMBY_WRITEBACK_ROOT\` 和「Emby 媒体写回」�
 
 Emby 的分季与公开目录不一致时，可给 Web 服务挂载一份本地 JSON，并用 `EMBY_AUTO_SCRAPE_SEASON_MAP` 指定容器内文件路径。文件按 Emby **剧集条目 ID → 季号 → 已核对的 Bangumi 条目 ID 列表**编写，例如 `{"123":{"2":[456,789]}}`。同一季上下篇按播出顺序列出。映射使用 Bangumi 的连续分集序号校验集次，并拒绝与已有 Bangumi 分集 ID 或首播日期冲突的结果。季海报取首篇，简介保留已配置篇章的简介。[季集映射规范](docs/EMBY_SEASON_MAPPING.md)
 
+已核对的 TMDB 分集分组可用 `EMBY_AUTO_SCRAPE_TMDB_GROUPS` 指定 JSON 文件。格式为 **TMDB 剧集 ID → Emby 季号 → `{"group":"分组 ID","subgroup":"子组 ID"}`**。新入库与批量更新共用该映射，取对应的分组顺序、首播日期及已有来源 ID 核验分集，再从 TMDB 的原始季集地址读取元数据。没有首播日期或 TMDB 分集 ID 时，已核对的分组也可用与 Emby 季集号一致的 `SxxEyy` 文件名确认。将 `EMBY_AUTO_SCRAPE_SKIP_SPECIALS` 设为 `true` 可跳过第 0 季及其分集。
+
+没有已核对的 Bangumi 季映射且 TMDB 无法匹配本季时，自动入库会沿已确认作品的 Bangumi 续集关系查找。只有手头的普通分集均可核对、覆盖首集和至少三个不同放送日，且只有一个候选季符合时，才会使用该季的资料。
+
 入库事件由插件交给 Collect Metadata。Web 自动刮削队列需要可用的 PostgreSQL；原生插件自身的 Emby 刷新模式不受此要求影响。队列写入失败会记录在 Emby 日志。
 
 自动任务的状态、尝试次数、失败原因、下次执行时间和执行租约保存在 PostgreSQL，重启不会重置等待时间。首次升级会登记目录中仍待处理的事件；旧版仅保存在内存中的次数和重试时间无法自动还原。Emby 的服务信息及经过认证的媒体库读取通过后才领取任务；服务尚未就绪时暂停队列，不消耗任务尝试次数。
@@ -182,6 +186,8 @@ Emby 的分季与公开目录不一致时，可给 Web 服务挂载一份本地 
 归档文件留在队列目录。根据日志或状态接口核对来源、权限和分季后，重新创建对应的 `.event` 或 `.backfill` 文件并更新其修改时间，才会生成新一代任务；仅把旧归档改回原名不会重置数据库终态。不要触碰仍在排队或重试的原名文件，以免无意中创建新任务。`.backfill` 只接受 Series、Season 和 Episode，且仅用于中央元数据模式；保留已存在的媒体文件和旁挂资料。
 
 使用 PostgreSQL 季集映射时，将 Web 的 `EMBY_AUTO_SCRAPE_TIMEZONE` 设为 Emby 本地首播日期所属的 IANA 时区，例如 `Asia/Shanghai`。日期冲突可按[官方放送日复核流程](docs/EMBY_SEASON_MAPPING.md#如何比较首播日期)处理。
+
+中央元数据模式会将匹配来源提供的播出日期、评分、外部 ID、演职员、类型、标签、制作公司等填入 Emby 的空白字段。要补录已入库条目，可在自动入库队列目录创建 `Series-<id>.backfill`、`Season-<id>.backfill` 或 `Episode-<id>.backfill`。批量补录保留已有标题、简介、图片和 NFO，并优先处理常规入库事件。队列文件完成后标记为 `.backfill-done`、`.backfill-review`、`.backfill-skipped` 或 `.backfill-failed`，详情可查 Web 日志。
 
 NAS 定时补全任务可以挂载只读的 `MEDIA_ARRIVAL_DIRECTORY`。该目录包含 `status.json` 快照和用于写回的 `token`。Web 服务在容器内部监听 `7099`，提供状态和经认证的番剧标题、简介写回。通过独立私有媒体任务完成文件入库的部署，应让该任务负责私有库的自动写回。
 

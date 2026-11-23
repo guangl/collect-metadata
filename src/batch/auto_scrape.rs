@@ -23,9 +23,11 @@ use crate::{
     providers::media::{
         bangumi::{MappedAirdate, mapped_episode_candidate},
         emby::{
-            EPISODE_QUERY_PREFIX, Emby, has_provider_id, is_item_id, missing_people, record_people,
+            EPISODE_QUERY_PREFIX, Emby, credit_role, has_provider_id, is_item_id, missing_people,
+            record_people,
         },
         episode_title::{needs_title, usable},
+        validate_episode_groups,
     },
 };
 
@@ -93,6 +95,7 @@ pub struct AutoScrape {
     season_map: SeasonMap,
     database_season_map: bool,
     emby_timezone: TimeZone,
+    skip_specials: bool,
 }
 
 struct Event {
@@ -154,6 +157,7 @@ impl AutoScrape {
         let timezone = env::var("EMBY_AUTO_SCRAPE_TIMEZONE").unwrap_or_else(|_| "UTC".into());
         let emby_timezone = TimeZone::get(timezone.trim())
             .map_err(|_| "EMBY_AUTO_SCRAPE_TIMEZONE 必须是有效的 IANA 时区。")?;
+        validate_episode_groups()?;
         let season_map =
             match env::var_os("EMBY_AUTO_SCRAPE_SEASON_MAP").filter(|path| !path.is_empty()) {
                 Some(path) => SeasonMap::parse(
@@ -172,6 +176,8 @@ impl AutoScrape {
             database_season_map: env::var("EMBY_AUTO_SCRAPE_DB_SEASON_MAP")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
             emby_timezone,
+            skip_specials: env::var("EMBY_AUTO_SCRAPE_SKIP_SPECIALS")
+                .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
         }))
     }
 
@@ -190,7 +196,8 @@ impl AutoScrape {
             }
         }
         result.sort_unstable_by(|left, right| {
-            left.backfill.cmp(&right.backfill)
+            left.backfill
+                .cmp(&right.backfill)
                 .then(left.id.len().cmp(&right.id.len()))
                 .then(left.id.cmp(&right.id))
         });
@@ -218,10 +225,13 @@ impl AutoScrape {
             return Ok(Outcome::MissingItem);
         };
         let item = &home.data["item"];
-        if item["LocationType"] == "Virtual" {
+        if item["LocationType"] == "Virtual" || (self.skip_specials && is_special(item)) {
             return Ok(Outcome::Skipped);
         }
-        let path = item["Path"].as_str().filter(|path| !path.is_empty()).map(Path::new)
+        let path = item["Path"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .map(Path::new)
             .ok_or("等待 Emby 完成入库并提供媒体路径。")?;
         let private = self.private_roots.iter().any(|root| path.starts_with(root));
         if !private && !self.roots.iter().any(|root| path.starts_with(root)) {
@@ -278,7 +288,16 @@ impl AutoScrape {
             && let (Some(server), Some(subjects)) = (&server_id, &database_subjects)
         {
             if episode_complete && has_provider_id(item, "Bangumi") {
-                return sync_mapped_episode(collector, &emby, server, item, None, central).await;
+                return sync_mapped_episode(
+                    collector,
+                    &emby,
+                    server,
+                    item,
+                    None,
+                    central,
+                    &self.emby_timezone,
+                )
+                .await;
             }
             let store = collector.require_store().await?;
             archived = match store.archived_bangumi_episodes(subjects).await {
@@ -314,8 +333,16 @@ impl AutoScrape {
                     "Automatic scrape Episode {} confirmed by official airdate {catalog_date}.",
                     event.id
                 );
-                return sync_mapped_episode(collector, &emby, server, item, Some(id), central)
-                    .await;
+                return sync_mapped_episode(
+                    collector,
+                    &emby,
+                    server,
+                    item,
+                    Some(id),
+                    central,
+                    &self.emby_timezone,
+                )
+                .await;
             }
             // Preserve the ID-only route when conversion resolves an apparent
             // conflict, even if Emby is missing other metadata.
@@ -329,8 +356,16 @@ impl AutoScrape {
                             .is_some_and(|stored| stored != local)
                 });
             if episode_complete || timezone_resolved_conflict {
-                return sync_mapped_episode(collector, &emby, server, item, bangumi_id, central)
-                    .await;
+                return sync_mapped_episode(
+                    collector,
+                    &emby,
+                    server,
+                    item,
+                    bangumi_id,
+                    central,
+                    &self.emby_timezone,
+                )
+                .await;
             }
         }
         let settings = collector.output_settings().ok_or("自动写回设置不可用。")?;
@@ -362,17 +397,30 @@ impl AutoScrape {
                 .ok_or("采集记录缺少来源。")?;
             sources.push(json!(home));
             result
-        } else if episode_complete {
-            collector.existing_automatic_episode(home, &query, &event.id)?
+        } else if episode_complete
+            || (event.backfill && event.item_type == "Episode" && mapped_subjects.is_empty())
+        {
+            collector
+                .existing_automatic_episode(
+                    &emby,
+                    home,
+                    &query,
+                    &event.id,
+                    central,
+                    &self.emby_timezone,
+                )
+                .await?
         } else if !mapped_subjects.is_empty() {
             collector
                 .gather_mapped_child(
+                    &emby,
                     home,
                     &query,
                     &event.id,
                     mapped_subjects,
                     &archived,
                     mapped_airdate,
+                    &self.emby_timezone,
                 )
                 .await?
         } else if matches!(event.item_type, "Season" | "Episode") {
@@ -382,30 +430,72 @@ impl AutoScrape {
                     &collector.client,
                     series_id,
                     "Series",
-                    "Path,ProviderIds,OriginalTitle,ProductionYear",
+                    "Path,ProviderIds,OriginalTitle,ProductionYear,PremiereDate",
                 )
                 .await?;
             let candidate = match_work(collector, MediaKind::Series, &series).await?;
-            collector
-                .gather_automatic_child(
-                    &emby,
-                    home,
-                    &query,
-                    &candidate,
-                    &series,
-                )
-                .await?
+            let attempt = |choice: CandidateChoice| {
+                let home = home.clone();
+                let (emby, query, series) = (&emby, &query, &series);
+                async move {
+                    let result = collector
+                        .gather_automatic_child(
+                            emby,
+                            home,
+                            query,
+                            &choice,
+                            series,
+                            &self.emby_timezone,
+                        )
+                        .await?;
+                    if event.item_type == "Episode"
+                        && needs_title(item)
+                        && usable(&result.record["fields"]["title"], item).is_none()
+                    {
+                        return Err("来源尚未提供可核对的分集标题。".into());
+                    }
+                    Ok(result)
+                }
+            };
+            on_source_failure(attempt(candidate.clone()).await, async {
+                let other = collector
+                    .automatic_backup(MediaKind::Series, &series, candidate.provider)
+                    .await?;
+                eprintln!(
+                    "Automatic scrape {} {} switching metadata provider: {} -> {}",
+                    event.item_type,
+                    event.id,
+                    provider_label(candidate.provider),
+                    provider_label(other.provider)
+                );
+                attempt(other).await
+            })
+            .await?
         } else {
             let candidate = match_work(collector, kind, item).await?;
-            collector
-                .gather_automatic_work(kind, event.id.clone(), &query, home, &candidate)
-                .await?
+            let primary = collector
+                .gather_automatic_work(kind, event.id.clone(), &query, home.clone(), &candidate)
+                .await;
+            on_source_failure(primary, async {
+                let other = collector
+                    .automatic_backup(kind, item, candidate.provider)
+                    .await?;
+                eprintln!(
+                    "Automatic scrape {} {} switching metadata provider: {} -> {}",
+                    event.item_type,
+                    event.id,
+                    provider_label(candidate.provider),
+                    provider_label(other.provider)
+                );
+                collector
+                    .gather_automatic_work(kind, event.id.clone(), &query, home.clone(), &other)
+                    .await
+            })
+            .await?
         };
         if central {
             collector.require_store().await?;
-            if event.backfill && !result.record["sources"].as_array().into_iter().flatten().any(|source| {
-                source["provider"] != "Emby" && matches!(source["status"].as_str(), Some("ok" | "partial"))
-            }) {
+            if event.backfill && !has_verified_source(&result.record) {
                 return Ok(Outcome::NoVerifiedSource);
             }
             let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
@@ -417,9 +507,16 @@ impl AutoScrape {
                     people = collector.verified_episode_people(&emby, item).await;
                 }
             }
-            let _write = collector.automatic_write_lock(&event.id).await;
-            emby.enrich_automatic_item(&collector.client, item, &result.record, &people)
-                .await?;
+            let write = collector.automatic_write_lock(&event.id).await;
+            emby.enrich_automatic_item(
+                &collector.client,
+                item,
+                &result.record,
+                &people,
+                &self.emby_timezone,
+                event.backfill,
+            )
+            .await?;
             let fresh = emby
                 .automatic_item(&collector.client, &event.id, item_type)
                 .await?
@@ -452,12 +549,21 @@ impl AutoScrape {
                 Some(server) => server,
                 None => emby.automatic_server_id(&collector.client).await?,
             };
-            collector.upsert_emby_item(&server, &event.id, &fresh.data["item"], None).await?;
+            let document = catalog_document(&fresh.data["item"], &result.record);
+            collector
+                .upsert_emby_item(&server, &event.id, &document, None)
+                .await?;
+            // A portrait can hash to the same write lock as its series.
+            drop(write);
+            if event.item_type == "Series" {
+                fill_cast_portraits(collector, &emby, &document, &result.record).await;
+            }
             if event.backfill {
                 return Ok(Outcome::Enriched);
             }
         } else if event.item_type == "Episode" {
-            let item = &crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?["item"];
+            let item =
+                &crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?["item"];
             if !needs_title(item) {
                 result.record["fields"]["title"] = item["Name"].clone();
                 result.record["field_sources"]["title"] = json!("Emby");
@@ -494,9 +600,20 @@ impl AutoScrape {
             return Ok(Outcome::AwaitingTitle);
         }
         if missing_title {
-            eprintln!("Automatic scrape Episode {} retained its episode number after seven days without a sourced title.", event.id);
+            eprintln!(
+                "Automatic scrape Episode {} retained its episode number after seven days without a sourced title.",
+                event.id
+            );
         }
         Ok(Outcome::Written(written))
+    }
+}
+
+fn is_special(item: &Value) -> bool {
+    match item["Type"].as_str() {
+        Some("Episode") => item["ParentIndexNumber"] == 0,
+        Some("Season") => item["IndexNumber"] == 0,
+        _ => false,
     }
 }
 
@@ -507,13 +624,9 @@ async fn sync_mapped_episode(
     item: &Value,
     bangumi_id: Option<u32>,
     central: bool,
+    timezone: &TimeZone,
 ) -> Result<Outcome, String> {
     let item_id = item["Id"].as_str().ok_or("Emby 条目缺少 ID。")?;
-    let people = if central && missing_people(item) {
-        collector.verified_episode_people(emby, item).await
-    } else {
-        Vec::new()
-    };
     let _write = collector.automatic_write_lock(item_id).await;
     let fresh;
     let item = if !has_provider_id(item, "Bangumi")
@@ -534,10 +647,28 @@ async fn sync_mapped_episode(
         item
     };
     let refreshed;
-    let item = if emby
-        .fill_automatic_people(&collector.client, item, &people)
-        .await?
-    {
+    let item = if central {
+        let home = emby
+            .automatic_item(&collector.client, item_id, "Episode")
+            .await?
+            .ok_or("Emby 条目在写入期间已消失。")?;
+        let query = format!("{EPISODE_QUERY_PREFIX}{item_id}");
+        let result = collector
+            .existing_automatic_episode(emby, home, &query, item_id, true, timezone)
+            .await?;
+        let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
+        let people = record_people(&result.record);
+        if has_verified_source(&result.record) {
+            emby.enrich_automatic_item(
+                &collector.client,
+                &data["item"],
+                &result.record,
+                &people,
+                timezone,
+                true,
+            )
+            .await?;
+        }
         refreshed = emby
             .automatic_item(&collector.client, item_id, "Episode")
             .await?
@@ -549,7 +680,78 @@ async fn sync_mapped_episode(
     collector
         .upsert_emby_item(server, item_id, item, None)
         .await?;
-    Ok(Outcome::Skipped)
+    Ok(if central {
+        Outcome::Enriched
+    } else {
+        Outcome::Skipped
+    })
+}
+
+fn has_verified_source(record: &Value) -> bool {
+    record["sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|source| {
+            source["provider"] != "Emby"
+                && matches!(source["status"].as_str(), Some("ok" | "partial"))
+        })
+}
+
+fn catalog_document(item: &Value, record: &Value) -> Value {
+    let catalog = [
+        "official_url",
+        "trailer_url",
+        "videos",
+        "network",
+        "original_languages",
+        "description_original",
+    ]
+    .into_iter()
+    .filter_map(|key| Some((key.to_owned(), record["fields"].get(key)?.clone())))
+    .collect::<serde_json::Map<_, _>>();
+    let mut document = item.clone();
+    if !catalog.is_empty() {
+        document["_collect_metadata"]["catalog"] = Value::Object(catalog);
+    }
+    document
+}
+
+async fn fill_cast_portraits(collector: &Collector, emby: &Emby, item: &Value, record: &Value) {
+    let portraits: Vec<_> = crate::output::collected_portraits(record).collect();
+    for person in item["People"].as_array().into_iter().flatten() {
+        let Some(id) = person["Id"].as_str().filter(|id| is_item_id(id)) else {
+            continue;
+        };
+        let Some(name) = person["Name"].as_str() else {
+            continue;
+        };
+        if person["PrimaryImageTag"].is_string() {
+            continue;
+        }
+        let role = credit_role(item, person);
+        let mut sources = portraits.iter().filter(|(source_role, _, source_name)| {
+            source_name == name
+                && (*source_role == role
+                    || matches!(
+                        (*source_role, role),
+                        ("actor", "voice") | ("voice", "actor")
+                    ))
+        });
+        let Some((_, url, _)) = sources.next() else {
+            continue;
+        };
+        if sources.any(|(_, other, _)| other.host_str() == url.host_str() && other != url) {
+            continue;
+        }
+        let _write = collector.automatic_write_lock(id).await;
+        if let Err(error) = emby
+            .fill_collected_portrait(&collector.client, id, name, url)
+            .await
+        {
+            eprintln!("Emby person {id}: {error}");
+        }
+    }
 }
 
 fn emby_airdate(value: &Value, timezone: &TimeZone) -> Result<Option<Date>, String> {
@@ -589,7 +791,10 @@ fn emby_airdate_uses_the_configured_calendar_day() {
         ("2026-07-01T04:30:00Z", &new_york, "2026-07-01"),
         ("2026-01-01T04:30:00Z", &new_york, "2025-12-31"),
     ] {
-        assert_eq!(emby_airdate(&json!(input), zone), Ok(Some(day.parse().unwrap())));
+        assert_eq!(
+            emby_airdate(&json!(input), zone),
+            Ok(Some(day.parse().unwrap()))
+        );
     }
     assert_eq!(emby_airdate(&Value::Null, &shanghai), Ok(None));
     assert!(emby_airdate(&json!("2021-01-11T16:00:00+99:00"), &shanghai).is_err());
@@ -642,8 +847,14 @@ async fn match_work(
     item: &Value,
 ) -> Result<CandidateChoice, String> {
     let ids = &item["ProviderIds"];
-    if let Some(id) = ids["Tmdb"].as_str().filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0)) {
-        return Ok(CandidateChoice { provider: MediaProvider::Tmdb, id: id.into() });
+    if let Some(id) = ids["Tmdb"]
+        .as_str()
+        .filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0))
+    {
+        return Ok(CandidateChoice {
+            provider: MediaProvider::Tmdb,
+            id: id.into(),
+        });
     }
     if let Some(path) = item["Path"].as_str()
         && let Some(hint) = Path::new(path)
@@ -662,8 +873,14 @@ async fn match_work(
             id: id.into(),
         });
     }
-    if let Some(id) = ids["Bangumi"].as_str().filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0)) {
-        return Ok(CandidateChoice { provider: MediaProvider::Bangumi, id: id.into() });
+    if let Some(id) = ids["Bangumi"]
+        .as_str()
+        .filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0))
+    {
+        return Ok(CandidateChoice {
+            provider: MediaProvider::Bangumi,
+            id: id.into(),
+        });
     }
     let title = item["OriginalTitle"]
         .as_str()
@@ -698,6 +915,27 @@ async fn match_work(
                 .message
                 .unwrap_or_else(|| "公开来源存在多个候选，请为文件或剧集目录添加来源 ID。".into())
         })
+}
+
+fn provider_label(provider: MediaProvider) -> &'static str {
+    match provider {
+        MediaProvider::Tmdb => "TMDB",
+        MediaProvider::Bangumi => "Bangumi",
+        MediaProvider::Tvmaze => "TVmaze",
+        MediaProvider::Wikidata => "Wikidata",
+    }
+}
+
+async fn on_source_failure<T>(
+    primary: Result<T, String>,
+    other: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match primary {
+        Ok(value) => Ok(value),
+        Err(primary) => other
+            .await
+            .map_err(|other| format!("主来源：{primary}；备用来源：{other}")),
+    }
 }
 
 #[cfg(test)]

@@ -19,9 +19,19 @@ use crate::{LookupResponse, providers::media::emby::Emby};
 
 pub(crate) use assets::image_bytes;
 #[cfg(feature = "web")]
+pub(crate) fn collected_portraits(
+    record: &Value,
+) -> impl Iterator<Item = (&'static str, reqwest::Url, String)> {
+    assets::collected_portraits(record)
+}
+#[cfg(feature = "web")]
 pub(crate) async fn download_image(client: &Client, raw: &str) -> Option<(Vec<u8>, &'static str)> {
     let url = reqwest::Url::parse(raw).ok()?;
-    image_bytes(assets::public_response(client, &url, "image/*", std::time::Duration::from_secs(15)).await?).await
+    image_bytes(
+        assets::public_response(client, &url, "image/*", std::time::Duration::from_secs(15))
+            .await?,
+    )
+    .await
 }
 pub(crate) use settings::ExportPlan;
 pub use settings::{OutputOptions, OutputSettings, OutputSettingsView};
@@ -65,10 +75,13 @@ pub(crate) fn emby_source(record: &Value) -> Option<&Value> {
         .map(|source| &source["data"])
 }
 
-pub(crate) use emby::{PreparedWriteback, WritebackJob, WritebackState, plan as plan_writeback, prepare as prepare_writeback};
 pub use emby::WritebackPreviewFile;
 #[cfg(feature = "web")]
 pub(crate) use emby::write_automatic;
+pub(crate) use emby::{
+    PreparedWriteback, WritebackJob, WritebackState, plan as plan_writeback,
+    prepare as prepare_writeback,
+};
 
 pub(crate) struct BatchExport {
     temporary: tempfile::TempDir,
