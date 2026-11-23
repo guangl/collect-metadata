@@ -1,12 +1,13 @@
+mod durable;
+
 use std::{
     collections::HashMap,
     env,
     path::{Component, Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use futures_util::{StreamExt, stream};
 use jiff::{
     Timestamp,
     civil::{Date, DateTime},
@@ -74,6 +75,8 @@ impl SeasonMap {
 enum Outcome {
     Skipped,
     Written(usize),
+    Enriched,
+    NoVerifiedSource,
     AwaitingTitle,
     AwaitingAirdateReview,
     MissingItem,
@@ -94,13 +97,16 @@ struct Event {
     path: PathBuf,
     id: String,
     item_type: &'static str,
+    backfill: bool,
 }
 
 impl Event {
     fn parse(path: PathBuf) -> Option<Self> {
-        if path.extension()?.to_str()? != "event" {
-            return None;
-        }
+        let backfill = match path.extension()?.to_str()? {
+            "event" => false,
+            "backfill" => true,
+            _ => return None,
+        };
         let (kind, id) = path.file_stem()?.to_str()?.split_once('-')?;
         let item_type = match kind {
             "Movie" => "Movie",
@@ -110,7 +116,7 @@ impl Event {
             "Video" => "Video",
             _ => return None,
         };
-        if !is_item_id(id) {
+        if !is_item_id(id) || (backfill && !matches!(item_type, "Series" | "Season" | "Episode")) {
             return None;
         }
         let id = id.to_owned();
@@ -118,6 +124,7 @@ impl Event {
             path,
             id,
             item_type,
+            backfill,
         })
     }
 }
@@ -167,105 +174,7 @@ impl AutoScrape {
     }
 
     pub async fn run(self, collector: Arc<Collector>) {
-        let mut retries: HashMap<PathBuf, (u32, Instant)> = HashMap::new();
-        eprintln!(
-            "Collect Metadata automatic scrape watching {}",
-            self.spool.display()
-        );
-        loop {
-            let events = match self.events().await {
-                Ok(events) => events,
-                Err(error) => {
-                    eprintln!("Cannot read automatic scrape queue: {error}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-            let now = Instant::now();
-            let ready = events
-                .into_iter()
-                .filter(|event| {
-                    retries
-                        .get(&event.path)
-                        .is_none_or(|(_, retry)| now >= *retry)
-                })
-                .take(32)
-                .collect::<Vec<_>>();
-            let mut results = stream::iter(ready)
-                .map(|event| {
-                    let service = &self;
-                    let collector = &collector;
-                    async move {
-                        let result = service.process(collector, &event).await;
-                        (event, result)
-                    }
-                })
-                .buffer_unordered(4);
-            while let Some((event, result)) = results.next().await {
-                let mut awaiting_review = false;
-                let (error, archive) = match result {
-                    Ok(Outcome::AwaitingTitle) => {
-                        awaiting_review = true;
-                        ("来源尚未提供可核对的分集标题。".into(), None)
-                    }
-                    Ok(Outcome::AwaitingAirdateReview) => {
-                        awaiting_review = true;
-                        ("Emby 首播日与目录不一致，等待核对官方放送日。".into(), None)
-                    }
-                    Ok(Outcome::MissingItem) => (
-                        "Emby 未返回此入库条目。".into(),
-                        Some(("missing", MISSING_ITEM_GRACE)),
-                    ),
-                    Ok(done) => match tokio::fs::remove_file(&event.path).await {
-                        Ok(()) => {
-                            retries.remove(&event.path);
-                            if let Outcome::Written(count) = done {
-                                eprintln!(
-                                    "Automatic scrape {} {} completed with {count} new sidecar files.",
-                                    event.item_type, event.id
-                                );
-                            }
-                            continue;
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(error) => (format!("无法移除已确认的入库事件：{error}"), None),
-                    },
-                    Err(error) => (error, Some(("failed", RETRY_WINDOW))),
-                };
-                if let Some((status, grace)) = archive
-                    && event_age(&event.path).await.is_ok_and(|age| age >= grace)
-                {
-                    let archived = event
-                        .path
-                        .with_extension(format!("{status}-{}", uuid::Uuid::new_v4().simple()));
-                    match tokio::fs::rename(&event.path, &archived).await {
-                        Ok(()) => {
-                            retries.remove(&event.path);
-                            eprintln!(
-                                "Automatic scrape {} {} archived as {status}: {error}",
-                                event.item_type, event.id
-                            );
-                            continue;
-                        }
-                        Err(error) => eprintln!("Cannot archive automatic scrape event: {error}"),
-                    }
-                }
-                let attempt = retries.get(&event.path).map_or(1, |(count, _)| count + 1);
-                let delay = if awaiting_review {
-                    Duration::from_secs(if attempt == 1 { 1800 } else { 6 * 3600 })
-                } else {
-                    Duration::from_secs((5 * 2_u64.pow(attempt.min(9) - 1)).min(1800))
-                };
-                retries.insert(event.path, (attempt, Instant::now() + delay));
-                eprintln!(
-                    "Automatic scrape {} {}: {error}; retry in {}s.",
-                    event.item_type,
-                    event.id,
-                    delay.as_secs()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(350)).await;
-        }
+        self.run_durable(collector).await;
     }
 
     async fn events(&self) -> std::io::Result<Vec<Event>> {
@@ -279,9 +188,8 @@ impl AutoScrape {
             }
         }
         result.sort_unstable_by(|left, right| {
-            left.id
-                .len()
-                .cmp(&right.id.len())
+            left.backfill.cmp(&right.backfill)
+                .then(left.id.len().cmp(&right.id.len()))
                 .then(left.id.cmp(&right.id))
         });
         Ok(result)
@@ -327,6 +235,9 @@ impl AutoScrape {
             return Ok(Outcome::Skipped);
         }
         let central = self.central_metadata && !private;
+        if event.backfill && !central {
+            return Ok(Outcome::Skipped);
+        }
         let episode_complete = event.item_type == "Episode" && complete_episode(item);
         let season_field = if event.item_type == "Episode" {
             "ParentIndexNumber"
@@ -488,6 +399,11 @@ impl AutoScrape {
         };
         if central {
             collector.require_store().await?;
+            if event.backfill && !result.record["sources"].as_array().into_iter().flatten().any(|source| {
+                source["provider"] != "Emby" && matches!(source["status"].as_str(), Some("ok" | "partial"))
+            }) {
+                return Ok(Outcome::NoVerifiedSource);
+            }
             let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
             let _write = collector.automatic_write_lock(&event.id).await;
             emby.enrich_automatic_item(&collector.client, &data["item"], &result.record)
@@ -522,6 +438,9 @@ impl AutoScrape {
                 None => emby.automatic_server_id(&collector.client).await?,
             };
             collector.upsert_emby_item(&server, &event.id, &fresh.data["item"], None).await?;
+            if event.backfill {
+                return Ok(Outcome::Enriched);
+            }
         } else if event.item_type == "Episode" {
             let item = &crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?["item"];
             if !needs_title(item) {

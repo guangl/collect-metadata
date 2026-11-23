@@ -83,6 +83,14 @@ jobs:
           cargo +1.100.0 test --locked --no-default-features --features web --lib
           storage::batch::tests:: -- --ignored --test-threads=1
       - run: cargo +1.100.0 test --locked --no-default-features --features web --bin collect-metadata-web web_routes_persist_and_export_an_emby_batch -- --ignored --test-threads=1
+      - name: Persist automatic scrape retries across restarts
+        run: >-
+          cargo +1.100.0 test --locked --no-default-features --features web --lib
+          storage::auto_scrape::tests:: -- --ignored --test-threads=1
+      - name: Pause automatic scraping until Emby is ready
+        run: >-
+          cargo +1.100.0 test --locked --no-default-features --features web --lib
+          auto_startup_gate_survives_collector_restart -- --ignored --test-threads=1
 
   emby-plugin:
     name: Build Emby plugin and verify organizer rules

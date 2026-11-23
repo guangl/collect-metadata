@@ -94,6 +94,8 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
             super::batch::migrate(&mut transaction).await?;
+            #[cfg(feature = "web")]
+            super::auto_scrape::migrate(&mut transaction).await?;
             sqlx::query(
                 "ALTER TABLE collect_metadata_snapshots
                  ADD COLUMN IF NOT EXISTS history_visible boolean NOT NULL DEFAULT true",
