@@ -11,6 +11,10 @@ use collect_metadata::{Collector, diagnostics};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+#[cfg(test)]
+#[path = "../../tests/media_arrival.rs"]
+mod tests;
+
 #[derive(Clone)]
 struct MediaArrival {
     directory: PathBuf,
@@ -22,6 +26,17 @@ pub(super) async fn start(collector: Arc<Collector>) -> io::Result<()> {
     let Some(directory) = env::var_os("MEDIA_ARRIVAL_DIRECTORY").map(PathBuf::from) else {
         return Ok(());
     };
+    let router = router(directory, collector).await?;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:7099").await?;
+    tokio::spawn(async move {
+        if axum::serve(listener, router).await.is_err() {
+            diagnostics::error("media_arrival_listener_failed", json!({}));
+        }
+    });
+    Ok(())
+}
+
+async fn router(directory: PathBuf, collector: Arc<Collector>) -> io::Result<Router> {
     let token = tokio::fs::read_to_string(directory.join("token")).await?;
     let token = token.trim();
     if token.len() < 32 {
@@ -30,8 +45,7 @@ pub(super) async fn start(collector: Arc<Collector>) -> io::Result<()> {
             "invalid media repair token",
         ));
     }
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:7099").await?;
-    let router = Router::new()
+    Ok(Router::new()
         .route("/status.json", get(status))
         .route("/healthz", get(health))
         .route("/repair", post(repair))
@@ -39,13 +53,7 @@ pub(super) async fn start(collector: Arc<Collector>) -> io::Result<()> {
             directory,
             authorization: format!("Bearer {token}"),
             collector,
-        });
-    tokio::spawn(async move {
-        if axum::serve(listener, router).await.is_err() {
-            diagnostics::error("media_arrival_listener_failed", json!({}));
-        }
-    });
-    Ok(())
+        }))
 }
 
 impl MediaArrival {

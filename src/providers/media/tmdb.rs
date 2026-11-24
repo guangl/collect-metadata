@@ -23,6 +23,8 @@ pub(crate) struct Tmdb {
     credential: Credential,
     requests: Semaphore,
     series_details: EntityCache,
+    #[cfg(all(test, feature = "web"))]
+    episode_group_fixture: Option<episode_groups::Groups>,
 }
 
 enum Credential {
@@ -31,6 +33,13 @@ enum Credential {
 }
 
 impl Tmdb {
+    #[cfg(all(test, feature = "web"))]
+    pub(crate) fn fixture(api_root: Url) -> Self {
+        let mut provider = Self::new("fixture-token").unwrap();
+        provider.api_root = api_root;
+        provider
+    }
+
     pub(crate) fn new(token: &str) -> Option<Self> {
         let token = token.trim();
         if token.is_empty()
@@ -54,6 +63,8 @@ impl Tmdb {
             credential,
             requests: Semaphore::new(4),
             series_details: EntityCache::default(),
+            #[cfg(all(test, feature = "web"))]
+            episode_group_fixture: None,
         })
     }
 

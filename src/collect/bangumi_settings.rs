@@ -27,6 +27,11 @@ pub struct BangumiSettings {
 }
 
 impl BangumiSettings {
+    #[cfg(all(test, feature = "web"))]
+    pub(crate) fn fixture(api_root: reqwest::Url) -> Self {
+        Self::new(None, Some(Bangumi::fixture(api_root)))
+    }
+
     pub fn from_file(path: PathBuf) -> Result<Self, String> {
         let stored = match fs::read_to_string(&path) {
             Ok(value) => Bangumi::authenticated(&value),

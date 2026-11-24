@@ -322,6 +322,18 @@ MCP 可以查询公开候选和 Emby 媒体库、筛缺资料、提交普通或 
 
 GitHub CI 在推送 `main` 或提交 PR 时运行前端测试与构建、Rust 桌面和 Web 测试、临时 PostgreSQL 的队列和模拟 Emby 集成测试，以及 Emby 插件构建和整理规则检查。这些检查使用测试配置，无需私有凭据。`npm run test:coverage` 检查 TypeScript 源文件的行覆盖率，门槛为 85%。
 
+PostgreSQL 集成任务还检查 Emby 自动入库、分集匹配、队列持久化、写回和 NFO 生成的合计行覆盖率，门槛为 95%。检查脚本输出各文件的覆盖率和按可执行行数计算的合计覆盖率。该任务使用临时 PostgreSQL 和本地模拟服务。[核心覆盖率检查](tools/check_core_coverage.py)
+
+本地可使用相同的 Rust Web 功能和测试集，先设置指向隔离数据库的 `COLLECT_METADATA_TEST_POSTGRES`，再运行：
+
+```sh
+npm run build
+EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --no-default-features --features web \
+  --lib --bin collect-metadata-web --json --summary-only --output-path /tmp/collect-metadata-coverage.json \
+  -- --include-ignored --skip collect::tests::live_ --test-threads=1
+python3 tools/check_core_coverage.py /tmp/collect-metadata-coverage.json
+```
+
 Rust 的完整覆盖率检查还包含 PostgreSQL 集成测试及实际来源采集。运行前设置 `COLLECT_METADATA_TEST_POSTGRES`（连接账户需有建 schema 权限）和 `TMDB_READ_ACCESS_TOKEN`，并确保能连接测试使用的公开来源。
 
 ```sh

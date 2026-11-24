@@ -303,10 +303,10 @@ impl Tmdb {
     }
 
     #[cfg(feature = "web")]
-    pub(crate) fn uses_episode_group(item: &Value, series: u32) -> bool {
+    pub(crate) fn uses_episode_group(&self, item: &Value, series: u32) -> bool {
         item["ParentIndexNumber"]
             .as_u64()
-            .is_some_and(|season| super::episode_groups::has_group(series, season))
+            .is_some_and(|season| self.has_group(series, season))
     }
 
     #[cfg(feature = "web")]
@@ -319,7 +319,7 @@ impl Tmdb {
         series: u32,
         timezone: &jiff::tz::TimeZone,
     ) -> Result<Option<Source>, String> {
-        if Self::uses_episode_group(item, series) {
+        if self.uses_episode_group(item, series) {
             return self
                 .matched_group_episode(client, item, language, series, timezone)
                 .await;

@@ -14,12 +14,30 @@ use super::{Tmdb, id};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Group {
+pub(super) struct Group {
     group: String,
     subgroup: String,
 }
 
-type Groups = HashMap<u32, HashMap<u64, Group>>;
+pub(super) type Groups = HashMap<u32, HashMap<u64, Group>>;
+
+fn parse_groups(text: &str) -> Result<Groups, String> {
+    let groups: Groups = serde_json::from_str(text)
+        .map_err(|error| format!("TMDB 分组格式无效：{error}"))?;
+    if groups.iter().any(|(series, seasons)| {
+        *series == 0
+            || seasons.is_empty()
+            || seasons.iter().any(|(season, entry)| {
+                *season == 0
+                    || [&entry.group, &entry.subgroup].iter().any(|id| {
+                        id.len() != 24 || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+            })
+    }) {
+        return Err("TMDB 分组必须提供有效的剧集 ID、普通季号、分组 ID 和子组 ID。".into());
+    }
+    Ok(groups)
+}
 
 fn groups() -> Result<&'static Groups, String> {
     static GROUPS: OnceLock<Result<Groups, String>> = OnceLock::new();
@@ -31,21 +49,7 @@ fn groups() -> Result<&'static Groups, String> {
             };
             let text = fs::read_to_string(path)
                 .map_err(|error| format!("无法读取已核对的 TMDB 分组：{error}"))?;
-            let groups: Groups = serde_json::from_str(&text)
-                .map_err(|error| format!("TMDB 分组格式无效：{error}"))?;
-            if groups.iter().any(|(series, seasons)| {
-                *series == 0
-                    || seasons.is_empty()
-                    || seasons.iter().any(|(season, entry)| {
-                        *season == 0
-                            || [&entry.group, &entry.subgroup].iter().any(|id| {
-                                id.len() != 24 || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                            })
-                    })
-            }) {
-                return Err("TMDB 分组必须提供有效的剧集 ID、普通季号、分组 ID 和子组 ID。".into());
-            }
-            Ok(groups)
+            parse_groups(&text)
         })
         .as_ref()
         .map_err(Clone::clone)
@@ -55,15 +59,29 @@ pub(crate) fn validate_episode_groups() -> Result<(), String> {
     groups().map(|_| ())
 }
 
-pub(super) fn has_group(series: u32, season: u64) -> bool {
-    groups().is_ok_and(|groups| {
-        groups
-            .get(&series)
-            .is_some_and(|seasons| seasons.contains_key(&season))
-    })
-}
-
 impl Tmdb {
+    #[cfg(test)]
+    pub(crate) fn with_group_fixture(mut self, text: &str) -> Self {
+        self.episode_group_fixture = Some(parse_groups(text).unwrap());
+        self
+    }
+
+    fn episode_groups(&self) -> Result<&Groups, String> {
+        #[cfg(test)]
+        if let Some(groups) = &self.episode_group_fixture {
+            return Ok(groups);
+        }
+        groups()
+    }
+
+    pub(super) fn has_group(&self, series: u32, season: u64) -> bool {
+        self.episode_groups().is_ok_and(|groups| {
+            groups
+                .get(&series)
+                .is_some_and(|seasons| seasons.contains_key(&season))
+        })
+    }
+
     pub(super) async fn grouped_episode(
         &self,
         client: &Client,
@@ -74,7 +92,7 @@ impl Tmdb {
         let Some(season) = item["ParentIndexNumber"].as_u64() else {
             return Ok(None);
         };
-        let Some(mapping) = groups()?
+        let Some(mapping) = self.episode_groups()?
             .get(&series)
             .and_then(|seasons| seasons.get(&season))
         else {
@@ -176,6 +194,26 @@ fn resolve_episode(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn config_does_not_accept_specials_ambiguous_series_or_malformed_ids() {
+        let group = "1234567890abcdef12345678";
+        let subgroup = "abcdef1234567890abcdef12";
+        let mapping = |series: &str, season: &str, group: &str| {
+            json!({series:{season:{"group":group,"subgroup":subgroup}}}).to_string()
+        };
+        assert!(parse_groups(&mapping("16", "2", group)).is_ok());
+        for input in [
+            mapping("0", "2", group),
+            mapping("16", "0", group),
+            mapping("16", "2", "abcdef0123456789abcdefg0"),
+            r#"{"16":{}}"#.to_owned(),
+        ] {
+            assert!(parse_groups(&input).err().unwrap().contains("有效的剧集 ID"));
+        }
+        assert!(parse_groups("[]").err().unwrap().contains("分组格式无效"));
+        assert!(parse_groups(&json!({"16":{"2":{"group":group,"subgroup":subgroup,"typo":true}}}).to_string()).is_err());
+    }
 
     #[test]
     fn alternate_order_requires_unique_episode_with_local_airdate_and_matching_ids() {

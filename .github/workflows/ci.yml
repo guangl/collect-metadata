@@ -78,19 +78,17 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
-      - run: rustup toolchain install 1.100.0 --profile minimal
-      - run: >-
-          cargo +1.100.0 test --locked --no-default-features --features web --lib
-          storage::batch::tests:: -- --ignored --test-threads=1
-      - run: cargo +1.100.0 test --locked --no-default-features --features web --bin collect-metadata-web web_routes_persist_and_export_an_emby_batch -- --ignored --test-threads=1
-      - name: Persist automatic scrape retries across restarts
-        run: >-
-          cargo +1.100.0 test --locked --no-default-features --features web --lib
-          storage::auto_scrape::tests:: -- --ignored --test-threads=1
-      - name: Pause automatic scraping until Emby is ready
-        run: >-
-          cargo +1.100.0 test --locked --no-default-features --features web --lib
-          auto_startup_gate_survives_collector_restart -- --ignored --test-threads=1
+      - name: Install Rust coverage tools
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component llvm-tools
+          cargo +1.100.0 install cargo-llvm-cov --version 0.8.7 --locked
+      - name: Test PostgreSQL integration and enforce 95% core line coverage
+        run: |
+          cargo +1.100.0 llvm-cov --locked --no-default-features --features web \
+            --lib --bin collect-metadata-web --json --summary-only \
+            --output-path "${RUNNER_TEMP}/collect-metadata-coverage.json" \
+            -- --include-ignored --skip collect::tests::live_ --test-threads=1
+          python3 tools/check_core_coverage.py "${RUNNER_TEMP}/collect-metadata-coverage.json"
 
   emby-plugin:
     name: Build Emby plugin and verify organizer rules

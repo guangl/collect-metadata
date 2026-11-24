@@ -147,6 +147,11 @@ impl Default for Bangumi {
 }
 
 impl Bangumi {
+    #[cfg(all(test, feature = "web"))]
+    pub(crate) fn fixture(api_root: Url) -> Self {
+        Self { api_root, ..Self::default() }
+    }
+
     pub(crate) fn authenticated(token: &str) -> Option<Self> {
         let token = token.trim();
         if token.is_empty()

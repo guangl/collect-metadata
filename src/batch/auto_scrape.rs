@@ -1,8 +1,13 @@
 mod durable;
 
+#[cfg(test)]
+#[path = "../tests/automatic_scrape.rs"]
+mod workflow_tests;
+
 use std::{
     collections::HashMap,
     env,
+    ffi::OsString,
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -136,7 +141,13 @@ impl Event {
 
 impl AutoScrape {
     pub fn from_environment() -> Result<Option<Self>, String> {
-        let Some(spool) = env::var_os("EMBY_AUTO_SCRAPE_SPOOL").filter(|path| !path.is_empty())
+        Self::from_settings(|name| env::var_os(name))
+    }
+
+    fn from_settings(value: impl Fn(&str) -> Option<OsString>) -> Result<Option<Self>, String> {
+        let text = |name| value(name).and_then(|value| value.into_string().ok());
+        let enabled = |name| text(name).is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        let Some(spool) = value("EMBY_AUTO_SCRAPE_SPOOL").filter(|path| !path.is_empty())
         else {
             return Ok(None);
         };
@@ -144,22 +155,22 @@ impl AutoScrape {
         if !spool.is_absolute() || !spool.is_dir() {
             return Err("EMBY_AUTO_SCRAPE_SPOOL 必须是已挂载的绝对目录。".into());
         }
-        let roots = media_roots("EMBY_AUTO_SCRAPE_ROOTS")?;
-        let private_roots = media_roots("EMBY_AUTO_SCRAPE_PRIVATE_ROOTS")?;
+        let roots = media_roots("EMBY_AUTO_SCRAPE_ROOTS", text("EMBY_AUTO_SCRAPE_ROOTS"))?;
+        let private_roots = media_roots(
+            "EMBY_AUTO_SCRAPE_PRIVATE_ROOTS",
+            text("EMBY_AUTO_SCRAPE_PRIVATE_ROOTS"),
+        )?;
         if roots.is_empty() && private_roots.is_empty() {
             return Err("请为自动刮削指定 Emby 媒体库路径。".into());
         }
-        let url = env::var("EMBY_AUTO_SCRAPE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let central_metadata = env::var("EMBY_AUTO_SCRAPE_CENTRAL_METADATA")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
-        let timezone = env::var("EMBY_AUTO_SCRAPE_TIMEZONE").unwrap_or_else(|_| "UTC".into());
+        let url = text("EMBY_AUTO_SCRAPE_URL").filter(|value| !value.trim().is_empty());
+        let central_metadata = enabled("EMBY_AUTO_SCRAPE_CENTRAL_METADATA");
+        let timezone = text("EMBY_AUTO_SCRAPE_TIMEZONE").unwrap_or_else(|| "UTC".into());
         let emby_timezone = TimeZone::get(timezone.trim())
             .map_err(|_| "EMBY_AUTO_SCRAPE_TIMEZONE 必须是有效的 IANA 时区。")?;
         validate_episode_groups()?;
         let season_map =
-            match env::var_os("EMBY_AUTO_SCRAPE_SEASON_MAP").filter(|path| !path.is_empty()) {
+            match value("EMBY_AUTO_SCRAPE_SEASON_MAP").filter(|path| !path.is_empty()) {
                 Some(path) => SeasonMap::parse(
                     &std::fs::read_to_string(path)
                         .map_err(|error| format!("无法读取季集映射：{error}"))?,
@@ -173,11 +184,9 @@ impl AutoScrape {
             private_roots,
             central_metadata,
             season_map,
-            database_season_map: env::var("EMBY_AUTO_SCRAPE_DB_SEASON_MAP")
-                .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
+            database_season_map: enabled("EMBY_AUTO_SCRAPE_DB_SEASON_MAP"),
             emby_timezone,
-            skip_specials: env::var("EMBY_AUTO_SCRAPE_SKIP_SPECIALS")
-                .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
+            skip_specials: enabled("EMBY_AUTO_SCRAPE_SKIP_SPECIALS"),
         }))
     }
 
@@ -819,8 +828,8 @@ fn complete_episode(item: &Value) -> bool {
             .is_some_and(|value| !value.is_empty())
 }
 
-fn media_roots(variable: &str) -> Result<Vec<PathBuf>, String> {
-    env::var(variable)
+fn media_roots(variable: &str, value: Option<String>) -> Result<Vec<PathBuf>, String> {
+    value
         .unwrap_or_default()
         .split(';')
         .map(str::trim)

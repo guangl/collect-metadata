@@ -26,6 +26,16 @@ pub struct TmdbSettings {
 }
 
 impl TmdbSettings {
+    #[cfg(all(test, feature = "web"))]
+    pub(crate) fn fixture(api_root: reqwest::Url) -> Self {
+        Self::new(None, Some(Tmdb::fixture(api_root)))
+    }
+
+    #[cfg(all(test, feature = "web"))]
+    pub(crate) fn group_fixture(api_root: reqwest::Url, groups: &str) -> Self {
+        Self::new(None, Some(Tmdb::fixture(api_root).with_group_fixture(groups)))
+    }
+
     pub fn from_file(path: PathBuf) -> Result<Self, String> {
         let stored = match fs::read_to_string(&path) {
             Ok(value) => Tmdb::new(&value),

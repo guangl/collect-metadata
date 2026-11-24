@@ -81,7 +81,7 @@ impl AutoScrape {
         }
     }
 
-    async fn durable_cycle(&self, collector: &Collector) -> Result<(), String> {
+    pub(super) async fn durable_cycle(&self, collector: &Collector) -> Result<(), String> {
         let store = collector.require_store().await?;
         let queue = self.queue_key();
         let events = self
@@ -424,6 +424,11 @@ mod tests {
             "old committed results must not remove a replacement event"
         );
         job.generation = generation(&path).await.unwrap();
+        let archive = path.with_extension("backfill-done");
+        std::fs::create_dir(&archive).unwrap();
+        assert!(service.settle_file(&job).await.is_err());
+        assert!(path.exists());
+        std::fs::remove_dir(&archive).unwrap();
         service.settle_file(&job).await.unwrap();
         assert!(!path.exists());
         assert!(path.with_extension("backfill-done").exists());
@@ -525,6 +530,31 @@ mod tests {
             collector.auto_scrape_state().await.unwrap()["jobs"][0]["attempts"],
             1
         );
+
+        let replacement = temp.path().join("Episode-92.backfill");
+        std::fs::write(&replacement, b"old contents").unwrap();
+        let store = collector.require_store().await.unwrap();
+        let queue = service.queue_key();
+        store
+            .sync_auto_events(&queue, &[AutoEvent {
+                name: "Episode-92.backfill".into(),
+                generation: generation(&replacement).await.unwrap(),
+                kind: "Episode".into(),
+                item_id: "92".into(),
+                backfill: true,
+            }])
+            .await.unwrap();
+        let job = store.claim_auto_jobs(&queue).await.unwrap().pop().unwrap();
+        std::fs::write(&replacement, b"a different generation").unwrap();
+        service.run_job(&collector, store, &queue, job).await.unwrap();
+        let state = collector.auto_scrape_state().await.unwrap();
+        assert_eq!(state["jobs"][0]["status"], "missing");
+        assert_eq!(state["jobs"][0]["error_kind"], "event_replaced");
+        assert_eq!(std::fs::read(&replacement).unwrap(), b"a different generation");
+
+        sqlx::query(AssertSqlSafe(format!("DROP TABLE {schema}.collect_metadata_auto_jobs")))
+            .execute(&admin).await.unwrap();
+        assert!(service.durable_cycle(&collector).await.unwrap_err().contains("任务状态保存失败"));
         drop(collector);
         server.abort();
         sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))

@@ -24,6 +24,10 @@ use super::{
 #[cfg(feature = "web")]
 use super::{FileKind, plan_with_mode};
 
+#[cfg(test)]
+#[path = "../../tests/emby_publish.rs"]
+mod tests;
+
 pub(super) const BACKUP_DIRECTORY: &str = ".collect-metadata-backups";
 
 pub(super) struct StagedFile {

@@ -23,7 +23,8 @@ async fn desktop_commands_work_without_a_database_and_keep_preferences() {
         .unwrap()
         .with_tmdb_settings(Arc::clone(&tmdb))
         .with_emby_settings(Arc::clone(&emby))
-        .with_output_settings(Arc::clone(&output));
+        .with_output_settings(Arc::clone(&output))
+        .with_language_settings(Arc::new(LanguageSettings::load(Some(root.join("languages.json"))).unwrap()));
     app.manage(DesktopState {
         runtime: RwLock::new(Runtime::start(collector)),
         config_lock: tokio::sync::Mutex::new(()),
@@ -131,6 +132,8 @@ async fn desktop_commands_work_without_a_database_and_keep_preferences() {
     assert_eq!(saved["options"]["filename_prefix"], "{id}");
     assert!(!root.join("database-url").exists());
 
+    Box::pin(assert_desktop_commands_reject_unconfigured_requests(&state)).await;
+
     let media = root.join("Library");
     fs::create_dir_all(media.join("Series/Season 01")).unwrap();
     fs::create_dir_all(media.join("Series/extras")).unwrap();
@@ -142,4 +145,66 @@ async fn desktop_commands_work_without_a_database_and_keep_preferences() {
     );
     assert!(scan_folder_paths(&root.join("missing")).is_err());
     state().runtime.read().unwrap().worker.abort();
+}
+
+async fn assert_desktop_commands_reject_unconfigured_requests<'a>(
+    state: &impl Fn() -> tauri::State<'a, DesktopState>,
+) {
+    use batches::{
+        correct_batch_match, create_ai_batch, create_folder_batch, preview_writeback,
+        queue_writeback, scrape_folder_work,
+    };
+    use collect_metadata::{AppError, EmbyPreviewImage, EmbyScrapeScope, EmbyScrapeTarget};
+    use emby::{
+        emby_catalog, emby_credits, emby_episode_overview, emby_missing_episode_overviews,
+        emby_preview_image, emby_series_preview, emby_work_sources, import_emby_catalog,
+        import_emby_item, import_emby_selection, overwrite_emby, preview_emby,
+        refresh_emby_metadata,
+    };
+    use settings::{ai_status, bangumi_status, language_settings, save_bangumi, save_languages, test_bangumi};
+
+    fn code<T>(result: Result<T, AppError>, expected: ErrorCode) {
+        assert_eq!(result.err().expect("request should be rejected").code, expected);
+    }
+
+    assert!(!ai_status(state()));
+    assert_eq!(serde_json::to_value(bangumi_status(state())).unwrap(), "unconfigured");
+    code(test_bangumi(state(), Some("invalid token".into())).await, ErrorCode::BangumiConnectionFailed);
+    code(save_bangumi(state(), "invalid token".into()).await, ErrorCode::BangumiSettingsFailed);
+    let before = serde_json::to_value(language_settings(state())).unwrap();
+    code(save_languages(state(), vec!["français".into()]).await, ErrorCode::LanguageSettingsFailed);
+    assert_eq!(serde_json::to_value(language_settings(state())).unwrap(), before);
+    let view = save_languages(state(), vec!["ja".into(), "zh-CN".into()]).await.unwrap();
+    let current = serde_json::to_value(language_settings(state())).unwrap();
+    assert_eq!(current, serde_json::to_value(view).unwrap());
+    assert_ne!(current, before);
+
+    code(create_ai_batch(state(), serde_json::from_value(json!({"items":[]})).unwrap()).await,
+        ErrorCode::AiBatchCreateFailed);
+    code(create_folder_batch(state(), vec![]).await, ErrorCode::BatchCreateFailed);
+    code(Box::pin(scrape_folder_work(state(), 1, 2, vec!["../outside.mkv".into()], None)).await,
+        ErrorCode::FolderScrapeFailed);
+    code(correct_batch_match(state(), 1, 2, serde_json::from_value(json!({"provider":"tmdb","id":"10"})).unwrap()).await,
+        ErrorCode::BatchMatchFailed);
+    code(preview_writeback(state(), 1, None).await, ErrorCode::WritebackPreviewFailed);
+    code(queue_writeback(state(), 1, None, "invalid".into()).await, ErrorCode::WritebackQueueFailed);
+
+    assert!(emby_catalog(state()).await.unwrap().is_none());
+    code(preview_emby(state(), "7".into()).await, ErrorCode::EmbyLibraryFailed);
+    code(emby_work_sources(state(), "7".into()).await, ErrorCode::EmbyDetailsFailed);
+    code(emby_credits(state(), "7".into()).await, ErrorCode::EmbyDetailsFailed);
+    code(emby_series_preview(state(), "7".into()).await, ErrorCode::EmbyDetailsFailed);
+    code(emby_episode_overview(state(), "7".into()).await, ErrorCode::EmbyDetailsFailed);
+    code(emby_missing_episode_overviews(state(), "7".into()).await, ErrorCode::EmbyDetailsFailed);
+    code(emby_preview_image(state(), "7".into(), EmbyPreviewImage::Poster).await,
+        ErrorCode::EmbyImageUnavailable);
+    code(import_emby_catalog(state()).await, ErrorCode::EmbyImportFailed);
+    code(import_emby_item(state(), "7".into(), EmbyScrapeScope::Series).await,
+        ErrorCode::EmbyImportFailed);
+    code(import_emby_selection(state(), serde_json::from_value(json!({"items":[]})).unwrap()).await,
+        ErrorCode::EmbyImportFailed);
+    let target = || EmbyScrapeTarget::Item { id: "7".into(), scope: EmbyScrapeScope::Series };
+    code(refresh_emby_metadata(state(), target()).await, ErrorCode::EmbyRefreshFailed);
+    let overwrite = serde_json::from_value(json!({"target":{"type":"item","id":"7","scope":"series"}})).unwrap();
+    code(overwrite_emby(state(), overwrite).await, ErrorCode::EmbyOverwriteFailed);
 }

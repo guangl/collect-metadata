@@ -9,6 +9,10 @@ use super::{Emby, has_provider_id, is_item_id, list, missing_people, nonempty_te
 use crate::output::download_image;
 use crate::providers::media::episode_title::{field_locked, needs_title, usable};
 
+#[cfg(test)]
+#[path = "../../../tests/emby_automatic_images.rs"]
+mod image_tests;
+
 impl Emby {
     pub(crate) async fn automatic_ready(&self, client: &Client) -> Result<(), String> {
         let info = self.read_json(client, self.endpoint("System/Info/Public")).await?;
@@ -194,9 +198,27 @@ impl Emby {
             }
         }
 
+        self.fill_missing_images(client, &current, fields, &root, |url| async move {
+            download_image(client, &url).await
+        })
+        .await
+    }
+
+    async fn fill_missing_images<F>(
+        &self,
+        client: &Client,
+        current: &Value,
+        fields: &Value,
+        root: &Path,
+        download: impl Fn(String) -> F + Send,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = Option<(Vec<u8>, &'static str)>> + Send,
+    {
+        let id = current["Id"].as_str().ok_or("Emby 条目 ID 无效。")?;
         let images_url = self.endpoint(&format!("Items/{id}/Images"));
         let mut existing = self.read_json(client, images_url.clone()).await?;
-        let episode = item["Type"] == "Episode";
+        let episode = current["Type"] == "Episode";
         for (kind, url) in [
             (
                 "Primary",
@@ -227,12 +249,12 @@ impl Emby {
             ),
         ] {
             let Some(url) = url else { continue };
-            if field_locked(&current, "Images")
+            if field_locked(current, "Images")
                 || list(&existing).any(|image| image["ImageType"] == kind)
             {
                 continue;
             }
-            let (bytes, extension) = download_image(client, url)
+            let (bytes, extension) = download(url.to_owned())
                 .await
                 .ok_or_else(|| format!("无法读取用于 Emby 写入的 {kind} 图片。"))?;
             let mime = match extension {
@@ -258,7 +280,7 @@ impl Emby {
             if !list(&existing).any(|image| {
                 image["ImageType"] == kind
                     && image["Path"].as_str().is_some_and(|dest| {
-                        Path::new(dest).is_absolute() && !Path::new(dest).starts_with(&root)
+                        Path::new(dest).is_absolute() && !Path::new(dest).starts_with(root)
                     })
             }) {
                 return Err(format!("Emby 未确认 {kind} 已存入服务器元数据目录。"));
@@ -347,6 +369,22 @@ impl Emby {
         name: &str,
         url: &Url,
     ) -> Result<(), String> {
+        self.fill_portrait(client, id, name, || async {
+            download_image(client, url.as_str()).await
+        })
+        .await
+    }
+
+    async fn fill_portrait<F>(
+        &self,
+        client: &Client,
+        id: &str,
+        name: &str,
+        download: impl FnOnce() -> F + Send,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = Option<(Vec<u8>, &'static str)>> + Send,
+    {
         if !is_item_id(id) {
             return Ok(());
         }
@@ -363,7 +401,7 @@ impl Emby {
         if !can_fill(&self.read_json(client, editable.clone()).await?) {
             return Ok(());
         }
-        let Some((bytes, extension)) = download_image(client, url.as_str()).await else {
+        let Some((bytes, extension)) = download().await else {
             return Err("来源头像无法读取。".into());
         };
         if !can_fill(&self.read_json(client, editable).await?)

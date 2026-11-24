@@ -4,6 +4,10 @@ use crate::{MediaKind, MediaProvider, providers::media};
 
 use super::super::{Collector, LookupResponse, Source, make_lookup};
 
+#[cfg(test)]
+#[path = "../../tests/automatic_episode_sources.rs"]
+mod source_tests;
+
 impl Collector {
     pub(crate) async fn verified_episode_people(
         &self,
@@ -422,44 +426,7 @@ impl Collector {
             let detail = self
                 .gather_media(MediaKind::Series, candidate.provider, &candidate.id)
                 .await?;
-            let season = item["ParentIndexNumber"]
-                .as_u64()
-                .ok_or("Emby 条目缺少季号。")?;
-            let number = item["IndexNumber"].as_u64().ok_or("Emby 条目缺少集号。")?;
-            let records = detail.record["fields"]["episodes"]
-                .as_array()
-                .ok_or("来源暂无分集资料。")?;
-            let mut exact = records.iter().filter(|episode| {
-                episode["number"].as_u64() == Some(number)
-                    && episode["season"].as_u64() == Some(season)
-            });
-            let episode = exact
-                .next()
-                .filter(|_| exact.next().is_none())
-                .ok_or("来源找不到唯一的季集。")?;
-            let source = detail.record["sources"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|source| source["status"] == "ok" || source["status"] == "partial")
-                .ok_or("分集来源不可用。")?;
-            let provider = match candidate.provider {
-                MediaProvider::Tvmaze => "TVmaze",
-                MediaProvider::Wikidata => "Wikidata",
-                MediaProvider::Tmdb | MediaProvider::Bangumi => unreachable!(),
-            };
-            let url = source["url"]
-                .as_str()
-                .and_then(|value| reqwest::Url::parse(value).ok())
-                .ok_or("分集来源地址无效。")?;
-            let fields = crate::providers::field_map([
-                ("title", episode["title"].clone()),
-                ("description", episode["description"].clone()),
-                ("release_date", episode["date"].clone()),
-                ("still_url", episode["still_url"].clone()),
-                ("series", detail.record["fields"]["title"].clone()),
-            ]);
-            Source::found(provider, &url, fields, Value::Null)
+            exact_legacy_episode(&detail.record, item, candidate.provider)?
         };
         if external.fields.is_empty() {
             return Err("来源没有该季集的可用资料。".into());
@@ -496,7 +463,7 @@ impl Collector {
         let (tmdb, bangumi) = if candidate.provider == MediaProvider::Tmdb {
             let id = candidate.id.parse().map_err(|_| "剧集 TMDB ID 无效。")?;
             let tmdb = match self.tmdb.provider() {
-                Some(provider) if media::Tmdb::uses_episode_group(item, id) => {
+                Some(provider) if provider.uses_episode_group(item, id) => {
                     provider
                         .matched_group_episode(&self.client, item, language, id, timezone)
                         .await?
@@ -556,6 +523,51 @@ impl Collector {
         result.record["fill_missing"] = json!(true);
         Ok(self.localize_lookup(result, targets).await)
     }
+}
+
+fn exact_legacy_episode(
+    record: &Value,
+    item: &Value,
+    provider: MediaProvider,
+) -> Result<Source, String> {
+    let season = item["ParentIndexNumber"]
+        .as_u64()
+        .ok_or("Emby 条目缺少季号。")?;
+    let number = item["IndexNumber"].as_u64().ok_or("Emby 条目缺少集号。")?;
+    let records = record["fields"]["episodes"]
+        .as_array()
+        .ok_or("来源暂无分集资料。")?;
+    let mut exact = records.iter().filter(|episode| {
+        episode["number"].as_u64() == Some(number)
+            && episode["season"].as_u64() == Some(season)
+    });
+    let episode = exact
+        .next()
+        .filter(|_| exact.next().is_none())
+        .ok_or("来源找不到唯一的季集。")?;
+    let source = record["sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|source| source["status"] == "ok" || source["status"] == "partial")
+        .ok_or("分集来源不可用。")?;
+    let provider = match provider {
+        MediaProvider::Tvmaze => "TVmaze",
+        MediaProvider::Wikidata => "Wikidata",
+        MediaProvider::Tmdb | MediaProvider::Bangumi => unreachable!(),
+    };
+    let url = source["url"]
+        .as_str()
+        .and_then(|value| reqwest::Url::parse(value).ok())
+        .ok_or("分集来源地址无效。")?;
+    let fields = crate::providers::field_map([
+        ("title", episode["title"].clone()),
+        ("description", episode["description"].clone()),
+        ("release_date", episode["date"].clone()),
+        ("still_url", episode["still_url"].clone()),
+        ("series", record["fields"]["title"].clone()),
+    ]);
+    Ok(Source::found(provider, &url, fields, Value::Null))
 }
 
 fn automatic_exact<'a>(
