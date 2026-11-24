@@ -381,7 +381,7 @@ mod tests {
             Some("mapping_review")
         );
         assert_eq!(
-            review_error("Emby 没有保存全部可写的补充字段。"),
+            review_error("Emby 没有保存全部可写的补充字段（People、Overview）。"),
             Some("writeback_incomplete")
         );
         assert_eq!(review_error("Emby 请求失败（HTTP 503）。"), None);
@@ -399,6 +399,7 @@ mod tests {
             season_map: super::super::SeasonMap::default(),
             database_season_map: false,
             emby_timezone: jiff::tz::TimeZone::UTC,
+            skip_specials: false,
         };
         let path = temp.path().join("Episode-1908.backfill");
         std::fs::write(&path, b"first").unwrap();
@@ -492,6 +493,7 @@ mod tests {
             season_map: super::super::SeasonMap::default(),
             database_season_map: false,
             emby_timezone: jiff::tz::TimeZone::UTC,
+            skip_specials: false,
         };
         let event = temp.path().join("Movie-91.event");
         std::fs::write(&event, []).unwrap();
