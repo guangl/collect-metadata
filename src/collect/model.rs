@@ -49,7 +49,7 @@ pub(super) struct Lookup<'a> {
     pub(super) sources: Vec<Source>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct Source {
     pub(crate) provider: &'static str,
     pub(crate) url: String,

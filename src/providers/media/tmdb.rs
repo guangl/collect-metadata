@@ -1,4 +1,8 @@
+#[cfg(feature = "web")]
+mod episode_groups;
 mod episodes;
+#[cfg(feature = "web")]
+pub(crate) use episode_groups::validate_episode_groups;
 
 use futures_util::{StreamExt, stream};
 use reqwest::header::HeaderValue;
@@ -18,6 +22,7 @@ pub(crate) struct Tmdb {
     api_root: Url,
     credential: Credential,
     requests: Semaphore,
+    series_details: EntityCache,
 }
 
 enum Credential {
@@ -48,6 +53,7 @@ impl Tmdb {
             api_root: Url::parse("https://api.themoviedb.org/3/").unwrap(),
             credential,
             requests: Semaphore::new(4),
+            series_details: EntityCache::default(),
         })
     }
 
@@ -168,7 +174,7 @@ impl Tmdb {
         let components = if include_episodes {
             format!("{COMMON},{extra}")
         } else {
-            format!("external_ids,images,keywords,translations,{extra}")
+            format!("external_ids,images,keywords,translations,videos,{extra}")
         };
         details
             .query_pairs_mut()
@@ -546,6 +552,14 @@ fn fields(kind: MediaKind, id: u32, data: &Value, language: &str) -> Fields {
                 data["external_ids"]["imdb_id"]
                     .as_str()
                     .or_else(|| data["imdb_id"].as_str())
+            ),
+        ),
+        (
+            "tvdb_id",
+            json!(
+                data["external_ids"]["tvdb_id"]
+                    .as_u64()
+                    .map(|id| id.to_string())
             ),
         ),
         ("cover_url", json!(image(&data["poster_path"], "w500"))),

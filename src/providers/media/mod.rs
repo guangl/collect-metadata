@@ -20,6 +20,8 @@ use super::{Failure, request};
 use crate::collect::Source;
 use bangumi::Bangumi;
 pub(crate) use tmdb::Tmdb;
+#[cfg(feature = "web")]
+pub(crate) use tmdb::validate_episode_groups;
 
 #[derive(Default)]
 pub(crate) struct EntityCache(Mutex<VecDeque<CachedEntity>>);

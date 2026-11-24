@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use jiff::{civil::DateTime, tz::TimeZone};
 use reqwest::{Client, Response, Url};
 use serde_json::{Value, json};
 
-use super::{Emby, has_provider_id, is_item_id, list, nonempty_text, provider_id};
+use super::{Emby, has_provider_id, is_item_id, list, missing_people, nonempty_text, provider_id};
 use crate::output::download_image;
 use crate::providers::media::episode_title::{field_locked, needs_title, usable};
 
@@ -116,6 +117,9 @@ impl Emby {
         client: &Client,
         item: &Value,
         record: &Value,
+        people: &[Value],
+        timezone: &TimeZone,
+        preserve_title: bool,
     ) -> Result<(), String> {
         let id = item["Id"]
             .as_str()
@@ -136,11 +140,21 @@ impl Emby {
         {
             return Err("Emby 条目在采集期间发生变化，请重试。".into());
         }
-        if current["LockData"] == true || current["IsLocked"] == true {
+        if current["LockData"] == true
+            || current["LockData"]["Enabled"] == true
+            || current["IsLocked"] == true
+        {
             return Err("Emby 条目已锁定。".into());
         }
-        if merge_missing(&mut current, fields) {
-            let expected_name = current["Name"].clone();
+        let fill_people = !people.is_empty() && missing_people(&current);
+        if !same_credit_target(item, &current) {
+            return Err("Emby 条目在采集期间发生变化，请重试。".into());
+        }
+        let fields_changed = merge_missing_fields(&mut current, fields, timezone, preserve_title);
+        if fill_people {
+            current["People"] = json!(people);
+        }
+        if fields_changed || fill_people {
             self.automatic_post(
                 client,
                 self.endpoint(&format!("Items/{id}")),
@@ -149,12 +163,23 @@ impl Emby {
             )
             .await?;
             let mut saved = self.read_json(client, url).await?;
-            let mut unconfirmed = Vec::new();
-            if saved["Name"] != expected_name {
-                unconfirmed.push("Name".to_owned());
+            let mut unconfirmed = [
+                "Name",
+                "Overview",
+                "ForcedSortName",
+                "ImageTags",
+                "BackdropImageTags",
+                "LockedFields",
+            ]
+            .into_iter()
+            .filter(|&field| saved[field] != current[field])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+            if fill_people && !confirmed_people(&current, &saved, people) {
+                unconfirmed.push("People".to_owned());
             }
             let readback = saved.clone();
-            if merge_missing(&mut saved, fields) {
+            if merge_missing_fields(&mut saved, fields, timezone, preserve_title) {
                 for (field, value) in saved.as_object().into_iter().flatten() {
                     if readback[field] != *value && !unconfirmed.contains(field) {
                         unconfirmed.push(field.clone());
@@ -162,7 +187,10 @@ impl Emby {
                 }
             }
             if !unconfirmed.is_empty() {
-                return Err(format!("Emby 没有保存全部可写的补充字段（{}）。", unconfirmed.join("、")));
+                return Err(format!(
+                    "Emby 没有保存全部可写的补充字段（{}）。",
+                    unconfirmed.join("、")
+                ));
             }
         }
 
@@ -199,7 +227,9 @@ impl Emby {
             ),
         ] {
             let Some(url) = url else { continue };
-            if list(&existing).any(|image| image["ImageType"] == kind) {
+            if field_locked(&current, "Images")
+                || list(&existing).any(|image| image["ImageType"] == kind)
+            {
                 continue;
             }
             let (bytes, extension) = download_image(client, url)
@@ -212,6 +242,11 @@ impl Emby {
                 "webp" => "image/webp",
                 _ => return Err("Emby 图片格式无效。".into()),
             };
+            let latest_images = self.read_json(client, images_url.clone()).await?;
+            if list(&latest_images).any(|image| image["ImageType"] == kind) {
+                existing = latest_images;
+                continue;
+            }
             self.automatic_post(
                 client,
                 self.endpoint(&format!("Items/{id}/Images/{kind}")),
@@ -297,12 +332,65 @@ impl Emby {
         let admin = self.extras_user(client).await?;
         let mut url = self.endpoint(&format!("Users/{admin}/Items/{id}"));
         url.query_pairs_mut()
-            .append_pair("Fields", "ChannelMappingInfo")
+            .append_pair("Fields", "ChannelMappingInfo,People,PremiereDate,ProductionLocations,Tags,TagItems,Genres,Studios")
             .append_pair(
                 "ExcludeFields",
                 "Chapters,MediaSources,MediaStreams,Subviews",
             );
         Ok(url)
+    }
+
+    pub(crate) async fn fill_collected_portrait(
+        &self,
+        client: &Client,
+        id: &str,
+        name: &str,
+        url: &Url,
+    ) -> Result<(), String> {
+        if !is_item_id(id) {
+            return Ok(());
+        }
+        let portrait_url = self.endpoint(&format!("Items/{id}/Images"));
+        let can_fill = |person: &Value| {
+            person["Type"] == "Person"
+                && person["Name"] == name
+                && person["LockData"] != true
+                && person["IsLocked"] != true
+                && !field_locked(person, "Images")
+                && person["ImageTags"]["Primary"].is_null()
+        };
+        let editable = self.automatic_edit_url(client, id).await?;
+        if !can_fill(&self.read_json(client, editable.clone()).await?) {
+            return Ok(());
+        }
+        let Some((bytes, extension)) = download_image(client, url.as_str()).await else {
+            return Err("来源头像无法读取。".into());
+        };
+        if !can_fill(&self.read_json(client, editable).await?)
+            || list(&self.read_json(client, portrait_url.clone()).await?)
+                .any(|image| image["ImageType"] == "Primary")
+        {
+            return Ok(());
+        }
+        let mime = match extension {
+            "jpg" => "image/jpeg",
+            "png" => "image/png",
+            "webp" => "image/webp",
+            _ => return Ok(()),
+        };
+        self.automatic_post(
+            client,
+            self.endpoint(&format!("Items/{id}/Images/Primary")),
+            mime,
+            STANDARD.encode(bytes),
+        )
+        .await?;
+        if !list(&self.read_json(client, portrait_url).await?)
+            .any(|image| image["ImageType"] == "Primary")
+        {
+            return Err("Emby 未确认头像保存。".into());
+        }
+        Ok(())
     }
 
     async fn internal_storage_root(&self, client: &Client, path: &Path) -> Result<PathBuf, String> {
@@ -360,7 +448,15 @@ fn merge_missing_provider_id(item: &mut Value, key: &str, id: Option<&str>) -> b
     if !has_provider_id(item, key)
         && !list(&item["LockedFields"])
             .any(|field| matches!(field.as_str(), Some("ProviderIds" | "ExternalIds")))
-        && let Some(id) = id.filter(|id| id.parse::<u32>().is_ok_and(|n| n > 0))
+        && let Some(id) = id.filter(|value| {
+            if key == "Imdb" {
+                value.strip_prefix("tt").is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit())
+                })
+            } else {
+                value.parse::<u64>().is_ok_and(|value| value > 0)
+            }
+        })
     {
         let ids = &mut item["ProviderIds"];
         let key = ids
@@ -374,9 +470,45 @@ fn merge_missing_provider_id(item: &mut Value, key: &str, id: Option<&str>) -> b
     false
 }
 
-fn merge_missing(item: &mut Value, fields: &Value) -> bool {
+fn same_credit_target(original: &Value, current: &Value) -> bool {
+    [
+        "Id",
+        "Path",
+        "Type",
+        "ProviderIds",
+        "SeriesId",
+        "ParentIndexNumber",
+        "IndexNumber",
+    ]
+    .into_iter()
+    .all(|key| original[key] == current[key])
+}
+
+fn confirmed_people(expected: &Value, saved: &Value, people: &[Value]) -> bool {
+    ["Name", "Overview", "ImageTags", "BackdropImageTags"]
+        .into_iter()
+        .all(|key| expected[key] == saved[key])
+        && people.iter().all(|person| {
+            list(&saved["People"]).any(|stored| {
+                stored["Name"] == person["Name"]
+                    && stored["Type"] == person["Type"]
+                    && stored["Role"].as_str().unwrap_or_default()
+                        == person["Role"].as_str().unwrap_or_default()
+            })
+        })
+}
+
+fn merge_missing_fields(
+    item: &mut Value,
+    fields: &Value,
+    timezone: &TimeZone,
+    preserve_title: bool,
+) -> bool {
     let mut changed = false;
-    if needs_title(item) && let Some(title) = usable(&fields["title"], item) {
+    if (!preserve_title || nonempty_text(&item["Name"]).is_none())
+        && needs_title(item)
+        && let Some(title) = usable(&fields["title"], item)
+    {
         let title = json!(title);
         if !field_locked(item, "SortName") && usable(&item["ForcedSortName"], item).is_none() {
             item["ForcedSortName"] = title.clone();
@@ -385,7 +517,12 @@ fn merge_missing(item: &mut Value, fields: &Value) -> bool {
         item["Name"] = title;
         changed = true;
     }
-    for (key, source) in [("Tmdb", "tmdb_id"), ("Bangumi", "bangumi_id")] {
+    for (key, source) in [
+        ("Tmdb", "tmdb_id"),
+        ("Bangumi", "bangumi_id"),
+        ("Tvdb", "tvdb_id"),
+        ("Imdb", "imdb_id"),
+    ] {
         changed |= merge_missing_provider_id(item, key, fields[source].as_str());
     }
     for (key, locked, source) in [
@@ -401,12 +538,193 @@ fn merge_missing(item: &mut Value, fields: &Value) -> bool {
             changed = true;
         }
     }
+    let series = item["Type"] == "Series";
+    for (key, source) in [("PremiereDate", "release_date"), ("EndDate", "end_date")] {
+        if (key != "EndDate" || series)
+            && item[key].is_null()
+            && !field_locked(item, key)
+            && let Some(date) = fields[source].as_str().and_then(|date| {
+                timezone
+                    .to_timestamp(format!("{date}T00:00:00").parse::<DateTime>().ok()?)
+                    .ok()
+            })
+        {
+            item[key] = json!(date.to_string());
+            changed = true;
+        }
+    }
+    if item["CommunityRating"].is_null()
+        && !field_locked(item, "CommunityRating")
+        && let Some(value) = fields["rating"]["value"].as_f64()
+        && let Some(scale) = fields["rating"]["scale"].as_f64()
+        && value > 0.0
+        && value <= scale
+        && fields["rating"]["count"].as_u64() != Some(0)
+    {
+        item["CommunityRating"] = json!((value * 10.0 / scale * 100.0).round() / 100.0);
+        changed = true;
+    }
+    if series
+        && nonempty_text(&item["Status"]).is_none()
+        && !field_locked(item, "Status")
+        && let Some(status) = match fields["status"].as_str() {
+            Some("Ended") => Some("Ended"),
+            Some("Continuing" | "Returning Series") => Some("Continuing"),
+            _ => None,
+        }
+    {
+        item["Status"] = json!(status);
+        changed = true;
+    }
+    if matches!(item["Type"].as_str(), Some("Movie" | "Series")) {
+        for (field, source, pairs) in [
+            ("Genres", "genres", Some("GenreItems")),
+            ("Tags", "tags", Some("TagItems")),
+            ("Studios", "studio", Some("Studios")),
+            ("ProductionLocations", "countries", None),
+            ("Taglines", "tagline", None),
+        ] {
+            if field_locked(item, field)
+                || list(&item[field]).next().is_some()
+                || pairs.is_some_and(|key| list(&item[key]).next().is_some())
+            {
+                continue;
+            }
+            let names: Vec<_> = match &fields[source] {
+                Value::Array(entries) => entries.iter().filter_map(nonempty_text).collect(),
+                value => nonempty_text(value).into_iter().collect(),
+            };
+            if names.is_empty() {
+                continue;
+            }
+            item[field] = json!(names);
+            if let Some(key) = pairs {
+                item[key] = json!(
+                    names
+                        .iter()
+                        .map(|name| json!({"Name":name}))
+                        .collect::<Vec<_>>()
+                );
+            }
+            changed = true;
+        }
+    }
     changed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn merge_missing(item: &mut Value, fields: &Value) -> bool {
+        merge_missing_fields(item, fields, &TimeZone::UTC, false)
+    }
+
+    #[test]
+    fn backfill_adds_full_metadata_without_replacing_existing_values() {
+        let mut series = json!({"Type":"Series","Name":"现有剧名","Overview":"现有简介",
+            "Genres":[], "GenreItems":[], "ImageTags":{"Primary":"old"},
+            "ProviderIds":{"Tmdb":"196369"}, "LockedFields":["Tags"]});
+        let fields = json!({"title":"其他名称","description":"其他简介","release_date":"2022-10-16",
+            "end_date":"2022-12-25","status":"Ended","tvdb_id":"418376","imdb_id":"tt21345894",
+            "genres":["动画","喜剧"],"tags":["改编"],"studio":["Studio Flad"],
+            "rating":{"value":6.4,"scale":10,"count":16}});
+        let zone = TimeZone::get("Asia/Shanghai").unwrap();
+        assert!(merge_missing_fields(&mut series, &fields, &zone, true));
+        assert!(!merge_missing_fields(&mut series, &fields, &zone, true));
+        assert_eq!(series["Overview"], "现有简介");
+        assert_eq!(series["Name"], "现有剧名");
+        assert_eq!(series["ImageTags"]["Primary"], "old");
+        assert_eq!(series["PremiereDate"], "2022-10-15T16:00:00Z");
+        assert_eq!(
+            series["GenreItems"],
+            json!([{"Name":"动画"},{"Name":"喜剧"}])
+        );
+        assert_eq!(series["Studios"], json!([{"Name":"Studio Flad"}]));
+        assert_eq!(series["ProviderIds"]["Imdb"], "tt21345894");
+        assert!(series["Tags"].is_null());
+        let mut episode = json!({"Type":"Episode","Name":"第 2 集","IndexNumber":2});
+        assert!(merge_missing_fields(&mut episode, &fields, &zone, true));
+        assert_eq!(episode["Name"], "第 2 集");
+    }
+
+    #[tokio::test]
+    async fn writes_missing_cast_once_and_keeps_other_metadata() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+
+        let original = json!({"Id":"41", "Type":"Series", "Path":"/media/series/show",
+            "Name":"已有标题", "Overview":"已有简介", "ImageTags":{"Primary":"image"},
+            "BackdropImageTags":["backdrop"], "People":[], "LockedFields":[]});
+        let people = [json!({"Name":"声优", "Type":"Actor", "Role":"角色 (voice)"})];
+        let mut expected = original.clone();
+        expected["People"] = json!(people);
+        let stored = Arc::new(Mutex::new((original.clone(), Vec::new())));
+        let app = Router::new()
+            .route(
+                "/emby/Users/Query",
+                get(|| async {
+                    Json(json!({"Items":[{"Id":"7","Policy":{"IsAdministrator":true}}]}))
+                }),
+            )
+            .route(
+                "/emby/Library/VirtualFolders",
+                get(|| async {
+                    Json(json!([{"Locations":["/media/series"],
+                    "LibraryOptions":{"SaveLocalMetadata":false,"MetadataSavers":[]}}]))
+                }),
+            )
+            .route(
+                "/emby/Items/41/Images",
+                get(|| async { Json(json!([{"ImageType":"Primary"},{"ImageType":"Backdrop"}])) }),
+            )
+            .route(
+                "/emby/Users/7/Items/41",
+                get(
+                    |State(items): State<Arc<Mutex<(Value, Vec<Value>)>>>| async move {
+                        Json(items.lock().unwrap().0.clone())
+                    },
+                ),
+            )
+            .route(
+                "/emby/Items/41",
+                axum::routing::post(
+                    |State(items): State<Arc<Mutex<(Value, Vec<Value>)>>>,
+                     Json(body): Json<Value>| async move {
+                        let mut items = items.lock().unwrap();
+                        items.0 = body.clone();
+                        items.1.push(body);
+                        StatusCode::NO_CONTENT
+                    },
+                ),
+            )
+            .with_state(Arc::clone(&stored));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let emby = Emby::new(&base, "fixture-key", &Arc::default()).unwrap();
+        let client = Client::new();
+        let record = json!({"fields":{"title":"其他标题","description":"其他简介",
+            "poster_url":"https://example.invalid/poster.jpg","backdrop_url":"https://example.invalid/backdrop.jpg"}});
+        for _ in 0..2 {
+            emby.enrich_automatic_item(&client, &original, &record, &people, &TimeZone::UTC, false)
+                .await
+                .unwrap();
+        }
+        assert_eq!(stored.lock().unwrap().1, vec![expected]);
+
+        {
+            let mut items = stored.lock().unwrap();
+            items.0["People"] = json!([]);
+            items.0["LockedFields"] = json!(["Cast"]);
+        }
+        emby.enrich_automatic_item(&client, &original, &record, &people, &TimeZone::UTC, false)
+            .await
+            .unwrap();
+        assert_eq!(stored.lock().unwrap().1.len(), 1);
+        server.abort();
+    }
 
     #[test]
     fn fills_only_the_missing_bangumi_id_for_a_complete_episode() {
@@ -416,17 +734,33 @@ mod tests {
         });
         let mut expected = episode.clone();
         expected["ProviderIds"]["Bangumi"] = json!("1749199");
-        assert!(merge_missing_provider_id(&mut episode, "Bangumi", Some("1749199")));
+        assert!(merge_missing_provider_id(
+            &mut episode,
+            "Bangumi",
+            Some("1749199")
+        ));
         assert_eq!(episode, expected);
-        assert!(!merge_missing_provider_id(&mut episode, "Bangumi", Some("1749200")));
+        assert!(!merge_missing_provider_id(
+            &mut episode,
+            "Bangumi",
+            Some("1749200")
+        ));
         assert_eq!(episode, expected);
 
         let mut legacy = json!({"ProviderIds":{"bangumi":"123456"}});
-        assert!(!merge_missing_provider_id(&mut legacy, "Bangumi", Some("1749199")));
+        assert!(!merge_missing_provider_id(
+            &mut legacy,
+            "Bangumi",
+            Some("1749199")
+        ));
         assert_eq!(legacy["ProviderIds"], json!({"bangumi":"123456"}));
 
         let mut locked = json!({"LockedFields":["ExternalIds"],"ProviderIds":{"Tvdb":"12006499"}});
-        assert!(!merge_missing_provider_id(&mut locked, "Bangumi", Some("1749199")));
+        assert!(!merge_missing_provider_id(
+            &mut locked,
+            "Bangumi",
+            Some("1749199")
+        ));
         assert_eq!(locked["ProviderIds"], json!({"Tvdb":"12006499"}));
     }
 

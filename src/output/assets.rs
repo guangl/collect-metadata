@@ -358,6 +358,15 @@ fn portraits(source: &Value) -> Vec<(Role, Url, String)> {
     result
 }
 
+#[cfg(feature = "web")]
+pub(super) fn collected_portraits(
+    record: &Value,
+) -> impl Iterator<Item = (&'static str, Url, String)> {
+    entries(&record["sources"])
+        .flat_map(portraits)
+        .map(|(role, url, name)| (role.code(), url, name))
+}
+
 pub(super) async fn download(
     client: &Client,
     asset: &Asset,
