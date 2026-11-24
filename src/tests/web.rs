@@ -700,7 +700,7 @@ impl Api {
 
 #[tokio::test]
 #[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 创建隔离 schema"]
-async fn web_routes_persist_and_export_an_emby_batch() {
+async fn postgres_web_routes_persist_and_export_an_emby_batch() {
     let url = env::var("COLLECT_METADATA_TEST_POSTGRES").unwrap();
     let admin = PgPool::connect(&url).await.unwrap();
     // The SQL identifier contains a fixed prefix and a hexadecimal UUID.

@@ -1,4 +1,7 @@
 mod durable;
+mod persistence;
+
+use self::persistence::ScrapePersistence;
 
 #[cfg(test)]
 #[path = "../tests/automatic_scrape.rs"]
@@ -9,7 +12,6 @@ use std::{
     env,
     ffi::OsString,
     path::{Component, Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -190,10 +192,6 @@ impl AutoScrape {
         }))
     }
 
-    pub async fn run(self, collector: Arc<Collector>) {
-        self.run_durable(collector).await;
-    }
-
     async fn events(&self) -> std::io::Result<Vec<Event>> {
         let mut events = tokio::fs::read_dir(&self.spool).await?;
         let mut result = Vec::new();
@@ -213,7 +211,12 @@ impl AutoScrape {
         Ok(result)
     }
 
-    async fn process(&self, collector: &Collector, event: &Event) -> Result<Outcome, String> {
+    async fn process_with(
+        &self,
+        collector: &Collector,
+        event: &Event,
+        persistence: &impl ScrapePersistence,
+    ) -> Result<Outcome, String> {
         let _permit = collector.batch_permit().await;
         let emby = collector
             .emby_settings()
@@ -278,9 +281,7 @@ impl AutoScrape {
             && season > 0
         {
             let server = emby.automatic_server_id(&collector.client).await?;
-            database_subjects = collector
-                .require_store()
-                .await?
+            database_subjects = persistence
                 .verified_bangumi_season(&server, series, season)
                 .await?;
             if database_subjects.is_some() {
@@ -297,19 +298,11 @@ impl AutoScrape {
             && let (Some(server), Some(subjects)) = (&server_id, &database_subjects)
         {
             if episode_complete && has_provider_id(item, "Bangumi") {
-                return sync_mapped_episode(
-                    collector,
-                    &emby,
-                    server,
-                    item,
-                    None,
-                    central,
-                    &self.emby_timezone,
-                )
-                .await;
+                return self
+                    .sync_mapped_episode(collector, persistence, &emby, server, item, None)
+                    .await;
             }
-            let store = collector.require_store().await?;
-            archived = match store.archived_bangumi_episodes(subjects).await {
+            archived = match persistence.archived_bangumi_episodes(subjects).await {
                 Ok(episodes) => episodes,
                 Err(error) if episode_complete => return Err(error),
                 Err(_) => Vec::new(),
@@ -332,7 +325,7 @@ impl AutoScrape {
                     return Ok(Outcome::AwaitingAirdateReview);
                 };
                 if usable(&item["Name"], item).is_none()
-                    || !store
+                    || !persistence
                         .verified_episode_airdate(server, item, id, local, catalog_date)
                         .await?
                 {
@@ -342,16 +335,9 @@ impl AutoScrape {
                     "Automatic scrape Episode {} confirmed by official airdate {catalog_date}.",
                     event.id
                 );
-                return sync_mapped_episode(
-                    collector,
-                    &emby,
-                    server,
-                    item,
-                    Some(id),
-                    central,
-                    &self.emby_timezone,
-                )
-                .await;
+                return self
+                    .sync_mapped_episode(collector, persistence, &emby, server, item, Some(id))
+                    .await;
             }
             // Preserve the ID-only route when conversion resolves an apparent
             // conflict, even if Emby is missing other metadata.
@@ -365,16 +351,9 @@ impl AutoScrape {
                             .is_some_and(|stored| stored != local)
                 });
             if episode_complete || timezone_resolved_conflict {
-                return sync_mapped_episode(
-                    collector,
-                    &emby,
-                    server,
-                    item,
-                    bangumi_id,
-                    central,
-                    &self.emby_timezone,
-                )
-                .await;
+                return self
+                    .sync_mapped_episode(collector, persistence, &emby, server, item, bangumi_id)
+                    .await;
             }
         }
         let settings = collector.output_settings().ok_or("自动写回设置不可用。")?;
@@ -503,7 +482,7 @@ impl AutoScrape {
             .await?
         };
         if central {
-            collector.require_store().await?;
+            persistence.ensure_available().await?;
             if event.backfill && !has_verified_source(&result.record) {
                 return Ok(Outcome::NoVerifiedSource);
             }
@@ -559,8 +538,8 @@ impl AutoScrape {
                 None => emby.automatic_server_id(&collector.client).await?,
             };
             let document = catalog_document(&fresh.data["item"], &result.record);
-            collector
-                .upsert_emby_item(&server, &event.id, &document, None)
+            persistence
+                .save_emby_item(&server, &event.id, &document)
                 .await?;
             // A portrait can hash to the same write lock as its series.
             drop(write);
@@ -599,11 +578,10 @@ impl AutoScrape {
             // The legacy route loads local sidecars into Emby.
             emby.refresh_sidecars(&collector.client, &event.id).await?;
         }
-        if written > 0 {
-            let saved = collector.save_lookup(result).await;
-            if let Some(error) = saved.storage_error {
-                eprintln!("Automatic scrape {} snapshot: {error}", event.id);
-            }
+        if written > 0
+            && let Some(error) = persistence.save_snapshot(result).await
+        {
+            eprintln!("Automatic scrape {} snapshot: {error}", event.id);
         }
         if awaiting_title {
             return Ok(Outcome::AwaitingTitle);
@@ -616,6 +594,76 @@ impl AutoScrape {
         }
         Ok(Outcome::Written(written))
     }
+
+    async fn sync_mapped_episode(
+        &self,
+        collector: &Collector,
+        persistence: &impl ScrapePersistence,
+        emby: &Emby,
+        server: &str,
+        item: &Value,
+        bangumi_id: Option<u32>,
+    ) -> Result<Outcome, String> {
+        let item_id = item["Id"].as_str().ok_or("Emby 条目缺少 ID。")?;
+        let _write = collector.automatic_write_lock(item_id).await;
+        let fresh;
+        let item = if !has_provider_id(item, "Bangumi")
+            && let Some(id) = bangumi_id
+        {
+            if emby
+                .fill_episode_bangumi_id(&collector.client, item, id)
+                .await?
+            {
+                eprintln!(
+                    "Automatic scrape Episode {item_id} filled Bangumi ID {id} from PostgreSQL."
+                );
+            }
+            fresh = emby
+                .automatic_item(&collector.client, item_id, "Episode")
+                .await?
+                .ok_or("Emby 条目在写入期间已消失。")?;
+            &fresh.data["item"]
+        } else {
+            item
+        };
+        let refreshed;
+        let item = if self.central_metadata {
+            let home = emby
+                .automatic_item(&collector.client, item_id, "Episode")
+                .await?
+                .ok_or("Emby 条目在写入期间已消失。")?;
+            let query = format!("{EPISODE_QUERY_PREFIX}{item_id}");
+            let result = collector
+                .existing_automatic_episode(emby, home, &query, item_id, true, &self.emby_timezone)
+                .await?;
+            let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
+            let people = record_people(&result.record);
+            if has_verified_source(&result.record) {
+                emby.enrich_automatic_item(
+                    &collector.client,
+                    &data["item"],
+                    &result.record,
+                    &people,
+                    &self.emby_timezone,
+                    true,
+                )
+                .await?;
+            }
+            refreshed = emby
+                .automatic_item(&collector.client, item_id, "Episode")
+                .await?
+                .ok_or("Emby 条目在写入期间已消失。")?;
+            &refreshed.data["item"]
+        } else {
+            item
+        };
+        persistence.save_emby_item(server, item_id, item).await?;
+        Ok(if self.central_metadata {
+            Outcome::Enriched
+        } else {
+            Outcome::Skipped
+        })
+    }
 }
 
 fn is_special(item: &Value) -> bool {
@@ -624,76 +672,6 @@ fn is_special(item: &Value) -> bool {
         Some("Season") => item["IndexNumber"] == 0,
         _ => false,
     }
-}
-
-async fn sync_mapped_episode(
-    collector: &Collector,
-    emby: &Emby,
-    server: &str,
-    item: &Value,
-    bangumi_id: Option<u32>,
-    central: bool,
-    timezone: &TimeZone,
-) -> Result<Outcome, String> {
-    let item_id = item["Id"].as_str().ok_or("Emby 条目缺少 ID。")?;
-    let _write = collector.automatic_write_lock(item_id).await;
-    let fresh;
-    let item = if !has_provider_id(item, "Bangumi")
-        && let Some(id) = bangumi_id
-    {
-        if emby
-            .fill_episode_bangumi_id(&collector.client, item, id)
-            .await?
-        {
-            eprintln!("Automatic scrape Episode {item_id} filled Bangumi ID {id} from PostgreSQL.");
-        }
-        fresh = emby
-            .automatic_item(&collector.client, item_id, "Episode")
-            .await?
-            .ok_or("Emby 条目在写入期间已消失。")?;
-        &fresh.data["item"]
-    } else {
-        item
-    };
-    let refreshed;
-    let item = if central {
-        let home = emby
-            .automatic_item(&collector.client, item_id, "Episode")
-            .await?
-            .ok_or("Emby 条目在写入期间已消失。")?;
-        let query = format!("{EPISODE_QUERY_PREFIX}{item_id}");
-        let result = collector
-            .existing_automatic_episode(emby, home, &query, item_id, true, timezone)
-            .await?;
-        let data = crate::output::emby_source(&result.record).ok_or("缺少 Emby 文件关联。")?;
-        let people = record_people(&result.record);
-        if has_verified_source(&result.record) {
-            emby.enrich_automatic_item(
-                &collector.client,
-                &data["item"],
-                &result.record,
-                &people,
-                timezone,
-                true,
-            )
-            .await?;
-        }
-        refreshed = emby
-            .automatic_item(&collector.client, item_id, "Episode")
-            .await?
-            .ok_or("Emby 条目在写入期间已消失。")?;
-        &refreshed.data["item"]
-    } else {
-        item
-    };
-    collector
-        .upsert_emby_item(server, item_id, item, None)
-        .await?;
-    Ok(if central {
-        Outcome::Enriched
-    } else {
-        Outcome::Skipped
-    })
 }
 
 fn has_verified_source(record: &Value) -> bool {

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     Json, Router,
@@ -21,9 +25,13 @@ struct Library {
     sources: HashMap<String, Value>,
     rejected_fields: HashMap<String, &'static str>,
     item_errors: HashMap<String, StatusCode>,
+    write_errors: HashMap<String, StatusCode>,
     source_errors: HashMap<String, StatusCode>,
     edit_reads: Vec<String>,
     native_sidecars: bool,
+    public_info: Option<Value>,
+    readiness_items: Option<Value>,
+    artwork: HashMap<String, &'static [u8]>,
     writes: Vec<String>,
     refreshes: Vec<String>,
 }
@@ -165,6 +173,11 @@ async fn serve(State(library): State<Arc<Mutex<Library>>>, request: Request) -> 
 
     let result = match parts.as_slice() {
         ["emby", "Items"] => {
+            if query.get("Limit").is_some_and(|limit| limit == "1")
+                && let Some(value) = &library.readiness_items
+            {
+                return Json(value.clone()).into_response();
+            }
             if let Some(status) = query.get("Ids").and_then(|id| library.item_errors.get(id)) {
                 return status.into_response();
             }
@@ -179,7 +192,12 @@ async fn serve(State(library): State<Arc<Mutex<Library>>>, request: Request) -> 
             };
             Some(json!({"Items":rows,"TotalRecordCount": rows.len()}))
         }
-        ["emby", "System", "Info", "Public"] => Some(json!({"Id":"100"})),
+        ["emby", "System", "Info", "Public"] => Some(
+            library
+                .public_info
+                .clone()
+                .unwrap_or_else(|| json!({"Id":"100"})),
+        ),
         ["emby", "Users", "Query"] => {
             Some(json!({"Items":[{"Id":"5","Policy":{"IsAdministrator":true}}]}))
         }
@@ -191,6 +209,9 @@ async fn serve(State(library): State<Arc<Mutex<Library>>>, request: Request) -> 
             library.items.get(*id).cloned()
         }
         ["emby", "Items", id] if method == Method::POST => {
+            if let Some(status) = library.write_errors.get(*id) {
+                return status.into_response();
+            }
             let mut updated: Value = serde_json::from_slice(&payload).unwrap();
             if let Some(&field) = library.rejected_fields.get(*id) {
                 updated[field] = library.items[*id][field].clone();
@@ -204,6 +225,15 @@ async fn serve(State(library): State<Arc<Mutex<Library>>>, request: Request) -> 
             assert_eq!(query["ReplaceAllImages"], "false");
             library.refreshes.push((*id).into());
             return StatusCode::NO_CONTENT.into_response();
+        }
+        ["emby", "Items", id, "Images", "Primary"] => {
+            assert_eq!(query["EnableImageEnhancers"], "false");
+            return match library.artwork.get(*id) {
+                Some(bytes) => {
+                    ([(axum::http::header::CONTENT_TYPE, "image/png")], *bytes).into_response()
+                }
+                None => StatusCode::NOT_FOUND.into_response(),
+            };
         }
         ["emby", "Items", _, "Images"] => {
             Some(json!([{"ImageType":"Primary"},{"ImageType":"Backdrop"}]))
@@ -303,6 +333,8 @@ async fn intake_skips_ineligible_items_and_retains_events_on_missing_or_unsource
     fixture.item(json!({"Id":"7","Type":"Movie"}));
     fixture.item(json!({"Id":"8","Type":"Video","Path":"/private/untitled.mkv"}));
     fixture.item(json!({"Id":"9","Type":"Series","Path":"/private/show"}));
+    fixture.item(json!({"Id":"42","Type":"Video","Path":"/private/ABC-123/video.mkv"}));
+    fixture.item(json!({"Id":"43","Type":"Movie","Name":"资料未匹配","Path":"/media/unknown.mkv"}));
     for name in [
         "Movie-1.event",
         "Movie-2.event",
@@ -326,21 +358,340 @@ async fn intake_skips_ineligible_items_and_retains_events_on_missing_or_unsource
         service.process(&collector, &missing).await.unwrap(),
         Outcome::MissingItem
     ));
-    for (name, message) in [("Movie-7.event", "媒体路径"), ("Video-8.event", "识别番号")] {
+    for (name, message) in [
+        ("Movie-7.event", "媒体路径"),
+        ("Video-8.event", "识别番号"),
+        ("Video-42.event", "未获得私人影片资料"),
+        ("Movie-43.event", "TMDB：来源没有找到此条目"),
+    ] {
         let event = fixture.event(name);
+        let error = service.process(&collector, &event).await.err().unwrap();
         assert!(
-            service
-                .process(&collector, &event)
-                .await
-                .err()
-                .unwrap()
-                .contains(message)
+            !error.is_empty() && error.contains(message),
+            "{name}: {error}"
         );
         assert!(event.path.exists());
     }
     let library = fixture.library.lock().unwrap();
     assert!(library.writes.is_empty());
     assert!(library.refreshes.is_empty());
+}
+
+#[tokio::test]
+async fn intake_reads_live_events_in_numeric_order_and_checks_emby_readiness() {
+    let fixture = Fixture::new().await;
+    let collector = fixture.collector(None);
+    let service = fixture.service(false, "{}");
+    for name in [
+        "Episode-10.event",
+        "Movie-9.event",
+        "Episode-1.backfill",
+        "Episode-2.backfill-review",
+        "Unknown-3.event",
+        "Movie-4.backfill",
+        "Series-+.event",
+        "Season-99.event",
+    ] {
+        fs::write(service.spool.join(name), "").unwrap();
+    }
+    fs::create_dir(service.spool.join("Movie-1.event")).unwrap();
+    let events = service.events().await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        ["9", "10", "99", "1"]
+    );
+
+    let emby = collector
+        .emby_settings()
+        .unwrap()
+        .automatic_connection(None)
+        .unwrap();
+    let check = || emby.automatic_ready(&collector.client);
+    check().await.unwrap();
+    fixture.library.lock().unwrap().public_info = Some(json!({"Id":"100","IsShuttingDown":true}));
+    assert!(check().await.unwrap_err().contains("尚未完成启动"));
+    fixture.library.lock().unwrap().public_info = Some(json!({"Id":"bad/id"}));
+    assert!(check().await.unwrap_err().contains("尚未完成启动"));
+    assert!(emby.automatic_server_id(&collector.client).await.is_err());
+    {
+        let mut library = fixture.library.lock().unwrap();
+        library.public_info = None;
+        library.readiness_items = Some(json!({"Items": null}));
+    }
+    assert!(
+        check()
+            .await
+            .unwrap_err()
+            .contains("媒体库读取未返回有效结果")
+    );
+}
+
+#[tokio::test]
+async fn episode_writeback_publishes_localized_nfo_and_retries_invalid_artwork() {
+    use crate::output::{WritebackJob, WritebackState, plan_writeback, prepare_writeback};
+
+    let fixture = Fixture::new().await;
+    let collector = fixture.collector(None);
+    let emby = collector
+        .emby_settings()
+        .unwrap()
+        .automatic_connection(None)
+        .unwrap();
+    let paths = collector.output_settings().unwrap().media_paths();
+    let show = fixture.directory.path().join("show");
+    fs::create_dir(&show).unwrap();
+    fs::write(show.join("episode.mkv"), "original video").unwrap();
+    let mut child = episode("21", "episode.mkv", 1, 1, "2026-01-03");
+    child["ImageTags"]["Primary"] = json!("still");
+    child["SeriesName"] = Value::Null;
+    let source = json!({
+        "provider":"Emby",
+        "url":fixture.base.join("emby/web/index.html#!/item?id=10").unwrap(),
+        "data":{
+            "item":{"Id":"10","Type":"Series","Path":"/media/show","ImageTags":{"Primary":"poster"}},
+            "children":[child]
+        }
+    });
+    let record = json!({
+        "media_type":"series",
+        "fields":{
+            "title":"剧集标题",
+            "episodes":[{"id":"21","title":"分集译名","description":"分集简介"}]
+        },
+        "sources":[source]
+    });
+    let preview = |state: &WritebackState| {
+        let (files, _, _) = plan_writeback(&paths, &source["data"], &record, state);
+        WritebackJob {
+            id: "fixture".into(),
+            owner: "fixture".into(),
+            stage: "fixture".into(),
+            files,
+        }
+    };
+    fixture
+        .library
+        .lock()
+        .unwrap()
+        .artwork
+        .insert("21".into(), b"invalid image bytes");
+    let error = write_automatic(&collector.client, &emby, &paths, &record, false)
+        .await
+        .unwrap_err();
+    assert!(error.contains("无法下载 Emby 图片"), "{error}");
+    assert!(!show.join("tvshow.nfo").exists());
+
+    let state = WritebackState::default();
+    let no_mount = OutputSettings::load(fixture.directory.path().join("unmapped.json"), None)
+        .unwrap()
+        .media_paths();
+    let staged = prepare_writeback(
+        &collector.client,
+        Some(&emby),
+        &no_mount,
+        &preview(&state),
+        &record,
+        &state,
+    )
+    .await;
+    let (blocked, report) = staged.publish("mapping-changed", WritebackState::default());
+    assert_eq!(report.failed, 4);
+    assert!(
+        serde_json::to_value(blocked).unwrap()["files"]["nfo\n/media/show"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("写回映射已变更")
+    );
+    assert!(!show.join("tvshow.nfo").exists());
+
+    let staged = prepare_writeback(
+        &collector.client,
+        Some(&emby),
+        &paths,
+        &preview(&state),
+        &record,
+        &state,
+    )
+    .await;
+    let (state, report) = staged.publish("first", state);
+    assert_eq!(report.failed, 2);
+    assert_eq!(report.written, 2);
+    assert!(!show.join("episode-thumb.png").exists());
+    let nfo = show.join("episode.nfo");
+    let xml = fs::read_to_string(&nfo).unwrap();
+    assert!(xml.contains("<title>分集译名</title>"), "{xml}");
+    assert!(xml.contains("<plot>分集简介</plot>"), "{xml}");
+    assert!(xml.contains("<showtitle>剧集标题</showtitle>"), "{xml}");
+    let failures = serde_json::to_value(&state).unwrap();
+    assert!(
+        failures["files"]["poster\n/media/show"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("无法下载 Emby 图片")
+    );
+    assert!(
+        failures["files"]["still\n/media/show/episode.mkv"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("图片格式无效")
+    );
+
+    let png = b"\x89PNG\r\n\x1a\npixels";
+    {
+        let mut library = fixture.library.lock().unwrap();
+        library.artwork.insert("10".into(), png);
+        library.artwork.insert("21".into(), png);
+    }
+    fs::write(&nfo, "manual revision").unwrap();
+    let staged = prepare_writeback(
+        &collector.client,
+        Some(&emby),
+        &paths,
+        &preview(&state),
+        &record,
+        &state,
+    )
+    .await;
+    let (_, report) = staged.publish("retry", state);
+    assert_eq!(report.failed, 0);
+    assert_eq!(report.written, 4);
+    for name in ["poster.png", "episode-thumb.png"] {
+        assert_eq!(fs::read(show.join(name)).unwrap(), png);
+    }
+    assert_eq!(fs::read_to_string(nfo).unwrap(), "manual revision");
+    assert_eq!(
+        fs::read_to_string(show.join("episode.mkv")).unwrap(),
+        "original video"
+    );
+}
+
+#[tokio::test]
+async fn manual_anime_repairs_validate_the_field_and_confirm_saved_metadata() {
+    let fixture = Fixture::new().await;
+    let collector = fixture.collector(None);
+    let emby = collector
+        .emby_settings()
+        .unwrap()
+        .automatic_connection(None)
+        .unwrap();
+    let mut original = episode("21", "episode.mkv", 1, 1, "2026-01-03");
+    original["Path"] = json!("/media/番剧/episode.mkv");
+    fixture.item(original.clone());
+    for (field, text) in [("Path", "/other"), ("Overview", " ")] {
+        let error = emby
+            .repair_anime_metadata(&collector.client, &original, field, text)
+            .await
+            .unwrap_err();
+        assert!(error.contains("修复字段或文字无效"));
+    }
+
+    fixture
+        .library
+        .lock()
+        .unwrap()
+        .rejected_fields
+        .insert("21".into(), "LockedFields");
+    let error = emby
+        .repair_anime_metadata(&collector.client, &original, "Name", "核对后的标题")
+        .await
+        .unwrap_err();
+    assert!(error.contains("没有确认补全写入"));
+    assert_eq!(fixture.saved("21")["Name"], "核对后的标题");
+    assert!(fixture.saved("21")["LockedFields"].is_null());
+
+    fixture.library.lock().unwrap().rejected_fields.clear();
+    fixture.item(original.clone());
+    assert!(
+        emby.repair_anime_metadata(&collector.client, &original, "Name", "核对后的标题")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        fixture.saved("21")["LockedFields"],
+        json!(["Name", "SortName"])
+    );
+    assert_eq!(fixture.saved("21")["ProviderIds"], original["ProviderIds"]);
+}
+
+#[derive(Default)]
+struct MemoryPersistence {
+    season: Option<(&'static str, &'static str, i32, Vec<u32>)>,
+    episodes: Vec<Value>,
+    airdate_verified: bool,
+    archive_error: Option<&'static str>,
+    snapshot_error: Option<&'static str>,
+    saved: Mutex<HashMap<(String, String), Value>>,
+}
+
+impl MemoryPersistence {
+    fn saved(&self, server: &str, item: &str) -> Option<Value> {
+        self.saved
+            .lock()
+            .unwrap()
+            .get(&(server.to_owned(), item.to_owned()))
+            .cloned()
+    }
+}
+
+impl ScrapePersistence for MemoryPersistence {
+    async fn ensure_available(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn verified_bangumi_season(
+        &self,
+        server: &str,
+        series: &str,
+        season: i32,
+    ) -> Result<Option<Vec<u32>>, String> {
+        Ok(self
+            .season
+            .as_ref()
+            .filter(|(s, id, n, _)| (*s, *id, *n) == (server, series, season))
+            .map(|(_, _, _, subjects)| subjects.clone()))
+    }
+
+    async fn archived_bangumi_episodes(&self, subjects: &[u32]) -> Result<Vec<Value>, String> {
+        assert_eq!(subjects, self.season.as_ref().unwrap().3);
+        self.archive_error
+            .map_or_else(|| Ok(self.episodes.clone()), |error| Err(error.into()))
+    }
+
+    async fn verified_episode_airdate(
+        &self,
+        server: &str,
+        item: &Value,
+        bangumi_id: u32,
+        local: Date,
+        official: Date,
+    ) -> Result<bool, String> {
+        assert_eq!(server, "100");
+        assert_eq!(item["Id"], "21");
+        assert_eq!(bangumi_id, 81);
+        assert_eq!(local.to_string(), "2026-01-02");
+        assert_eq!(official.to_string(), "2026-01-03");
+        Ok(self.airdate_verified)
+    }
+
+    async fn save_emby_item(
+        &self,
+        server: &str,
+        item: &str,
+        document: &Value,
+    ) -> Result<(), String> {
+        self.saved
+            .lock()
+            .unwrap()
+            .insert((server.to_owned(), item.to_owned()), document.clone());
+        Ok(())
+    }
+
+    async fn save_snapshot(&self, _: crate::LookupResponse) -> Option<String> {
+        self.snapshot_error.map(str::to_owned)
+    }
 }
 
 struct Database {
@@ -387,11 +738,10 @@ impl Database {
 }
 
 #[tokio::test]
-#[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
 async fn auto_backfill_keeps_existing_values_and_uses_verified_part_and_sequel_metadata() {
     let fixture = Fixture::new().await;
-    let database = Database::new().await;
-    let collector = fixture.collector(Some(database.url.as_str()));
+    let collector = fixture.collector(None);
+    let persistence = MemoryPersistence::default();
     let service = fixture.service(true, r#"{"10":{"2":[12,13]}}"#);
     let mut parent = json!({
         "Id":"10","Type":"Series","Path":"/media/show","Name":"Fixture Show","ProviderIds":{"Bangumi":"11"}
@@ -412,7 +762,10 @@ async fn auto_backfill_keeps_existing_values_and_uses_verified_part_and_sequel_m
     }));
     let mapped = fixture.event("Season-22.backfill");
     assert!(matches!(
-        service.process(&collector, &mapped).await.unwrap(),
+        service
+            .process_with(&collector, &mapped, &persistence)
+            .await
+            .unwrap(),
         Outcome::Enriched
     ));
     let saved = fixture.saved("22");
@@ -423,8 +776,7 @@ async fn auto_backfill_keeps_existing_values_and_uses_verified_part_and_sequel_m
         "Second season synopsis\n\nThird season synopsis"
     );
     assert!(saved["ProviderIds"]["Bangumi"].is_null());
-    let store = collector.require_store().await.unwrap();
-    let archived = store.emby_item("100", "22").await.unwrap().unwrap();
+    let archived = persistence.saved("100", "22").unwrap();
     assert_eq!(archived["Overview"], saved["Overview"]);
     assert_eq!(archived["ImageTags"], saved["ImageTags"]);
 
@@ -461,7 +813,10 @@ async fn auto_backfill_keeps_existing_values_and_uses_verified_part_and_sequel_m
     );
     let sequel = fixture.event("Season-23.backfill");
     assert!(matches!(
-        service.process(&collector, &sequel).await.unwrap(),
+        service
+            .process_with(&collector, &sequel, &persistence)
+            .await
+            .unwrap(),
         Outcome::Enriched
     ));
     assert_eq!(fixture.saved("23")["Overview"], "Third season synopsis");
@@ -472,19 +827,153 @@ async fn auto_backfill_keeps_existing_values_and_uses_verified_part_and_sequel_m
     fixture.item(unmapped);
     let missing = fixture.event("Episode-40.backfill");
     assert!(matches!(
-        service.process(&collector, &missing).await.unwrap(),
+        service
+            .process_with(&collector, &missing, &persistence)
+            .await
+            .unwrap(),
         Outcome::NoVerifiedSource
     ));
-    assert!(store.emby_item("100", "40").await.unwrap().is_none());
+    assert!(persistence.saved("100", "40").is_none());
     assert_eq!(fixture.library.lock().unwrap().writes, ["22", "23"]);
+}
 
-    drop(collector);
-    database.close().await;
+fn airdate_review_fixture(fixture: &Fixture) -> (AutoScrape, Value) {
+    let mut service = fixture.service(true, r#"{"10":{"2":[999]}}"#);
+    service.database_season_map = true;
+    fixture.item(json!({"Id":"10","Type":"Series","Name":"Fixture Show","Path":"/media/show"}));
+    fixture.episode_catalog(
+        12,
+        &[
+            bangumi_episode(81, 12, 1, "2026-01-03", "归来"),
+            bangumi_episode(82, 12, 2, "2026-01-10", "出发"),
+        ],
+    );
+    let mut item = episode("21", "S02E01.mkv", 2, 1, "2026-01-01T16:00:00Z");
+    item["Name"] = json!("人工核对标题");
+    item["Overview"] = json!("原简介继续保留");
+    item["ImageTags"]["Primary"] = json!("existing");
+    item["ProviderIds"]["Tvdb"] = json!("901");
+    fixture.item(item.clone());
+    (service, item)
+}
+
+#[tokio::test]
+async fn mapped_episode_uses_verified_airdate_or_timezone_before_writing() {
+    let fixture = Fixture::new().await;
+    let collector = fixture.collector(None);
+    let (service, mut item) = airdate_review_fixture(&fixture);
+    let mut persistence = MemoryPersistence {
+        season: Some(("100", "10", 2, vec![12])),
+        episodes: vec![
+            bangumi_episode(81, 12, 1, "2026-01-03", "归来"),
+            bangumi_episode(82, 12, 2, "2026-01-10", "出发"),
+        ],
+        ..MemoryPersistence::default()
+    };
+    let event = fixture.event("Episode-21.backfill");
+    assert!(matches!(
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
+        Outcome::AwaitingAirdateReview
+    ));
+    assert_eq!(fixture.saved("21"), item);
+    assert!(persistence.saved("100", "21").is_none());
+
+    persistence.airdate_verified = true;
+    assert!(matches!(
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
+        Outcome::Enriched
+    ));
+    item["ProviderIds"]["Bangumi"] = json!("81");
+    let saved = fixture.saved("21");
+    for field in [
+        "Name",
+        "Overview",
+        "ImageTags",
+        "PremiereDate",
+        "ProviderIds",
+    ] {
+        assert_eq!(saved[field], item[field], "{field}");
+    }
+    assert_eq!(persistence.saved("100", "21").unwrap(), saved);
+    let writes = fixture.library.lock().unwrap().writes.len();
+    assert!(matches!(
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
+        Outcome::Enriched
+    ));
+    assert_eq!(fixture.library.lock().unwrap().writes.len(), writes);
+
+    let mut boundary = episode("22", "S02E02.mkv", 2, 2, "2026-01-09T16:00:00Z");
+    boundary["Name"] = json!("已有标题");
+    fixture.item(boundary);
+    let event = fixture.event("Episode-22.backfill");
+    assert!(matches!(
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
+        Outcome::Enriched
+    ));
+    assert_eq!(fixture.saved("22")["ProviderIds"]["Bangumi"], "82");
+}
+
+#[tokio::test]
+async fn automatic_intake_uses_the_live_catalog_when_the_archive_is_unavailable() {
+    let fixture = Fixture::new().await;
+    let collector = fixture.collector(None);
+    let (service, complete) = airdate_review_fixture(&fixture);
+    let persistence = MemoryPersistence {
+        season: Some(("100", "10", 2, vec![12])),
+        archive_error: Some("catalog unavailable"),
+        snapshot_error: Some("snapshot write failed"),
+        ..MemoryPersistence::default()
+    };
+    let event = fixture.event("Episode-21.event");
+    let error = service
+        .process_with(&collector, &event, &persistence)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error, "catalog unavailable");
+    assert_eq!(fixture.saved("21"), complete);
+    assert!(persistence.saved("100", "21").is_none());
+
+    let show = fixture.directory.path().join("show");
+    fs::create_dir(&show).unwrap();
+    fs::write(show.join("S02E02.mkv"), "video").unwrap();
+    let mut item = episode("22", "S02E02.mkv", 2, 2, "2026-01-10");
+    item["SortName"] = json!("保持原排序名");
+    item["LockedFields"] = json!(["SortName"]);
+    fixture.item(item);
+    let event = fixture.event("Episode-22.event");
+    assert!(matches!(
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
+        Outcome::Written(1)
+    ));
+    let saved = fixture.saved("22");
+    assert_eq!(saved["Name"], "出发");
+    assert_eq!(saved["SortName"], "保持原排序名");
+    assert_eq!(saved["ProviderIds"]["Bangumi"], "82");
+    assert_eq!(persistence.saved("100", "22").unwrap(), saved);
+    let xml = fs::read_to_string(show.join("S02E02.nfo")).unwrap();
+    assert!(xml.contains("<title>出发</title>"), "{xml}");
+    assert!(fixture.library.lock().unwrap().refreshes.is_empty());
 }
 
 #[tokio::test]
 #[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
-async fn auto_intake_requires_verified_airdate_before_updating_mapped_episode_identity() {
+async fn postgres_auto_intake_requires_verified_airdate_before_updating_mapped_episode_identity() {
     let fixture = Fixture::new().await;
     let database = Database::new().await;
     let collector = fixture.collector(Some(database.url.as_str()));
@@ -508,22 +997,7 @@ async fn auto_intake_requires_verified_airdate_before_updating_mapped_episode_id
     .await
     .unwrap();
 
-    let mut service = fixture.service(true, r#"{"10":{"2":[999]}}"#);
-    service.database_season_map = true;
-    fixture.item(json!({"Id":"10","Type":"Series","Name":"Fixture Show","Path":"/media/show"}));
-    fixture.episode_catalog(
-        12,
-        &[
-            bangumi_episode(81, 12, 1, "2026-01-03", "归来"),
-            bangumi_episode(82, 12, 2, "2026-01-10", "出发"),
-        ],
-    );
-    let mut item = episode("21", "S02E01.mkv", 2, 1, "2026-01-01T16:00:00Z");
-    item["Name"] = json!("人工核对标题");
-    item["Overview"] = json!("原简介继续保留");
-    item["ImageTags"]["Primary"] = json!("existing");
-    item["ProviderIds"]["Tvdb"] = json!("901");
-    fixture.item(item.clone());
+    let (service, mut item) = airdate_review_fixture(&fixture);
     let event = fixture.event("Episode-21.backfill");
     assert!(matches!(
         service.process(&collector, &event).await.unwrap(),
@@ -578,11 +1052,10 @@ async fn auto_intake_requires_verified_airdate_before_updating_mapped_episode_id
 }
 
 #[tokio::test]
-#[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
 async fn auto_intake_tries_catalog_backup_and_verifies_tmdb_episode_credits() {
     let fixture = Fixture::new().await;
-    let database = Database::new().await;
-    let collector = fixture.collector(Some(database.url.as_str()));
+    let collector = fixture.collector(None);
+    let persistence = MemoryPersistence::default();
     let service = fixture.service(true, "{}");
 
     fixture.item(json!({
@@ -598,11 +1071,13 @@ async fn auto_intake_tries_catalog_backup_and_verifies_tmdb_episode_credits() {
     fixture.episode_catalog(11, &[bangumi_episode(83, 11, 1, "2026-01-01", "序章")]);
     let series = fixture.event("Series-10.backfill");
     assert!(matches!(
-        service.process(&collector, &series).await.unwrap(),
+        service
+            .process_with(&collector, &series, &persistence)
+            .await
+            .unwrap(),
         Outcome::Enriched
     ));
-    let store = collector.require_store().await.unwrap();
-    let archived = store.emby_item("100", "10").await.unwrap().unwrap();
+    let archived = persistence.saved("100", "10").unwrap();
     assert_eq!(archived["Overview"], "原有简介");
     assert_eq!(archived["ProviderIds"]["Tmdb"], "1000");
 
@@ -632,7 +1107,10 @@ async fn auto_intake_tries_catalog_backup_and_verifies_tmdb_episode_credits() {
     );
     let existing = fixture.event("Episode-25.backfill");
     assert!(matches!(
-        service.process(&collector, &existing).await.unwrap(),
+        service
+            .process_with(&collector, &existing, &persistence)
+            .await
+            .unwrap(),
         Outcome::Enriched
     ));
     let saved = fixture.saved("25");
@@ -641,7 +1119,7 @@ async fn auto_intake_tries_catalog_backup_and_verifies_tmdb_episode_credits() {
     assert_eq!(saved["People"][0]["Name"], "表演者");
     assert_eq!(saved["People"][0]["Role"], "角色");
     assert_eq!(
-        store.emby_item("100", "25").await.unwrap().unwrap()["People"],
+        persistence.saved("100", "25").unwrap()["People"],
         saved["People"]
     );
 
@@ -649,16 +1127,18 @@ async fn auto_intake_tries_catalog_backup_and_verifies_tmdb_episode_credits() {
     last["IndexNumberEnd"] = json!(3);
     fixture.item(last);
     let double = fixture.event("Episode-26.event");
-    let failure = service.process(&collector, &double).await.err().unwrap();
+    let failure = service
+        .process_with(&collector, &double, &persistence)
+        .await
+        .err()
+        .unwrap();
     assert!(failure.contains("多集文件需要确认季集匹配"), "{failure}");
-    assert!(store.emby_item("100", "26").await.unwrap().is_none());
-    drop(collector);
-    database.close().await;
+    assert!(persistence.saved("100", "26").is_none());
 }
 
 #[tokio::test]
 #[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
-async fn auto_queue_persists_completed_waiting_review_retry_and_expired_jobs() {
+async fn postgres_auto_queue_persists_completed_waiting_review_retry_and_expired_jobs() {
     let fixture = Fixture::new().await;
     let database = Database::new().await;
     let collector = fixture.collector(Some(database.url.as_str()));
@@ -1180,11 +1660,10 @@ async fn backup_catalog_requires_one_exact_title_and_year_across_aliases() {
 }
 
 #[tokio::test]
-#[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
 async fn auto_backfill_links_first_season_using_native_title_and_catalog_airdate() {
     let fixture = Fixture::new().await;
-    let database = Database::new().await;
-    let collector = fixture.collector(Some(database.url.as_str()));
+    let collector = fixture.collector(None);
+    let persistence = MemoryPersistence::default();
     let service = fixture.service(true, "{}");
     fixture.item(json!({
         "Id":"10","Type":"Series","Path":"/media/show","Name":"Fixture Show",
@@ -1214,7 +1693,10 @@ async fn auto_backfill_links_first_season_using_native_title_and_catalog_airdate
     for (id, bangumi, tmdb) in [("21", "81", "101"), ("22", "82", "102")] {
         let event = fixture.event(&format!("Episode-{id}.backfill"));
         assert!(matches!(
-            service.process(&collector, &event).await.unwrap(),
+            service
+                .process_with(&collector, &event, &persistence)
+                .await
+                .unwrap(),
             Outcome::Enriched
         ));
         let saved = fixture.saved(id);
@@ -1222,16 +1704,13 @@ async fn auto_backfill_links_first_season_using_native_title_and_catalog_airdate
         assert_eq!(saved["ProviderIds"]["Tmdb"], tmdb);
         assert_eq!(saved["Overview"], "来源简介");
     }
-    drop(collector);
-    database.close().await;
 }
 
 #[tokio::test]
-#[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
 async fn auto_season_intake_uses_three_episode_ids_when_season_dates_disagree() {
     let fixture = Fixture::new().await;
-    let database = Database::new().await;
-    let collector = fixture.collector(Some(database.url.as_str()));
+    let collector = fixture.collector(None);
+    let persistence = MemoryPersistence::default();
     let service = fixture.service(true, "{}");
     fixture.item(
         json!({"Id":"10","Type":"Series","Path":"/media/show","Name":"Fixture Show",
@@ -1261,7 +1740,10 @@ async fn auto_season_intake_uses_three_episode_ids_when_season_dates_disagree() 
     );
     let event = fixture.event("Season-20.backfill");
     assert!(matches!(
-        service.process(&collector, &event).await.unwrap(),
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
         Outcome::Enriched
     ));
     let saved = fixture.saved("20");
@@ -1275,11 +1757,13 @@ async fn auto_season_intake_uses_three_episode_ids_when_season_dates_disagree() 
     mismatch["ProviderIds"]["Tmdb"] = json!("999");
     fixture.item(mismatch.clone());
     let event = fixture.event("Season-30.backfill");
-    let error = service.process(&collector, &event).await.err().unwrap();
+    let error = service
+        .process_with(&collector, &event, &persistence)
+        .await
+        .err()
+        .unwrap();
     assert!(error.contains("需要核对分季映射"), "{error}");
     assert_eq!(fixture.saved("30"), mismatch);
-    drop(collector);
-    database.close().await;
 }
 
 #[tokio::test]
@@ -1324,7 +1808,7 @@ async fn cast_portraits_only_fetch_unambiguous_unfilled_people() {
 
 #[tokio::test]
 #[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
-async fn auto_worker_defers_events_during_an_emby_outage_and_recovers() {
+async fn postgres_auto_worker_defers_events_during_an_emby_outage_and_recovers() {
     let fixture = Fixture::new().await;
     let database = Database::new().await;
     let collector = Arc::new(fixture.collector(Some(database.url.as_str())));
@@ -1597,6 +2081,38 @@ async fn writeback_refuses_moved_locked_or_unconfirmed_episode_updates() {
         .library
         .lock()
         .unwrap()
+        .write_errors
+        .insert("21".into(), StatusCode::SERVICE_UNAVAILABLE);
+    let error = write(snapshot.clone()).await.unwrap_err();
+    assert!(error.contains("写入资料失败（HTTP 503）"), "{error}");
+    assert_eq!(fixture.saved("21"), snapshot);
+    fixture.library.lock().unwrap().write_errors.clear();
+    fixture
+        .library
+        .lock()
+        .unwrap()
+        .rejected_fields
+        .insert("21".into(), "People");
+    let people = [json!({"Name":"确认过的演员","Type":"Actor"})];
+    let error = emby
+        .enrich_automatic_item(
+            &collector.client,
+            &snapshot,
+            &record,
+            &people,
+            &TimeZone::UTC,
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("People"), "{error}");
+    assert_eq!(fixture.saved("21")["People"], snapshot["People"]);
+
+    fixture.item(snapshot.clone());
+    fixture
+        .library
+        .lock()
+        .unwrap()
         .rejected_fields
         .insert("21".into(), "Name");
     let error = write(snapshot.clone()).await.unwrap_err();
@@ -1721,11 +2237,10 @@ async fn conflicting_mapped_sources_only_fall_back_to_independently_verified_epi
 }
 
 #[tokio::test]
-#[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
 async fn auto_episode_identity_checks_tmdb_lookup_and_only_retries_source_failures() {
     let fixture = Fixture::new().await;
-    let database = Database::new().await;
-    let collector = fixture.collector(Some(database.url.as_str()));
+    let collector = fixture.collector(None);
+    let persistence = MemoryPersistence::default();
     let service = fixture.service(true, "{}");
     let mut item = episode("21", "E01.mkv", 1, 1, "2026-01-02");
     item["ProviderIds"]["Imdb"] = json!("tt2001");
@@ -1738,13 +2253,19 @@ async fn auto_episode_identity_checks_tmdb_lookup_and_only_retries_source_failur
     fixture.source("/tmdb/find/tt2001", found(999));
     let event = fixture.event("Episode-21.backfill");
     assert!(matches!(
-        service.process(&collector, &event).await.unwrap(),
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
         Outcome::NoVerifiedSource
     ));
     assert_eq!(fixture.saved("21"), item);
     fixture.source("/tmdb/find/tt2001", found(1000));
     assert!(matches!(
-        service.process(&collector, &event).await.unwrap(),
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
         Outcome::NoVerifiedSource
     ));
 
@@ -1755,7 +2276,11 @@ async fn auto_episode_identity_checks_tmdb_lookup_and_only_retries_source_failur
         .unwrap()
         .source_errors
         .insert(endpoint.into(), StatusCode::SERVICE_UNAVAILABLE);
-    let error = service.process(&collector, &event).await.err().unwrap();
+    let error = service
+        .process_with(&collector, &event, &persistence)
+        .await
+        .err()
+        .unwrap();
     assert!(error.contains("503"), "{error}");
     assert_eq!(fixture.saved("21"), item);
 
@@ -1766,7 +2291,10 @@ async fn auto_episode_identity_checks_tmdb_lookup_and_only_retries_source_failur
         "external_ids":{"imdb_id":"tt2001"}
     }));
     assert!(matches!(
-        service.process(&collector, &event).await.unwrap(),
+        service
+            .process_with(&collector, &event, &persistence)
+            .await
+            .unwrap(),
         Outcome::Enriched
     ));
     let saved = fixture.saved("21");
@@ -1776,8 +2304,6 @@ async fn auto_episode_identity_checks_tmdb_lookup_and_only_retries_source_failur
         saved["Overview"],
         "所属剧集暂不可用时仍保留已验证的单集资料。"
     );
-    drop(collector);
-    database.close().await;
 }
 
 #[tokio::test]
@@ -1925,7 +2451,7 @@ async fn intake_does_not_publish_metadata_when_catalog_enrichment_cannot_be_veri
 
 #[tokio::test]
 #[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
-async fn auto_queue_preserves_waiting_title_schedule_and_archives_configuration_errors() {
+async fn postgres_auto_queue_preserves_waiting_title_schedule_and_archives_configuration_errors() {
     let fixture = Fixture::new().await;
     let database = Database::new().await;
     let collector = fixture.collector(Some(database.url.as_str()));

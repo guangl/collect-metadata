@@ -3,7 +3,7 @@ use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions};
 
 #[tokio::test]
 #[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
-async fn auto_retry_state_survives_restart_and_fences_expired_workers() {
+async fn postgres_auto_retry_state_survives_restart_and_fences_expired_workers() {
     let options = std::env::var("COLLECT_METADATA_TEST_POSTGRES")
         .unwrap()
         .parse::<PgConnectOptions>()

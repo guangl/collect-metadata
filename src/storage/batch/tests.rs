@@ -22,7 +22,7 @@ async fn test_database() -> (PgPool, PgConnectOptions, String) {
 #[cfg(feature = "web")]
 #[tokio::test]
 #[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
-async fn complete_bangumi_archives_keep_part_order_and_ignore_stale_rows() {
+async fn postgres_complete_bangumi_archives_keep_part_order_and_ignore_stale_rows() {
     let (admin, options, schema) = test_database().await;
     let store = Store::connect(&options).await.unwrap();
     sqlx::raw_sql(include_str!("../../../tools/anime-catalog/schema.sql"))
@@ -69,7 +69,7 @@ async fn claim_when_free(store: &Store) -> Claim {
 
 #[tokio::test]
 #[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
-async fn clearing_history_deletes_standalone_snapshots_and_keeps_batch_results() {
+async fn postgres_clearing_history_deletes_standalone_snapshots_and_keeps_batch_results() {
     let (admin, options, schema) = test_database().await;
     let store = Store::connect(&options).await.unwrap();
     let document = json!({
@@ -144,7 +144,7 @@ async fn clearing_history_deletes_standalone_snapshots_and_keeps_batch_results()
 
 #[tokio::test]
 #[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
-async fn correction_reuses_the_row_and_saves_only_a_successful_match() {
+async fn postgres_correction_reuses_the_row_and_saves_only_a_successful_match() {
     let (admin, options, schema) = test_database().await;
     let store = Store::connect(&options).await.unwrap();
     let files = vec!["Movies/Dark (2017)/Dark S01E01.mkv".to_owned()];
@@ -253,7 +253,7 @@ async fn correction_reuses_the_row_and_saves_only_a_successful_match() {
 
 #[tokio::test]
 #[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
-async fn expired_claims_are_reclaimed_and_finishing_is_atomic() {
+async fn postgres_expired_claims_are_reclaimed_and_finishing_is_atomic() {
     let (admin, options, schema) = test_database().await;
     let first = Store::connect(&options).await.unwrap();
     let second = Store::connect(&options).await.unwrap();
@@ -386,7 +386,7 @@ async fn expired_claims_are_reclaimed_and_finishing_is_atomic() {
 }
 #[tokio::test]
 #[ignore = "需要 COLLECT_METADATA_TEST_POSTGRES 指向可创建测试 schema 的 PostgreSQL"]
-async fn batch_controls_are_persisted_and_revoke_active_claims() {
+async fn postgres_batch_controls_are_persisted_and_revoke_active_claims() {
     let (admin, options, schema) = test_database().await;
     let store = Store::connect(&options).await.unwrap();
     let id = store

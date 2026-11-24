@@ -322,16 +322,22 @@ MCP 可以查询公开候选和 Emby 媒体库、筛缺资料、提交普通或 
 
 GitHub CI 在推送 `main` 或提交 PR 时运行前端测试与构建、Rust 桌面和 Web 测试、临时 PostgreSQL 的队列和模拟 Emby 集成测试，以及 Emby 插件构建和整理规则检查。这些检查使用测试配置，无需私有凭据。`npm run test:coverage` 检查 TypeScript 源文件的行覆盖率，门槛为 85%。
 
-PostgreSQL 集成任务还检查 Emby 自动入库、分集匹配、队列持久化、写回和 NFO 生成的合计行覆盖率，门槛为 95%。检查脚本输出各文件的覆盖率和按可执行行数计算的合计覆盖率。该任务使用临时 PostgreSQL 和本地模拟服务。[核心覆盖率检查](tools/check_core_coverage.py)
-
-本地可使用相同的 Rust Web 功能和测试集，先设置指向隔离数据库的 `COLLECT_METADATA_TEST_POSTGRES`，再运行：
+Emby 核心业务的合计行覆盖率门槛为 95%，覆盖自动入库处理、来源匹配、元数据写回和 NFO 生成。核心测试使用本地模拟来源和内存持久化替身，无需 PostgreSQL。检查脚本按可执行行数汇总覆盖率。[核心覆盖率检查](tools/check_core_coverage.py)
 
 ```sh
 npm run build
-EMBY_SYNC_TOKEN=fixture-key cargo llvm-cov --locked --no-default-features --features web \
+env -u DATABASE_URL -u PGHOST -u COLLECT_METADATA_TEST_POSTGRES \
+  cargo llvm-cov --locked --no-default-features --features web \
   --lib --bin collect-metadata-web --json --summary-only --output-path /tmp/collect-metadata-coverage.json \
-  -- --include-ignored --skip collect::tests::live_ --test-threads=1
+  -- --test-threads=1
 python3 tools/check_core_coverage.py /tmp/collect-metadata-coverage.json
+```
+
+PostgreSQL 集成任务验证历史、队列租约与重试、已核对的季集映射和同步记录的持久化。本地运行前设置 `COLLECT_METADATA_TEST_POSTGRES` 指向隔离数据库，连接账户需有建 schema 权限。
+
+```sh
+EMBY_SYNC_TOKEN=fixture-key cargo test --locked --no-default-features --features web \
+  --lib --bin collect-metadata-web ::postgres_ -- --ignored --test-threads=1
 ```
 
 Rust 的完整覆盖率检查还包含 PostgreSQL 集成测试及实际来源采集。运行前设置 `COLLECT_METADATA_TEST_POSTGRES`（连接账户需有建 schema 权限）和 `TMDB_READ_ACCESS_TOKEN`，并确保能连接测试使用的公开来源。

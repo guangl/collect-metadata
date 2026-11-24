@@ -191,3 +191,21 @@ async fn retry_reuses_confirmed_artwork_and_reports_invalid_fallback_sources() {
     );
     assert!(!root.path().join("movie-fanart.jpg").exists());
 }
+
+#[tokio::test]
+async fn staging_rejects_blocked_destinations_and_missing_staging_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let mut destination = Destination {
+        name: "episode.nfo".into(),
+        existing: Existing::Blocked,
+    };
+    let error = stage_file(root.path(), &destination, "new NFO").await.err().unwrap();
+    assert!(error.contains("目标不是普通文件"), "{error}");
+    destination.existing = Existing::Missing;
+    let error = stage_file(&root.path().join("absent"), &destination, "new NFO")
+        .await
+        .err()
+        .unwrap();
+    assert!(error.contains("无法暂存写回文件"), "{error}");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}

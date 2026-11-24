@@ -47,9 +47,35 @@ jobs:
       - run: rustup toolchain install 1.100.0 --profile minimal
       - run: cargo +1.100.0 test --locked --all-features
 
+  core:
+    name: Emby core line coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+      - name: Install Rust coverage tools
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component llvm-tools
+          cargo +1.100.0 install cargo-llvm-cov --version 0.8.7 --locked
+      - name: Enforce 95% core line coverage
+        run: |
+          cargo +1.100.0 llvm-cov --locked --no-default-features --features web \
+            --lib --bin collect-metadata-web --json --summary-only \
+            --output-path "${RUNNER_TEMP}/collect-metadata-coverage.json" \
+            -- --test-threads=1
+          python3 tools/check_core_coverage.py "${RUNNER_TEMP}/collect-metadata-coverage.json"
 
   postgres:
-    name: PostgreSQL queue and Emby integration
+    name: PostgreSQL persistence integration
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -78,17 +104,11 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
-      - name: Install Rust coverage tools
+      - run: rustup toolchain install 1.100.0 --profile minimal
+      - name: Test PostgreSQL persistence
         run: |
-          rustup toolchain install 1.100.0 --profile minimal --component llvm-tools
-          cargo +1.100.0 install cargo-llvm-cov --version 0.8.7 --locked
-      - name: Test PostgreSQL integration and enforce 95% core line coverage
-        run: |
-          cargo +1.100.0 llvm-cov --locked --no-default-features --features web \
-            --lib --bin collect-metadata-web --json --summary-only \
-            --output-path "${RUNNER_TEMP}/collect-metadata-coverage.json" \
-            -- --include-ignored --skip collect::tests::live_ --test-threads=1
-          python3 tools/check_core_coverage.py "${RUNNER_TEMP}/collect-metadata-coverage.json"
+          cargo +1.100.0 test --locked --no-default-features --features web \
+            --lib --bin collect-metadata-web ::postgres_ -- --ignored --test-threads=1
 
   emby-plugin:
     name: Build Emby plugin and verify organizer rules

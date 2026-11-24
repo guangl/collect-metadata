@@ -624,6 +624,20 @@ fn existing_nfo_title_patch_keeps_other_bytes_and_requires_matching_episode() {
     assert!(fill_episode_title(original, &item, "Different").is_none());
 }
 
+#[cfg(all(test, feature = "web"))]
+#[test]
+fn season_plot_patch_rejects_ambiguous_or_incomplete_documents() {
+    for xml in [
+        "<movie><seasonnumber>2</seasonnumber><plot/></movie>",
+        "<season><seasonnumber>2</seasonnumber><plot/><plot/></season>",
+        "<season><seasonnumber>2</seasonnumber><plot>Existing</plot><plot>Duplicate</plot></season>",
+        "<!DOCTYPE season><season><seasonnumber>2</seasonnumber><plot/></season>",
+        "<season><seasonnumber>2</seasonnumber><plot/>",
+    ] {
+        assert!(fill_season_plot(xml, 2, "New plot").is_none(), "{xml}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -693,6 +707,25 @@ mod tests {
         ] {
             assert!(!docs["movie.nfo"].contains(&format!("<{field}>")));
         }
+    }
+
+    #[test]
+    fn exports_artwork_and_imdb_votes_with_a_safe_video_name() {
+        let record = json!({
+            "media_type": "movie",
+            "query": "Fallback title",
+            "fields": {
+                "backdrop_url": "https://example.com/fanart.jpg",
+                "imdb_rating": {"value": 8.1, "count": 370}
+            }
+        });
+        let paths = ["movie.mkv".to_owned(), "unsafe:name.mkv".to_owned()];
+        let docs = documents(&record, &OutputOptions::default(), &paths, &[]);
+        assert_eq!(docs.len(), 1);
+        let xml = &docs["movie.nfo"];
+        assert!(xml.contains("<title>Fallback title</title>"));
+        assert!(xml.contains("<fanart><thumb>https://example.com/fanart.jpg</thumb></fanart>"));
+        assert!(xml.contains("<value>8.1</value><votes>370</votes>"));
     }
 
     #[test]

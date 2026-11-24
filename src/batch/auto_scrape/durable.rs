@@ -71,7 +71,7 @@ impl AutoScrape {
         .collect()
     }
 
-    pub(super) async fn run_durable(self, collector: std::sync::Arc<Collector>) {
+    pub async fn run(self, collector: std::sync::Arc<Collector>) {
         eprintln!("Collect Metadata automatic scrape using PostgreSQL durable queue");
         loop {
             if let Err(error) = self.durable_cycle(&collector).await {
@@ -437,7 +437,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "需要隔离的 COLLECT_METADATA_TEST_POSTGRES"]
-    async fn auto_startup_gate_survives_collector_restart_without_consuming_attempts() {
+    async fn postgres_auto_startup_gate_survives_collector_restart_without_consuming_attempts() {
         use axum::{
             Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get,
         };

@@ -7,7 +7,6 @@ from pathlib import Path
 MINIMUM_PERCENT = 95
 CORE_FILES = (
     "src/batch/auto_scrape.rs",
-    "src/batch/auto_scrape/durable.rs",
     "src/collect/emby/automatic.rs",
     "src/providers/media/bangumi.rs",
     "src/providers/media/tmdb/episode_groups.rs",
@@ -15,7 +14,6 @@ CORE_FILES = (
     "src/providers/media/emby/automatic.rs",
     "src/output/emby/publish.rs",
     "src/output/nfo.rs",
-    "src/storage/auto_scrape.rs",
 )
 
 
